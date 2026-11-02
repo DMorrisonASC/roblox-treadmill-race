@@ -28,35 +28,71 @@ export const BELT_SPEED_ATTRIBUTE = "BeltSpeed";
 /** **Placeholder** belt speed in studs/second. A gameplay constant with no other config to derive it from. */
 export const DEFAULT_BELT_SPEED = 10;
 
-/** Attribute on a `BallSpawner` part: ball radius in studs. Ball diameter is twice this. */
-export const SPAWNER_RADIUS_ATTRIBUTE = "Radius";
-/** **Placeholder** ball radius in studs. */
-export const DEFAULT_SPAWNER_RADIUS = 0.5;
-
-/** Attribute on a `BallSpawner` part: whether the timed stream is running. */
-export const SPAWNER_ENABLED_ATTRIBUTE = "Enabled";
 /**
- * **Placeholder** default for `Enabled`: a tagged spawner streams.
+ * `Radius` is retired. There is deliberately no constant for it below.
  *
- * Reversed from `false`. `false` meant tagging a part produced silence, which forced the Studio step
- * this file exists to remove, and that silence was indistinguishable from a dead service. The cost
- * of `true` is that a spawner you tagged only to inspect it starts dropping balls immediately; the
- * fix for that is to untick `Enabled`, which is one click and leaves a visible record that you did.
+ * ## Why the sphere radius stopped being an attribute
+ *
+ * The paragraph at the top of this file argues that services derive attributes at bind, and that
+ * argument still holds for everything here except this. `Radius` is the exception because it stopped
+ * being a property *of the spawner*: once the spawner chooses from a shape pool, the size a spawn
+ * uses is a property of the chosen pool entry, and the pool is code (`shared/shape-pool.ts`). A
+ * "radius" attribute on a part that spawns cylinders and blocks is ambiguous in two directions at
+ * once — a cylinder has no radius, and a 1x3x1 block has three different ones — so any number left
+ * in those slots would be a value that is displayed, editable, and ignored. A visible-but-inert
+ * attribute is worse than no attribute, because the next person tunes it and watches nothing happen.
+ *
+ * The alternative — keeping `Radius` and scaling pool sizes by it — was rejected because it makes
+ * every shape's silhouette a function of a scalar, which cannot express "the block is 3x taller than
+ * it is wide". The pool carries explicit `Vector3` sizes precisely so that ratio is visible in code.
+ *
+ * A spawner carrying `Radius` from an earlier round keeps the attribute (nothing here deletes a
+ * designer's data) but the code ignores it, and the bind log says so once.
  */
-export const DEFAULT_SPAWNER_ENABLED = true;
 
-/** Attribute on a `BallSpawner` part: balls spawned per second while enabled. */
-export const SPAWNER_RATE_ATTRIBUTE = "Rate";
-/** **Placeholder** spawn rate in balls/second. */
-export const DEFAULT_SPAWNER_RATE = 2;
+/**
+ * `Enabled` and `Rate` are retired. Neither name is read anywhere any more.
+ *
+ * ## A reversal, recorded rather than appended
+ *
+ * `Enabled` has now been through three positions, and the last one is the one being undone. It
+ * started as `false`; that was reversed to `true` on the argument that tagging a part should start a
+ * stream with no Properties-panel step, and that the cost of `true` — a tagged spawner immediately
+ * dropping balls — was one untick away. That argument assumed a *stream* was the point.
+ *
+ * It is not, for two reasons that only became visible once the stream existed. First, the user's
+ * actual game is one body per round, so eight bodies a second across four spawners modelled a scene
+ * that does not exist. Second, and worse, it actively prevented the question being answered: at
+ * `Rate = 2` × 4 spawners against `MaxLiveBalls = 50` the scene is a permanent mosh pit of
+ * overlapping bodies in four lanes, where collisions and the 1 s bounce cooldown interrupt any
+ * rolling every ~150 ms. Every observation about whether a body *rolls* or *slides* was being made
+ * inside that pit. The default was not merely unused, it was confounding the measurement.
+ *
+ * So the spawner now spawns **exactly one body per bound `BallSpawner`, once, at server start**, and
+ * never again. `Rate` goes with `Enabled` because with no timer there is no rate to express.
+ *
+ * Both are *removed* rather than left derived-but-unread. This file's own rule is that a
+ * visible-but-inert attribute is worse than no attribute, because the next person tunes it and
+ * watches nothing happen — the same reason `Radius` was retired above. A later round that
+ * reintroduces timing adds both back, with a consumer.
+ *
+ * The manual `1` key path is untouched by this: it never read either attribute, and it remains the
+ * way to spawn additional bodies for collision testing without a code change.
+ */
 
 /**
  * Attribute on a `BallSpawner` part: balls below this world Y are destroyed.
  *
  * Deliberately has no duration constant. It is derived from `Workspace.FallenPartsDestroyHeight`
- * plus one ball diameter — see `deriveKillY` in `BallSpawnerService`. A picked number cannot stay
- * correct if the place's floor changes, and the first draft's `-50` sat 450 studs above the engine's
- * own default floor of -500, so it would have culled balls while they were still visibly falling.
+ * plus the largest dimension in the shape pool — see `deriveKillY` in `BallSpawnerService`. A picked
+ * number cannot stay correct if the place's floor changes, and the first draft's `-50` sat 450 studs
+ * above the engine's own default floor of -500, so it would have culled balls while they were still
+ * visibly falling.
+ *
+ * The offset used to be one ball diameter (`2 * radius`). Retiring `Radius` removed the only input
+ * that expression had, so it is now `poolMaxExtent()`: the same idea — "one body-size above the
+ * floor" — measured against the largest body the pool can produce rather than against a single
+ * sphere. That keeps the plane below every shape in the pool instead of below an arbitrary one.
  */
 export const SPAWNER_KILL_Y_ATTRIBUTE = "KillY";
 

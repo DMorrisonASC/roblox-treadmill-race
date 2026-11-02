@@ -14,6 +14,18 @@ export const TAGS = {
 	treadmillBelt: "TreadmillBelt",
 	/** BaseParts that act as ball factories for `BallSpawnerService`. */
 	ballSpawner: "BallSpawner",
-	/** Applied to every ball the server spawns, so cleanup can count them. */
+	/**
+	 * Applied to every ball the server spawns, so cleanup can count them.
+	 *
+	 * Deliberately **not** applied to the welded pole markers and equator ring. Those are children of
+	 * the ball and would otherwise be counted as live bodies by the cleanup pass and by the diagnostic
+	 * lane-occupancy count, which would inflate both by a factor of four.
+	 */
 	ball: "Ball",
+	/**
+	 * Applied to each welded visual marker (two poles, one ring) so a later cleanup or debugging pass
+	 * can find them without walking every ball's children. Nothing reads this tag today: the markers
+	 * are children of the ball, so `Destroy()` on the ball takes them with it.
+	 */
+	ballDecoration: "BallDecoration",
 } as const;
