@@ -19,10 +19,13 @@ import { TAGS } from "shared/tags";
 import {
 	BALL_BACKSPIN_COOLDOWN,
 	BALL_BACKSPIN_ENABLED,
-	BALL_BACKSPIN_IMPULSE,
+	BALL_BACKSPIN_TARGET_SLIP,
 	BALL_TEXTURE_ASSET,
 	BALL_TEXTURE_OFFSET_RANGE,
 	BALL_TEXTURE_OFFSET_RANGE_V,
+	WALL_ASSIST_ENABLED,
+	WALL_ASSIST_IMPULSE,
+	WALL_ASSIST_TARGET_SPEED,
 } from "shared/tuning";
 
 /**
@@ -352,6 +355,17 @@ export class BallSpawnerService implements OnStart {
 	 */
 	private readonly backspinConnections = new Map<BasePart, RBXScriptConnection>();
 	private readonly lastBackspinAt = new Map<BasePart, number>();
+
+	/**
+	 * The separate `Touched` connection each ball holds for wall contacts.
+	 *
+	 * A second map rather than a second slot in `backspinConnections`, because the two handlers are
+	 * independent: either can be disabled without the other, and folding them into one array would make
+	 * every reader work out which entry is which. The cost is that `releaseBackspin` and
+	 * `releaseWallAssist` are both called on death — two lines in each of the two death paths, which is
+	 * cheaper to read than a tagged union.
+	 */
+	private readonly wallAssistConnections = new Map<BasePart, RBXScriptConnection>();
 
 	/** TEMPORARY INSTRUMENTATION. Bodies whose texture creation has logged; see `BALL_TEXTURE_LOG_LIMIT`. */
 	private ballTextureLogs = 0;
@@ -803,6 +817,12 @@ export class BallSpawnerService implements OnStart {
 		// DataModel when its `Touched` connection is made.
 		this.attachBackspin(ball);
 
+		// Second connection, separate concern. Both handlers fire on every `Touched` and return early
+		// when the tag does not match, so a ball-ball event costs one extra `HasTag` on the wall handler
+		// and vice versa. That is cheaper than a shared handler that has to branch on two tags, and it
+		// keeps the two features independently switchable.
+		this.attachWallAssist(ball);
+
 		// TEMPORARY INSTRUMENTATION. Before `liveBalls.push`, so the spawn line always precedes any
 		// observation of this ball; the observation loop only ever sees balls that already logged.
 		this.beginBallObservation(ball, spawner, entry);
@@ -915,23 +935,119 @@ export class BallSpawnerService implements OnStart {
 		const axis = axisRaw.Unit;
 
 		const radius = ball.Size.Y / 2;
-		ball.AssemblyAngularVelocity = ball.AssemblyAngularVelocity.add(axis.mul(BALL_BACKSPIN_IMPULSE));
+		const beltSpeed = this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED);
+		const alongRight = ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector);
+		const omegaBefore = ball.AssemblyAngularVelocity.Dot(axis);
+		const slipBefore = alongRight + omegaBefore * radius - beltSpeed;
+
+		// **Converge to the target, do not add to it.** The previous version added a constant `60 rad/s`
+		// on every qualifying contact, which compounded: a Studio log showed `omega * r` climbing from 30
+		// to 56.6 over one session because a ball resting against another re-fires `Touched` indefinitely.
+		// Computing the deficit and adding only that makes this idempotent — the second and four-hundredth
+		// contact in a pile-up find the slip already at target and add nothing.
+		//
+		// The guard is `>=` rather than an equality test: a ball can arrive here already spinning faster
+		// than the target (two simultaneous collisions, or a target lowered between builds), and this must
+		// never *reduce* spin — that would be the code undoing a physical collision it did not cause.
+		if (slipBefore >= BALL_BACKSPIN_TARGET_SLIP) {
+			return;
+		}
+
+		const addedOmega = (BALL_BACKSPIN_TARGET_SLIP - slipBefore) / radius;
+		ball.AssemblyAngularVelocity = ball.AssemblyAngularVelocity.add(axis.mul(addedOmega));
 
 		this.lastBackspinAt.set(ball, now);
 
-		// One line per impulse, and the only diagnostic in this feature. It exists to settle the one thing
-		// source cannot: whether `+Z` really is the direction that produces backspin in this engine. The
-		// sign of `slip` answers it — positive means the contact point is moving faster than the belt, so
-		// friction is pushing the ball backward, which is the mechanic working. Negative means the impulse
-		// sped the ball up instead and the sign needs inverting.
-		const beltSpeed = this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED);
-		const alongRight = ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector);
-		const omega = ball.AssemblyAngularVelocity.Dot(axis);
-		const slip = alongRight + omega * radius - beltSpeed;
-
+		// One line per applied impulse, and the only diagnostic in this feature. It exists to settle the
+		// one thing source cannot: whether `+Z` really is the direction that produces backspin in this
+		// engine. The sign of `slip` answers it — positive means the contact point is moving faster than
+		// the belt, so friction pushes the ball backward, which is the mechanic working. Negative means the
+		// applied sign sped the ball up instead and `axis` needs negating.
+		//
+		// `dv` is the velocity change that slip will resolve to once rolling re-establishes, `-slip/3.5`
+		// for a solid sphere. It is printed because it is the number to compare against the observed exit
+		// velocity, and because it makes the `3.5` factor visible rather than buried in a comment.
+		const slipAfter = slipBefore + addedOmega * radius;
 		print(
-			`[Ball] backspin impulse: dOmega=${formatNumber(BALL_BACKSPIN_IMPULSE)} r=${formatNumber(radius)} v=${formatNumber(alongRight)} omegaR=${formatNumber(omega * radius)} u=${formatNumber(beltSpeed)} slip=${formatNumber(slip)} ${slip > 0 ? "contact faster than belt -> friction pushes BACKWARD" : "contact slower than belt -> friction pushes FORWARD (sign inverted)"}`,
+			`[Ball] backspin: addedOmega=${formatNumber(addedOmega)} r=${formatNumber(radius)} v=${formatNumber(alongRight)} omegaR=${formatNumber(omegaBefore * radius)}->${formatNumber((omegaBefore + addedOmega) * radius)} u=${formatNumber(beltSpeed)} slip=${formatNumber(slipBefore)}->${formatNumber(slipAfter)} predictedDv=${formatNumber(-slipAfter / 3.5)} ${slipAfter > 0 ? "contact faster than belt -> friction pushes BACKWARD" : "contact slower than belt -> friction pushes FORWARD (sign inverted)"}`,
 		);
+	}
+
+	// #endregion
+
+	// #region wall assist
+
+	/**
+	 * Connects a ball's `Touched` signal to the wall-add speed handler.
+	 *
+	 * **This is a copy of `attachBackspin`/`applyBackspin` above, deliberately.** Three rounds of
+	 * bespoke wall mechanisms — a cooldown-gated impulse, then a `VectorForce` with `TouchEnded`
+	 * cleanup — produced no observable motion, while the ball-ball handler directly above has worked
+	 * for several rounds on the same kind of event (a tagged part touching a ball). The shape that
+	 * works is: one `Touched` connection per ball, a tag filter that returns early, a convergent check
+	 * against a target, one velocity write, no clock.
+	 *
+	 * The only deliberate divergence is the convergence *rate*. `applyBackspin` adds the whole
+	 * remaining deficit in one event; this adds `min(WALL_ASSIST_IMPULSE, deficit)`, so a ball ramps
+	 * over several contacts instead of jumping. That is because the user's complaint about the previous
+	 * velocity write was specifically that a single-frame jump does not read as a push. See
+	 * `WALL_ASSIST_IMPULSE`.
+	 *
+	 * Attached separately from the backspin connection rather than sharing it: the two handlers answer
+	 * to different tags and either constant can be switched off independently without the other.
+	 */
+	private attachWallAssist(ball: BasePart): void {
+		if (!WALL_ASSIST_ENABLED) {
+			return;
+		}
+
+		const connection = ball.Touched.Connect((other) => this.applyWallAssist(ball, other));
+		this.wallAssistConnections.set(ball, connection);
+	}
+
+	/**
+	 * Adds forward velocity to a ball that touched a `TreadmillWall`-tagged part.
+	 *
+	 * Convergent, per-event, and clockless — see `WALL_ASSIST_IMPULSE` and `WALL_ASSIST_TARGET_SPEED`
+	 * for the arithmetic. The structure mirrors `applyBackspin` line for line: filter, look up the
+	 * belt, read the current state, bail if already at target, apply one bounded write.
+	 */
+	private applyWallAssist(ball: BasePart, other: BasePart): void {
+		// A wall, or nothing. Balls, the slab, the belt, the welded markers and players all reach this
+		// handler and must not push the ball forward.
+		if (!other.HasTag(TAGS.treadmillWall)) {
+			return;
+		}
+
+		// Same belt lookup the backspin handler uses — `nearestBeltTo` on the ball's position, resolved
+		// per event. Deliberately not a spawn-time capture: the backspin handler does not cache one, and
+		// two handlers in the same file disagreeing about where the belt reference comes from is how a
+		// bug gets planted. A ball with no belt nearby gets no push, because there is no forward.
+		const belt = this.nearestBeltTo(ball.Position);
+		if (belt === undefined) {
+			return;
+		}
+
+		const forward = belt.CFrame.RightVector;
+		const alongRight = ball.AssemblyLinearVelocity.Dot(forward);
+
+		// The convergence gate **is** the gate. There is no cooldown and no timestamp: a ball already at
+		// target produces a non-positive delta on every subsequent `Touched`, so repeated firings during
+		// one continuous contact are no-ops. That is the idempotence, and it is why the per-event
+		// frequency cannot cause a runaway — the bound is on the outcome, not on the event rate.
+		//
+		// `>=` rather than `===`: a ball can arrive already faster than target (a collision, or a target
+		// lowered between builds) and this must never *reduce* speed — that would be the code undoing
+		// motion it did not cause.
+		const delta = math.min(WALL_ASSIST_IMPULSE, WALL_ASSIST_TARGET_SPEED - alongRight);
+		if (delta <= 0) {
+			return;
+		}
+
+		// Along `+RightVector` only. No component along Z, which would be a shove into or away from the
+		// wall — the engine's collision response already handled that, and adding to it would turn a
+		// speed giver into an unrequested bounce.
+		ball.AssemblyLinearVelocity = ball.AssemblyLinearVelocity.add(forward.Unit.mul(delta));
 	}
 
 	// #endregion
@@ -966,6 +1082,7 @@ export class BallSpawnerService implements OnStart {
 			if (ball.Parent === undefined) {
 				this.ballKillY.delete(ball);
 				this.releaseBackspin(ball);
+				this.releaseWallAssist(ball);
 			} else {
 				surviving.push(ball);
 			}
@@ -984,6 +1101,15 @@ export class BallSpawnerService implements OnStart {
 		this.backspinConnections.get(ball)?.Disconnect();
 		this.backspinConnections.delete(ball);
 		this.lastBackspinAt.delete(ball);
+	}
+
+	/**
+	 * Drops the wall-assist connection for one ball. Same reasoning as `releaseBackspin`: a destroyed
+	 * instance raises nothing, so this exists to keep the map from growing by one entry per ball.
+	 */
+	private releaseWallAssist(ball: BasePart): void {
+		this.wallAssistConnections.get(ball)?.Disconnect();
+		this.wallAssistConnections.delete(ball);
 	}
 
 	private enforceCap(): void {
@@ -1034,6 +1160,7 @@ export class BallSpawnerService implements OnStart {
 
 		this.ballKillY.delete(ball);
 		this.releaseBackspin(ball);
+		this.releaseWallAssist(ball);
 		const index = this.liveBalls.indexOf(ball);
 		if (index !== -1) {
 			this.liveBalls.remove(index);
@@ -1630,7 +1757,7 @@ export class BallSpawnerService implements OnStart {
 
 		const velocity = ball.AssemblyLinearVelocity;
 		print(
-			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(belt.CFrame.PointToObjectSpace(ball.Position))} velocity=${formatVector(velocity)} alongRight=${formatNumber(velocity.Dot(belt.CFrame.RightVector))} beltVelocity=${formatVector(belt.AssemblyLinearVelocity)} ${this.describeOwner(ball)}`,
+			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(belt.CFrame.PointToObjectSpace(ball.Position))} velocity=${formatVector(velocity)} alongRight=${formatNumber(velocity.Dot(belt.CFrame.RightVector))} beltVelocity=${formatVector(this.surfaceVelocityOf(belt))} ${this.describeOwner(ball)}`,
 		);
 	}
 
@@ -1669,6 +1796,19 @@ export class BallSpawnerService implements OnStart {
 	// #endregion
 
 	// #region attribute reads
+
+	/**
+	 * The moving surface's real velocity for a belt, or zero if it cannot be found.
+	 *
+	 * The sample line used to print `belt.AssemblyLinearVelocity`, which has been zero since the slab
+	 * mechanism replaced the anchored-belt velocity — so every sample read `beltVelocity=(0, 0, 0)`
+	 * next to a ball moving at 3 studs/s, which reads as "the belt has stopped". The surface is the thing
+	 * that actually moves, so it is the thing worth printing.
+	 */
+	private surfaceVelocityOf(belt: BasePart): Vector3 {
+		const surface = belt.FindFirstChild("TreadmillSurface");
+		return surface !== undefined && surface.IsA("BasePart") ? surface.AssemblyLinearVelocity : Vector3.zero;
+	}
 
 	private readNumber(part: Instance, attribute: string, fallback: number): number {
 		const raw = part.GetAttribute(attribute);

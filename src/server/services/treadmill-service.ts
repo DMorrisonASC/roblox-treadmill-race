@@ -708,6 +708,8 @@ export class TreadmillService implements OnStart {
 		}
 	}
 
+	// #endregion
+
 	private applySpeed(part: BasePart, reason: string): void {
 		if (!part.Anchored) {
 			// An unanchored "belt" cannot hold a constraint origin steady, so the slab would drift with

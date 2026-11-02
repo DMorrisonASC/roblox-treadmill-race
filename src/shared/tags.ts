@@ -28,4 +28,18 @@ export const TAGS = {
 	 * are children of the ball, so `Destroy()` on the ball takes them with it.
 	 */
 	ballDecoration: "BallDecoration",
+	/**
+	 * BaseParts that act as a "speed giver" — a ball touching one gets a small forward impulse. See
+	 * `WALL_ASSIST_*` in `tuning.ts` for the arithmetic and `TreadmillService.applyWallAssist`.
+	 *
+	 * **The tag is the only thing that makes a part a wall.** There is no wall geometry in this
+	 * repository and no code that creates, moves, or resizes one; the user places them in Studio and
+	 * tags them. Untagging a wall stops the assist on the next bind cycle and leaves the part exactly
+	 * where it was, still colliding — which is the guard-rail behaviour, minus the boost.
+	 *
+	 * Deliberately not called "Wall": a bare `Wall` would collide with any future scene object that
+	 * happens to be a wall, and the assist is specifically a treadmill-side affordance rather than a
+	 * general property of vertical geometry.
+	 */
+	treadmillWall: "TreadmillWall",
 } as const;

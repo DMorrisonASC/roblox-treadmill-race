@@ -266,49 +266,118 @@ export const BELT_SURFACE_MOTOR_MAX_ACCELERATION = 10000;
 export const BALL_BACKSPIN_ENABLED = true;
 
 /**
- * **Placeholder.** Angular impulse applied to a ball when it is struck by another ball, in rad/s.
+ * **Placeholder.** How far ahead of the belt surface the ball's contact point is driven, in studs per
+ * second, when a collision applies backspin.
  *
- * ## Why backspin moves a ball backwards
+ * ## Why this replaced a rad/s impulse (`BALL_BACKSPIN_IMPULSE = 60`), which was wrong twice over
  *
- * Rolling on the belt is slip-free: the ball's contact point moves at exactly the belt's speed. With
- * `v` the ball's forward speed, `w` its angular speed about the rolling axis, `r` its radius and `u`
- * the belt speed, the contact point moves at `v + w*r`, and rolling equilibrium is
- * `v + w*r = u`. At the measured values — `u = 20`, `v = 6.4` — that needs `w*r = 13.6`.
+ * The previous version *added* a fixed `60 rad/s` on every qualifying contact. A Studio log showed two
+ * independent failures of that design:
  *
- * Add angular velocity in the *same* rotational sense and `w*r` overshoots what rolling requires, so
- * the contact point moves **faster than the belt**. Friction then acts **backward** on the ball instead
- * of forward. That reversal is the whole mechanic; the sign of this impulse is therefore the thing that
- * matters most about it, and it is why the handler logs the resulting slip once per impulse.
+ *  1. **It accumulated without bound.** 20 balls produced **428 impulses**, and the measured
+ *     `omega * r` climbed monotonically from `30` to **`56.6`** — a contact point moving 5.6x the belt
+ *     speed. The 0.25 s cooldown spaces repeats out; it never stops them, so a ball resting against
+ *     another gained another `+60 rad/s` every quarter second for the whole session.
+ *  2. **Even one impulse was far too big.** The impulse does not translate into velocity one-for-one.
+ *     Adding slip `s` to a rolling ball resolves to `dv = -s / 3.5` for a solid sphere (the `3.5` is
+ *     `1 + m*r^2/I` with `I = (2/5)m*r^2`), so a single `60 rad/s` impulse is `s = 30` studs/s of
+ *     overspeed and a `-8.6` studs/s kick. The log's exits at `-6.75`, `-7.07` and `-9.45` studs/s are
+ *     exactly that, plus accumulation.
  *
- * ## The arithmetic, and why this is 60 rather than 15
+ * Against a `u = 10` belt that threw 14 of 18 balls off the **back** edge, most within 0.6 s.
  *
- * Slip `s = v + w*r - u` decays at `ds/dt = -(1 + m*r²/I) * μ*g`. For a solid sphere `I = (2/5)m*r²`,
- * so the factor is `1 + 2.5 = 3.5` and `ds/dt = -3.5·μ·g`. For a Rubber-on-Plastic blend, `μ ≈ 0.55`
- * → `μ·g ≈ 107.9` and `ds/dt ≈ 378` studs/s².
+ * ## Why a target rather than an impulse
  *
- * The ball's speed falls at `μ·g`, so the time to remove `v` is `v/(μ·g)`, and the slip needed to
- * sustain exactly that long is `3.5·μ·g·v/(μ·g)` — **μ cancels**:
+ * A collision cannot pump energy into a body that is already spinning faster than the collision can
+ * justify, so repeated contact should *converge* to a limit, not compound. Targeting the contact-point
+ * overspeed makes the operation idempotent: the handler computes the current slip, and adds only
+ * enough angular velocity to reach the target — so the second, third and four-hundredth contact in a
+ * sustained pile-up are no-ops instead of another full kick. It also puts the knob in physical units
+ * (how fast the contact point outruns the belt) rather than in `rad/s`, which is the quantity the
+ * effect is actually about.
  *
- *     Δw_required = 3.5 · v / r
+ * ## The arithmetic of 15
  *
- * At `v = 6.4` and `r = 0.5` that is **44.8 rad/s just to bring the ball to rest**, and
- * `3.5 · (6.4 + 2) / 0.5 = 58.8` for a 2 studs/s scoot in reverse. **60** is that figure rounded up.
+ * `dv = -slip / 3.5`. At `slip = 15` the velocity change is `15 / 3.5 = 4.3` studs/s. From rolling
+ * equilibrium on a `u = 10` belt (`v = 2u/7 = 2.86`) that lands the ball at `2.86 - 4.3 = -1.4`
+ * studs/s: a slow, clearly visible backward roll, not a launch.
  *
- * This round started at `15`, which the arithmetic rules out: `Δw·r = 7.5` studs/s of slip decays in
- * `0.02` s and removes only `2.1` studs/s, taking the ball from `6.4` to `4.3`. That is a visible
- * hesitation, not backward travel — the ball never reverses, so the feature would have appeared not to
- * work. The number is a `Placeholder` and is easy to lower if 60 reads as too violent; the *derivation*
- * is what should not be lost, because it shows the requirement scales with `v/r` and not with `μ`.
+ * Note that the backward motion is **persistent, not brief**, and that is correct physics rather than a
+ * bug: once rolling is re-established with excess spin, the contact point is back at belt speed, friction
+ * is zero again, and the ball keeps its `-1.4` studs/s until it reaches an edge. There is nothing to
+ * stop it. Raising this to `30` would roughly double the backward speed to `-4`; lowering it to `8`
+ * gives `-0.5`, a visible hesitation rather than travel.
  */
-export const BALL_BACKSPIN_IMPULSE = 60;
+export const BALL_BACKSPIN_TARGET_SLIP = 15;
 
 /**
  * **Placeholder.** Minimum seconds between backspin impulses on one ball.
  *
  * **Not optional.** `Touched` fires on contact-*state* changes, and a ball wedged against another
- * re-fires it on essentially every physics step. Without this, the impulse would accumulate ~60×/s and
- * the ball would spin up without bound and behave like a wheel rather than a struck object. 0.25 s is
- * ~15 physics steps: long enough that one collision produces exactly one impulse, short enough that
- * two genuinely separate bumps still register as two.
+ * re-fires it on essentially every physics step. 0.25 s is ~15 physics steps: long enough that a
+ * collision does not run the handler repeatedly within one impact.
+ *
+ * **It is no longer what bounds the effect.** With `BALL_BACKSPIN_TARGET_SLIP` the handler is
+ * idempotent — a repeat call finds the slip already at target and does nothing — so the cooldown is now
+ * purely a cost control, not a safety limit. The version that added a fixed impulse needed the cooldown
+ * to bound accumulation and failed to: 428 impulses still drove `omega*r` from 30 to 56. See the target
+ * constant's comment.
  */
 export const BALL_BACKSPIN_COOLDOWN = 0.25;
+/**
+ * **Placeholder.** Whether a ball touching a `TreadmillWall`-tagged part is pushed forward.
+ *
+ * Single switch so the assist can be turned off without deleting the handler or the constants.
+ */
+export const WALL_ASSIST_ENABLED = true;
+
+/**
+ * **Placeholder.** Forward velocity added per ball-wall contact event, in studs/s.
+ *
+ * ## This is the same shape as `BALL_BACKSPIN_TARGET_SLIP`, on purpose
+ *
+ * The wall assist is a copy of the ball-ball backspin handler: one `Touched` connection per ball, a
+ * tag filter, a convergent check against a target, and a single velocity write. `applyBackspin` has
+ * been the working mechanism for several rounds; the wall spent three rounds on bespoke designs (a
+ * cooldown-gated impulse, then a `VectorForce`) and neither produced observable motion. Reusing the
+ * proven shape is the decision, and the constant is deliberately the same *kind* of thing: a small
+ * per-event nudge that the convergence check bounds, never a rate.
+ *
+ * ## The arithmetic of 1
+ *
+ * The per-event delta is `min(1, WALL_ASSIST_TARGET_SPEED - v)`, so from rest a ball needs 8 events to
+ * reach the target. How much wall that is depends entirely on how often `Touched` re-fires during
+ * sustained contact, and that rate is **not under this code's control**:
+ *  - at ~10 events/s (one per physics-decimated contact step) that is `10` studs/s^2, reaching 8 in
+ *    `0.8 s` of contact
+ *  - at ~60 events/s (one per physics step) it is `60` studs/s^2, reaching 8 in `0.13 s` ? fast enough
+ *    to look like the impulse this replaced
+ *
+ * So `1` is a `Placeholder` in the honest sense: the *outcome* is fixed by the target, but the *rate*
+ * is emergent. If the ride to target turns out too sharp, lower this rather than raising the target;
+ * the target is the safety bound and the impulse is only the resolution.
+ *
+ * Contrast with `BALL_BACKSPIN_TARGET_SLIP = 15`: that handler adds the **whole** remaining deficit in
+ * one event (`(target - slip) / radius`), so it converges in a single contact. This one deliberately
+ * does not, because a linear velocity write is far larger per unit and a single-event jump to
+ * `8` studs/s is exactly the "not a push" behaviour the force round was trying to fix.
+ */
+export const WALL_ASSIST_IMPULSE = 1;
+
+/**
+ * **Placeholder.** Forward speed the wall will not push a ball past, in studs/s.
+ *
+ * **Below `BeltSpeed = 10`, deliberately.** A wall cannot plausibly explain a ball outrunning the
+ * surface carrying it, and anything above belt speed would make the wall a motor.
+ *
+ * This is the constant that makes the assist bounded, and it is what allowed the cooldown to be
+ * deleted. The check runs per contact event: once `v >= 8` the handler returns without writing, so a
+ * ball pressed against a wall forever produces zero further change. The bound is on the *outcome*, not
+ * on the event rate, which is why an unknown `Touched` frequency cannot produce a runaway.
+ *
+ * History, kept because it explains why the number survived two mechanism changes: it was introduced
+ * to bound a per-firing impulse, deleted by the round that tried a constant `VectorForce` (which has no
+ * ceiling of its own and would have reached `50` studs/s in ten seconds), and reinstated here because
+ * the convergent velocity delta needs exactly the same bound.
+ */
+export const WALL_ASSIST_TARGET_SPEED = 8;
