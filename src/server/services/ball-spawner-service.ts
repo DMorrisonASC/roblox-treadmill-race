@@ -378,7 +378,7 @@ export class BallSpawnerService implements OnStart {
 
 		// Last, so every tagged spawner is already bound. This is the only automatic spawn in the
 		// service; see `spawnOnePerSpawner` for why the timed stream was removed.
-		this.spawnOnePerSpawner();
+		this.spawnOnePerSpawner("one-shot");
 	}
 
 	// #region binding
@@ -467,25 +467,23 @@ export class BallSpawnerService implements OnStart {
 		// `Enabled` is deliberately not consulted: it gates the timed *stream*, and the manual trigger
 		// is the thing you use to poke a spawner that is otherwise off. A spawner disabled by an
 		// attribute but still tagged is exactly the fixture state "press 1 and watch one ball appear".
-		const spawner = this.firstSpawner();
-		if (spawner === undefined) {
+		//
+		// **Every bound spawner fires, one ball each.** This is a reversal: the previous rule spawned
+		// from the first registered spawner only, on the grounds that one ball from a known place kept
+		// a multi-spawner test predictable. That reasoning did not survive the fixture it was written
+		// for — with four spawners across four lanes, "one ball from the first one" meant three lanes
+		// never received a manual ball at all, so the key could not be used to test the belt's full
+		// width or what happens when two bodies meet. The predictability it bought was the
+		// predictability of only ever seeing a quarter of the scene.
+		//
+		// The loop itself lives in `spawnOnePerSpawner` and is shared with the one-shot start spawn, so
+		// "how many bodies does a trigger produce" is decided in exactly one place.
+		if (this.spawners.size() === 0) {
 			warn(`[Spawner] manual spawn requested but no part is tagged ${TAGS.ballSpawner}.`);
 			return;
 		}
 
-		this.spawnBall(spawner);
-	}
-
-	/**
-	 * Manual spawns use the first registered spawner rather than a random one or all of them, so
-	 * that pressing `1` with multiple spawners present stays predictable in a test. "First" is
-	 * insertion order of the tag signal, which for a Rojo-built scene is scene order.
-	 */
-	private firstSpawner(): BasePart | undefined {
-		for (const spawner of this.spawners) {
-			return spawner;
-		}
-		return undefined;
+		this.spawnOnePerSpawner("manual");
 	}
 
 	// #endregion
@@ -493,9 +491,16 @@ export class BallSpawnerService implements OnStart {
 	// #region one-shot spawn
 
 	/**
-	 * Spawns exactly one body per bound spawner, once, at server start.
+	 * Spawns exactly one body per bound spawner.
 	 *
-	 * ## Why one shot and not a stream
+	 * **Two callers, one implementation, on purpose.** `onStart` calls it once with `"one-shot"`, and
+	 * the manual `1` trigger calls it with `"manual"`. The manual path previously had its own copy of
+	 * this loop spawning from the first registered spawner only; keeping two loops meant the rule "how
+	 * many bodies does a trigger produce" was written down twice and could drift. The `reason` argument
+	 * exists so the single summary line stays truthful about which trigger fired — passing nothing would
+	 * have produced a log that said "one-shot" on every keypress.
+	 *
+	 * ## Why the automatic spawn is one shot and not a stream
 	 *
 	 * The previous revision started a timed stream at `Rate` per second because tagging a part should
 	 * visibly do something. That produced eight bodies a second across four spawners against a cap of
@@ -508,7 +513,7 @@ export class BallSpawnerService implements OnStart {
 	 * to interrupt rolling. Additional bodies are still one keypress away via the manual path, which is
 	 * deliberate — collision testing needs a second body, and it should not require a code change.
 	 *
-	 * ## Why it runs here and not on a tag signal
+	 * ## Why the automatic one runs here and not on a tag signal
 	 *
 	 * `onStart` has already bound every spawner from `GetTagged`, so `this.spawners` is complete. A tag
 	 * added *after* start does not get an automatic body: this is one spawn per Play session per
@@ -519,9 +524,10 @@ export class BallSpawnerService implements OnStart {
 	 *
 	 * Each spawn is individually protected, for the same reason the old stream tick was: one malformed
 	 * spawner must not prevent the others from producing their body. The failure is logged against the
-	 * spawner that caused it.
+	 * spawner that caused it. This matters more for the manual path than for the one-shot, because a
+	 * keypress that silently produced three of four bodies would look like flaky physics.
 	 */
-	private spawnOnePerSpawner(): void {
+	private spawnOnePerSpawner(reason: "one-shot" | "manual"): void {
 		let spawned = 0;
 
 		for (const spawner of this.spawners) {
@@ -538,11 +544,11 @@ export class BallSpawnerService implements OnStart {
 			}
 		}
 
-		// One line, always, so "did the one-shot fire and how many did it produce" is answerable without
-		// counting spawn lines. `bound` is printed alongside `spawned` because the interesting failure is
-		// the two disagreeing.
+		// One line, always, so "did the trigger fire and how many bodies did it produce" is answerable
+		// without counting spawn lines. `bound` is printed alongside `spawned` because the interesting
+		// failure is the two disagreeing.
 		print(
-			`[Spawner] one-shot spawn: bound=${this.spawners.size()} spawned=${spawned} cap=${this.effectiveMaxLiveBalls()} (no stream; press 1 for extra bodies)`,
+			`[Spawner] ${reason} spawn: bound=${this.spawners.size()} spawned=${spawned} cap=${this.effectiveMaxLiveBalls()}`,
 		);
 	}
 

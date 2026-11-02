@@ -271,3 +271,13 @@ observation about rolling-vs-sliding was being made inside it. Manual `1` still 
   the markers showed no visible rotation, i.e. `v ? u` with `? ï¿½ 0`. Under contact friction the ball
   would settle at `2u/7` _with_ strong spin. Mechanism hypothesis 1 is therefore the leading cause.
 - Next measurement, not yet taken: `AssemblyAngularVelocity` on a single body, plus `u - (v + ?r)`.
+
+## 18. Belt drag mechanism replaced: moving collider on a PrismaticConstraint motor
+
+Replaces the anchored-belt AssemblyLinearVelocity mechanism from item 3, which Studio showed producing ~0.1 studs/s² and no rotation. The belt is now CanCollide = false and hosts an invisible, Massless, unanchored slab driven along Attachment0's X axis by a motorised PrismaticConstraint; balls rest on the slab so friction acts at the contact point. **Unverified in Studio.**
+## 19. Belt surface material -> Rubber; bounce gated off (BELT_BOUNCE_ENABLED = false)
+
+Friction isolated as the single variable: slab material SmoothPlastic -> Rubber via BELT_SURFACE_MATERIAL, and the Touched bounce assist short-circuited behind BELT_BOUNCE_ENABLED = false (impulse/chance/cooldown constants and the connection kept, so flipping the boolean restores it). No CustomPhysicalProperties, no FrictionWeight, ball material untouched. **Unverified in Studio.**
+## 20. Manual trigger now spawns one body from every bound spawner
+
+Pressing `1` previously spawned from the first registered spawner only (`firstSpawner`), which with four spawners meant three lanes never got a manual body. The manual path now calls the shared `spawnOnePerSpawner("manual")` — the same implementation as the start-of-session one-shot, parameterised only so the summary log line names the trigger. `firstSpawner` deleted; the 100 ms per-player cooldown is unchanged and still gates the whole press, not per spawner. **Unverified in Studio.**

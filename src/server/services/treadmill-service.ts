@@ -1,11 +1,18 @@
-import { CollectionService } from "@rbxts/services";
+import { CollectionService, RunService } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
 import { BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED } from "shared/attributes";
 import { TAGS } from "shared/tags";
 import {
 	BELT_BOUNCE_CHANCE,
 	BELT_BOUNCE_COOLDOWN,
+	BELT_BOUNCE_ENABLED,
 	BELT_BOUNCE_IMPULSE,
+	BELT_SURFACE_LIP,
+	BELT_SURFACE_MATERIAL,
+	BELT_SURFACE_MOTOR_MAX_ACCELERATION,
+	BELT_SURFACE_MOTOR_MAX_FORCE,
+	BELT_SURFACE_RESET_THRESHOLD,
+	BELT_SURFACE_THICKNESS,
 	BELT_TEXTURE_ASSET,
 	BELT_TEXTURE_STUDS_PER_TILE,
 } from "shared/tuning";
@@ -47,47 +54,64 @@ function formatVector(value: Vector3): string {
  * heartbeat (only a deliberate edit fires it) and it is the one log a person flipping the sign to
  * test direction actually needs.
  *
- * ## Mechanism: `BasePart.AssemblyLinearVelocity` on the anchored part
+ * ## Mechanism: a real moving collider, not an anchored belt with a velocity
  *
- * A conveyor is a part that reports a velocity but does not move. The engine gets this from the
- * part's *assembly* velocity: for an anchored part the assembly cannot translate, but its velocity
- * is still used as the surface velocity when the solver resolves friction against touching parts,
- * so they are dragged along and eventually run off the edge.
+ * **This section was rewritten. The previous version argued for
+ * `AssemblyLinearVelocity` on the anchored belt, and that mechanism has been retired.** The old
+ * argument is kept below because it is still the history of why this file looks the way it does, and
+ * because the reasoning that killed it is not obvious from the code.
  *
- * Evidence, since the prompt's claim needed checking rather than trusting:
- *  - The `BasePart.Anchored` reference page states an anchored part "still may have a nonzero
- *    AssemblyLinearVelocity and AssemblyAngularVelocity" — so setting one is a supported state and
- *    not silently zeroed.
- *  - The conveyor sentence lives on the deprecated `BasePart.Velocity` page: "Setting the Velocity
- *    of a part that is Anchored will cause it to act like a conveyor belt. Any object that touches
- *    the part will begin to move in accordance with the Velocity." That page names
- *    `AssemblyLinearVelocity` as the replacement, and deprecates `Velocity` only for naming
- *    reasons, not because the behaviour was removed.
- *  - `AssemblyLinearVelocity`'s own reference page does *not* mention conveyors. It documents the
- *    property as the assembly's velocity and recommends constraints for driving parts. So the
- *    conveyor behaviour is inherited from `Velocity`, not newly documented for the new name.
+ * ### What the anchored-belt mechanism was supposed to do
  *
- * The alternatives and what they cost:
- *  - A `LinearVelocity` constraint only acts on parts joined to it by an `Attachment`. It cannot
- *    reach an arbitrary loose ball resting on the belt, so it would need a moving collider part or
- *    per-ball attachments — a different, larger mechanism than "an anchored surface that drags".
- *  - `CustomPhysicalProperties` with very high friction is not an alternative to the velocity; it
- *    is a multiplier on how much of the surface velocity reaches the ball. It is layered *on top*
- *    of this mechanism, and is deliberately left at the part's own material settings here.
- *  - `BasePart.Velocity` is deprecated and its reference page is tagged hidden; using it would
- *    mean writing new code against an API the engine already tells you to stop using.
+ * A conveyor is a part that reports a velocity but does not move. The claim was that the engine uses
+ * an anchored part's assembly velocity as the *surface* velocity when resolving friction against
+ * touching parts, so bodies on it get dragged along. Supporting that: the `BasePart.Anchored` page
+ * says an anchored part "still may have a nonzero AssemblyLinearVelocity", and the deprecated
+ * `BasePart.Velocity` page carries the sentence "Setting the Velocity of a part that is Anchored will
+ * cause it to act like a conveyor belt."
  *
- * ## Replication caveat (the one thing to confirm in Studio)
+ * ### Why it was retired
  *
- * `AssemblyLinearVelocity` is tagged NotReplicated: the property value does not cross the network
- * boundary. That matters because a ball's physics is simulated by whichever machine owns it, and
- * ownership of an unanchored part follows nearby players. If clients never learned the belt's
- * surface velocity, a client-owned ball would just sit there while the server dragged it. The
- * practical evidence that clients do know it is that anchored conveyors carry player characters,
- * and characters are client-owned — so the physics state reaches clients even though the property
- * does not. That reasoning is not a substitute for watching a ball on a belt in Studio; it is the
- * reason this is the shipped mechanism rather than a guess, and it is listed in the hand-off notes
- * as a thing to verify.
+ * Studio says it does not do that here. With one ball on a `BeltSpeed = 10` belt the ball crept
+ * forward at roughly 0.1 studs/s² — about 1/400th of what friction at the measured `μ_eff ≈ 0.22`
+ * would deliver — never reached belt speed, and never rotated. That is not a weak version of
+ * "carried by the surface"; it is a weak centre-of-mass push with no contact-point velocity at all,
+ * and no engine-documented guarantee to lean on. In hindsight the page that promised it is
+ * *deprecated and hidden*, and the replacement's own page never mentions conveyors.
+ *
+ * ### What replaced it
+ *
+ * An unanchored, invisible slab of real collision geometry slides along the belt's top
+ * face at `BeltSpeed`, held to one axis by a motorised `PrismaticConstraint`. Balls rest on *that*.
+ * The slab has genuine velocity, so friction applies at the contact point, which is the only thing
+ * that produces both linear acceleration and torque. The visual belt part stays exactly where the
+ * user put it — same `Anchored`, `Size`, `CFrame`, texture — but its `CanCollide` is set to `false`
+ * so it cannot compete with the slab, and its `AssemblyLinearVelocity` is no longer written.
+ *
+ * ### What that costs
+ *
+ * Three things, all accepted deliberately:
+ *  - **A small physics assembly per belt.** The slab is an unanchored body; it participates in the
+ *    solver every step even when nothing is on it.
+ *  - **A reset loop.** The slab cannot be infinitely long, so it must be teleported back to the start
+ *    of its travel periodically. That is a `RunService.Heartbeat` connection per belt and a visible
+ *    discontinuity in the *slab's* position, which is invisible only because the slab is.
+ *  - **A server-owned unanchored part.** Anything unanchored near a player can lose ownership to that
+ *    client, and the surface must not, or the server and the client would disagree about what the ball
+ *    is resting on. `SetNetworkOwner(nil)` is attempted for that reason (see `claimServerOwnership`).
+ *
+ * The alternative — per-ball `LinearVelocity`, or an `AngularVelocity` assist — was rejected for a
+ * reason that is a design constraint rather than a technical one: it would choose outcomes instead of
+ * letting shape and orientation choose them. A moving surface chooses nothing; it is the same surface
+ * for every body, and what a body does on it is physics.
+ *
+ * ## Replication caveat (unchanged in shape, different in detail)
+ *
+ * `AssemblyLinearVelocity` is tagged NotReplicated, and so is `Attachment.Axis` and
+ * `SlidingBallConstraint.CurrentPosition`. None of that matters now: the slab is server-owned, its
+ * velocity is real motion rather than a property, and real motion replicates. The earlier worry — that
+ * a client-owned ball would be simulated resting on a stationary surface — is answered by the slab
+ * genuinely moving.
  *
  * ## Axis convention
  *
@@ -100,15 +124,36 @@ function formatVector(value: Vector3): string {
  * implemented.
  *
  * The belt is deliberately passive about everything else: it never reskins, resizes, repositions
- * or re-anchors a part, and it ignores anything that is not tagged. It does write one thing —
- * `BeltSpeed`, once, and only when the part has no value for it — because requiring a hand-set
- * attribute before a tagged belt does anything would be a setup step, not a feature. The reasoning
- * for that reversal lives at the top of `shared/attributes.ts`.
+ * or re-anchors a part, and it ignores anything that is not tagged. It does write three things —
+ * `BeltSpeed`, once and only when absent; `CanCollide = false`, because the moving slab is the
+ * collision surface; and one child, the slab itself. The `BeltSpeed`-only-when-absent rule is
+ * explained at the top of `shared/attributes.ts`.
  *
- * If the part is rotated at runtime the vector is not recomputed — the brief defines this service as
- * reacting to a tag and one attribute. Recomputing on `CFrame` change would be one extra connection
- * per belt if a later slice starts moving belts around.
+ * If the part is rotated at runtime the slab is not rebuilt and the constraint axis is not
+ * recomputed — the brief defines this service as reacting to a tag and one attribute. Recomputing on
+ * `CFrame` change would be one extra connection per belt if a later slice starts moving belts around.
  */
+/**
+ * One moving collider's worth of state, so `unbind` can dismantle exactly what `bind` created and the
+ * heartbeat can find its slab without scanning children by name.
+ *
+ * `startCFrame` is stored rather than recomputed on reset: recomputing from the belt's *current*
+ * `CFrame` would silently re-anchor the slab's origin if the belt were ever moved or rotated at
+ * runtime, which would make the reset jump somewhere the constraint's limits do not describe.
+ */
+interface BeltSurface {
+	surface: BasePart;
+	attachment0: Attachment;
+	attachment1: Attachment;
+	constraint: PrismaticConstraint;
+	/** Optional because the connection is created after the state object it needs to capture. */
+	heartbeat?: RBXScriptConnection;
+	startCFrame: CFrame;
+	upperLimit: number;
+	/** Set once the surface's measured velocity has been compared against `RightVector`. */
+	verified: boolean;
+}
+
 @Service()
 export class TreadmillService implements OnStart {
 	/**
@@ -145,6 +190,20 @@ export class TreadmillService implements OnStart {
 	 * and it cannot leak no matter who destroys what.
 	 */
 	private readonly lastBounceAt = new Map<BasePart, number>();
+
+	/** One moving collider per belt, keyed by the belt so bind/unbind stay symmetric. */
+	private readonly surfaces = new Map<BasePart, BeltSurface>();
+
+	/**
+	 * The belt's `CanCollide` as the user set it, recorded before `applySpeed` forces it to `false`.
+	 *
+	 * Without this, untagging a belt would leave it permanently non-colliding — the tag is the only
+	 * thing that says "this part is a belt", so once the tag is gone nothing would ever set it back,
+	 * and the symptom ("I untagged my belt and now everything falls through it") looks like corruption
+	 * rather than a missing restore. Restoring only what this service changed is the narrow version of
+	 * the rule the texture and bounce already follow: remove exactly what `bind` added.
+	 */
+	private readonly beltCollideBefore = new Map<BasePart, boolean>();
 
 	public onStart(): void {
 		for (const instance of CollectionService.GetTagged(TAGS.treadmillBelt)) {
@@ -185,6 +244,238 @@ export class TreadmillService implements OnStart {
 
 		this.applySpeed(instance, "bind");
 	}
+
+	// #region moving surface (the actual conveyor)
+
+	/**
+	 * Creates the invisible slab that balls actually rest on, plus the constraint that drives it.
+	 *
+	 * **Parenting: directly under the belt, as one part.** Not a `TreadmillSurface` folder. A folder
+	 * would exist only to group a single part with its own constraint, and the constraint is parented
+	 * under the belt anyway (it is a joint between belt and slab, and putting it under either end is
+	 * arbitrary). One fewer instance per belt, and `unbind` has one thing to destroy.
+	 *
+	 * The name is `TreadmillSurface`, deliberately *not* `BeltSurface`. The client controller waits for
+	 * a child named `BeltSurface` and asserts it `IsA("Texture")`; reusing that name here would make
+	 * that lookup find a `Part` and log a misleading "is a Part, not a Texture" warning.
+	 */
+	private ensureSurface(belt: BasePart): BeltSurface {
+		const existing = this.surfaces.get(belt);
+		if (
+			existing !== undefined &&
+			existing.surface.Parent !== undefined &&
+			existing.constraint.Parent !== undefined
+		) {
+			return existing;
+		}
+
+		// Bounded overhang rather than a 2x slab. See `BELT_SURFACE_LIP`: the slab is one belt length
+		// plus one `LIP`, so a `LIP`-stud pass covers the footprint at both extremes and never extends
+		// more than `LIP` past either end of the belt. The earlier 2x version produced 28 studs of
+		// invisible collidable ground past each end of a 56-stud belt.
+		const length = belt.Size.X + BELT_SURFACE_LIP;
+		const lift = belt.Size.Y / 2 + BELT_SURFACE_THICKNESS / 2;
+
+		// The slab's centre starts `LIP/2` behind the belt's centre, which puts its trailing edge exactly
+		// `LIP` behind the belt's trailing edge while its leading edge is flush with the belt's own.
+		const startOffset = -BELT_SURFACE_LIP / 2;
+		const startCFrame = belt.CFrame.mul(new CFrame(startOffset, lift, 0));
+
+		const surface = new Instance("Part");
+		surface.Name = "TreadmillSurface";
+		surface.Shape = Enum.PartType.Block;
+		surface.Size = new Vector3(length, BELT_SURFACE_THICKNESS, belt.Size.Z);
+		surface.Anchored = false;
+		// **`Massless` is a no-op here, and that is fine.** The engine ignores `Massless` on a part that is
+		// its own assembly root, and a `PrismaticConstraint` does not merge bodies into one assembly the
+		// way a weld does — so the slab is its own root and keeps its real mass anyway. Its volume is
+		// `(beltLength + LIP) x 0.2 x beltWidth`, which at the observed 56 x 1 x 33 belt is
+		// `57 x 0.2 x 33 = 376` studs³, and at the measured Plastic density of 0.7 that is **~263 mass**
+		// against a ball's 0.367 — about 700 times heavier. That ratio is what actually makes the surface
+		// behave as immovable, so the property is kept as intent rather than as a mechanism, and the
+		// comment is here so nobody later "fixes" the mass by trusting the flag.
+		surface.Massless = true;
+		surface.CanCollide = true;
+		surface.CanTouch = true;
+		// `CanQuery = false` keeps the slab out of raycasts and `GetPartBoundsInBox`. Nothing should be
+		// able to target a surface that is supposed to be indistinguishable from the belt underneath it,
+		// and every query that used to hit "the belt" would now have two candidates 0.2 studs apart.
+		surface.CanQuery = false;
+		surface.Transparency = 1;
+		// The slab is meant to be a ground plane, not a surface with visible grain, and its material is
+		// what sets the friction half of the ball/surface pair. Named in `tuning.ts` so retuning friction
+		// is one edit in a file that already holds the other physics knobs, rather than a hunt through the
+		// service. See `BELT_SURFACE_MATERIAL` for the arithmetic and for why nothing else about friction
+		// is configured here.
+		surface.Material = BELT_SURFACE_MATERIAL;
+		surface.CFrame = startCFrame;
+		surface.Parent = belt;
+
+		// Attachment0 sits at the belt's top centre; Attachment1 at the slab's centre. Their **X axes**
+		// are what the constraint actually uses.
+		const attachment0 = new Instance("Attachment");
+		attachment0.Name = "TreadmillRail";
+		attachment0.CFrame = new CFrame(0, belt.Size.Y / 2, 0);
+		attachment0.Parent = belt;
+
+		const attachment1 = new Instance("Attachment");
+		attachment1.Name = "TreadmillRunner";
+		// Rotated 180 degrees about Y so its X axis points **opposite** Attachment0's, which is the
+		// documented requirement: a PrismaticConstraint "constrains the attachments so that their X axes
+		// are collinear but pointing in opposite directions". Leaving both at identity would make the
+		// solver satisfy that condition by rotating the slab, not by sliding it.
+		attachment1.CFrame = CFrame.Angles(0, math.pi, 0);
+		attachment1.Parent = surface;
+
+		// `Axis` is set to match for readability, but it is **not** what a PrismaticConstraint reads —
+		// that is Attachment0's X axis, and `Attachment.Axis` is a local-space vector used by other
+		// constraints. Setting it costs nothing and stops the next reader assuming it was forgotten.
+		attachment0.Axis = Vector3.xAxis;
+		attachment1.Axis = Vector3.xAxis;
+
+		const constraint = new Instance("PrismaticConstraint");
+		constraint.Name = "TreadmillMotor";
+		constraint.Attachment0 = attachment0;
+		constraint.Attachment1 = attachment1;
+		constraint.ActuatorType = Enum.ActuatorType.Motor;
+		constraint.MotorMaxForce = BELT_SURFACE_MOTOR_MAX_FORCE;
+		constraint.MotorMaxAcceleration = BELT_SURFACE_MOTOR_MAX_ACCELERATION;
+		// Limits span exactly one `LIP` of travel, centred on the attachment: from "trailing edge `LIP`
+		// behind the belt" to "leading edge `LIP` in front of it". Symmetric about zero because the slab
+		// starts at `-LIP/2` and ends at `+LIP/2`.
+		constraint.LimitsEnabled = true;
+		constraint.LowerLimit = -BELT_SURFACE_LIP / 2;
+		constraint.UpperLimit = BELT_SURFACE_LIP / 2;
+		constraint.Velocity = this.readSpeed(belt);
+		constraint.Parent = belt;
+
+		const state: BeltSurface = {
+			surface,
+			attachment0,
+			attachment1,
+			constraint,
+			startCFrame,
+			upperLimit: BELT_SURFACE_LIP / 2,
+			verified: false,
+		};
+
+		state.heartbeat = RunService.Heartbeat.Connect(() => this.stepSurface(belt, state));
+
+		this.surfaces.set(belt, state);
+
+		// The bounce assist was subscribed to the *belt's* `Touched`, and the belt no longer collides, so
+		// without this the assist would silently stop firing. It is the same roll, moved to the surface
+		// that balls actually touch — preserving the behaviour rather than changing it.
+		this.attachBounce(surface);
+
+		this.claimServerOwnership(surface);
+
+		print(
+			`[Treadmill] surface created on "${belt.GetFullName()}" beltSize=${formatVector(belt.Size)} surfaceSize=${formatVector(surface.Size)} lip=${formatNumber(BELT_SURFACE_LIP)} travel=${formatNumber(BELT_SURFACE_LIP)} axis=Attachment0.X`,
+		);
+
+		return state;
+	}
+
+	/**
+	 * Forces the slab to stay server-owned, tolerating failure.
+	 *
+	 * The slab is jointed to an anchored belt, which makes the belt the assembly's root; `SetNetworkOwner`
+	 * raises on a part that is not a root, so this is wrapped rather than trusted. **That failure is
+	 * harmless and is why it is not treated as an error:** ownership of an anchored assembly is server
+	 * by definition, so if the call is refused the slab is already where it needs to be. The `pcall` is
+	 * here so a future engine change cannot break belt binding, and the outcome is logged once so the
+	 * next person does not have to rediscover which branch ran.
+	 */
+	private claimServerOwnership(surface: BasePart): void {
+		const [ok, err] = pcall(() => surface.SetNetworkOwner(undefined));
+		print(
+			`[Treadmill] surface ownership: setNetworkOwner(nil) ${ok ? "accepted" : `refused (${tostring(err)}) — assembly root is the anchored belt, which is already server-owned`}`,
+		);
+	}
+
+	/**
+	 * Drives the slab: keeps the motor at `BeltSpeed`, resets it to the start at the end of travel, and
+	 * — once — compares the measured velocity against the belt's `RightVector`.
+	 *
+	 * ### Why the reset is a teleport and not a loop
+	 *
+	 * A conveyor with finite length has to reuse its surface. Two ways: teleport the slab back, or
+	 * rebuild it. Rebuilding would destroy and recreate a constrained body every few seconds, which
+	 * drops its contact with anything resting on it for at least a frame and re-runs the motor's
+	 * spin-up; teleporting keeps the same instance, the same constraint, and the same contacts.
+	 *
+	 * ### The order, and why the velocity is written before re-enabling
+	 *
+	 * Constraint off, `CFrame` write, velocity write, constraint on. The constraint must be off first or
+	 * the solver overwrites the teleport within the same step. The velocity write is what makes the
+	 * teleport survivable: a body resting on the slab has real velocity from the *slab's* motion, and if
+	 * the slab came back at rest, the next friction solve would see a sudden `-BeltSpeed` slip and yank
+	 * the ball backwards for a frame — a visible stutter. Writing the velocity *before* re-enabling
+	 * rather than after means the motor never sees the slab at rest at all.
+	 */
+	private stepSurface(belt: BasePart, state: BeltSurface): void {
+		const { surface, constraint } = state;
+		if (surface.Parent === undefined || constraint.Parent === undefined) {
+			return;
+		}
+
+		const speed = this.readSpeed(belt);
+		if (constraint.Velocity !== speed) {
+			constraint.Velocity = speed;
+		}
+
+		const axis = belt.CFrame.RightVector;
+
+		// One-shot sign check. Everything else about this mechanism is verifiable from source; whether
+		// positive `Velocity` travels along `+RightVector` or against it is **not** documented, and
+		// getting it wrong makes every ball roll backwards. This prints the measured dot product once,
+		// about half a second in, so the answer costs one Studio run instead of a sign-flip cycle.
+		if (!state.verified) {
+			const moving = surface.AssemblyLinearVelocity;
+			if (moving.Magnitude > math.abs(speed) * 0.5) {
+				state.verified = true;
+				const along = moving.Dot(axis);
+				print(
+					`[Treadmill] surface velocity check: measured=${formatVector(moving)} rightVector=${formatVector(axis)} alongRight=${formatNumber(along)} ${along < 0 ? "WRONG SIGN — negate constraint.Velocity" : "matches +RightVector"}`,
+				);
+			}
+		}
+
+		if (constraint.CurrentPosition < state.upperLimit - BELT_SURFACE_RESET_THRESHOLD) {
+			return;
+		}
+
+		constraint.Enabled = false;
+		surface.CFrame = state.startCFrame;
+		surface.AssemblyLinearVelocity = axis.mul(speed);
+		constraint.Enabled = true;
+	}
+
+	/** Dismantles exactly what `ensureSurface` built. Safe to call when nothing was built. */
+	private destroySurface(belt: BasePart): void {
+		const state = this.surfaces.get(belt);
+		if (state === undefined) {
+			return;
+		}
+
+		state.heartbeat?.Disconnect();
+
+		// Explicit: the constraint and the belt-side attachment are children of the *belt*, so destroying
+		// the slab would leave both behind, attached to nothing.
+		state.constraint.Destroy();
+		state.attachment0.Destroy();
+
+		// Implicit: `attachment1` is a child of the slab and dies with it. It is named here anyway so the
+		// list of what this function is responsible for is complete and does not depend on someone
+		// later reparenting the slab.
+		state.attachment1.Destroy();
+		state.surface.Destroy();
+
+		this.surfaces.delete(belt);
+	}
+
+	// #endregion
 
 	// #region belt texture (TEMPORARY INSTRUMENTATION)
 
@@ -324,12 +615,21 @@ export class TreadmillService implements OnStart {
 	/**
 	 * Rolls the belt's imperfect-surface bounce for one contacting body.
 	 *
-	 * Order matters: the tag check comes first (most touches are not bodies and must cost almost
-	 * nothing), then the cooldown, and only then the random roll. Rolling before the cooldown check
-	 * would consume randomness on every physics step — harmless for correctness, but it would make the
-	 * effective rate depend on touch frequency in a way the constants do not describe.
+	 * Order matters: the `BELT_BOUNCE_ENABLED` gate comes first (a disabled assist should cost one
+	 * boolean), then the tag check (most touches are not bodies and must cost almost nothing), then the
+	 * cooldown, and only then the random roll. Rolling before the cooldown check would consume
+	 * randomness on every physics step — harmless for correctness, but it would make the effective rate
+	 * depend on touch frequency in a way the constants do not describe.
 	 */
 	private rollBounce(_belt: BasePart, other: BasePart): void {
+		// The gate. First statement in the handler so a disabled assist costs one boolean read per contact
+		// and nothing more — see `BELT_BOUNCE_ENABLED` for why it is off this round and how to turn it back
+		// on. Everything below is left exactly as it was, so flipping the constant restores the previous
+		// behaviour with no other diff.
+		if (!BELT_BOUNCE_ENABLED) {
+			return;
+		}
+
 		if (!other.HasTag(TAGS.ball)) {
 			return;
 		}
@@ -392,36 +692,54 @@ export class TreadmillService implements OnStart {
 		}
 		this.beltTextures.delete(instance);
 
-		// Clearing the velocity matters: the tag is the only thing that says "this part is a belt", so
-		// an untagged part must stop dragging immediately instead of coasting on its last speed.
-		if (instance.Anchored) {
-			instance.AssemblyLinearVelocity = Vector3.zero;
+		// Tear down the moving surface before the belt stops being a belt: the slab is the thing that
+		// actually drags, so leaving it alive for even one frame after untagging would let an untagged
+		// part keep moving bodies.
+		this.destroySurface(instance);
+
+		// The belt is anchored and no longer carries a velocity of its own, so there is nothing left to
+		// clear. The old `AssemblyLinearVelocity = Vector3.zero` write was removed along with the
+		// mechanism that needed it. `CanCollide` *is* handed back, because forcing it to `false` is
+		// something this service did and nobody else would undo.
+		const collision = this.beltCollideBefore.get(instance);
+		if (collision !== undefined) {
+			instance.CanCollide = collision;
+			this.beltCollideBefore.delete(instance);
 		}
 	}
 
 	private applySpeed(part: BasePart, reason: string): void {
 		if (!part.Anchored) {
-			// Applying an assembly velocity to an unanchored part does not make it a belt, it makes it a
-			// projectile. Refusing is safer than warning and applying anyway, and the warn is what tells
-			// a designer why their belt does nothing.
+			// An unanchored "belt" cannot hold a constraint origin steady, so the slab would drift with
+			// whatever it is resting on. Refusing is safer than warning and building a surface anyway,
+			// and the warn is what tells a designer why their belt does nothing.
 			warn(`[Treadmill] ${part.GetFullName()} is tagged ${TAGS.treadmillBelt} but not anchored; skipping.`);
 			return;
 		}
 
-		if (!part.CanCollide) {
-			// Not fatal — a belt with collision off has nothing resting on it, so the velocity is inert.
-			warn(`[Treadmill] ${part.GetFullName()} has CanCollide = false; nothing can rest on it to be dragged.`);
+		const speed = this.readSpeed(part);
+
+		// The belt stops *colliding* and starts *hosting*. From here on the only collision surface is the
+		// slab, which is the whole point: two overlapping surfaces 0.2 studs apart would make the solver
+		// pick one arbitrarily per contact and produce exactly the unpredictable drag this round exists to
+		// remove. `Anchored`, `Size`, `CFrame` and the texture child are all left exactly as the user set
+		// them — the belt is now a visual base and a fixed rail, nothing more.
+		if (part.CanCollide) {
+			// Recorded once, on the first `applySpeed` for this belt, so a later `BeltSpeed` change cannot
+			// overwrite the remembered value with the `false` this function itself wrote.
+			if (!this.beltCollideBefore.has(part)) {
+				this.beltCollideBefore.set(part, part.CanCollide);
+			}
+			part.CanCollide = false;
 		}
 
-		const speed = this.readSpeed(part);
-		part.AssemblyLinearVelocity = part.CFrame.RightVector.mul(speed);
+		const state = this.ensureSurface(part);
+		if (state.constraint.Velocity !== speed) {
+			state.constraint.Velocity = speed;
+		}
 
-		// The `appliedVelocity` component is read back off the property rather than reused from the
-		// expression above: the whole point of this line is to report what the engine is actually
-		// holding, and reusing the local would report what this code intended instead. If those ever
-		// differ, that difference is the finding.
 		print(
-			`[Treadmill] ${reason} "${part.GetFullName()}" size=${formatVector(part.Size)} origin=${formatVector(part.Position)} rightVector=${formatVector(part.CFrame.RightVector)} BeltSpeed=${formatNumber(speed)} appliedVelocity=${formatVector(part.AssemblyLinearVelocity)}`,
+			`[Treadmill] ${reason} "${part.GetFullName()}" size=${formatVector(part.Size)} origin=${formatVector(part.Position)} rightVector=${formatVector(part.CFrame.RightVector)} BeltSpeed=${formatNumber(speed)} CanCollide=${tostring(part.CanCollide)} surfaceVelocity=${formatNumber(state.constraint.Velocity)}`,
 		);
 	}
 
