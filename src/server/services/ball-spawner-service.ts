@@ -16,7 +16,14 @@ import {
 	ShapePoolEntry,
 } from "shared/shape-pool";
 import { TAGS } from "shared/tags";
-import { BALL_TEXTURE_ASSET, BALL_TEXTURE_OFFSET_RANGE, BALL_TEXTURE_OFFSET_RANGE_V } from "shared/tuning";
+import {
+	BALL_BACKSPIN_COOLDOWN,
+	BALL_BACKSPIN_ENABLED,
+	BALL_BACKSPIN_IMPULSE,
+	BALL_TEXTURE_ASSET,
+	BALL_TEXTURE_OFFSET_RANGE,
+	BALL_TEXTURE_OFFSET_RANGE_V,
+} from "shared/tuning";
 
 /**
  * Three-decimal rounding instead of `string.format`: these numbers span `0.001`-scale local offsets
@@ -329,6 +336,22 @@ export class BallSpawnerService implements OnStart {
 	/** Spawn order, oldest first — the order the cap evicts in. */
 	private liveBalls = new Array<BasePart>();
 	private readonly ballKillY = new Map<BasePart, number>();
+
+	/**
+	 * Backspin bookkeeping, one entry per live ball.
+	 *
+	 * `backspinConnections` exists because `Touched` connections on a destroyed part do not need to be
+	 * explicitly disconnected for the *handler* to stop firing — a destroyed instance fires nothing — but
+	 * holding the connection object in a map would leak one entry per ball forever if nothing removed it,
+	 * and a destroyed `RBXScriptConnection` is cheap to disconnect but not free to keep. Both maps are
+	 * cleared in the two places a ball can die, so their size tracks the live set.
+	 *
+	 * `lastBackspinAt` is the cooldown clock, per ball rather than global: a global clock would let one
+	 * ball's collision suppress another ball's, which would make the variety depend on which lane
+	 * happened to be touched first.
+	 */
+	private readonly backspinConnections = new Map<BasePart, RBXScriptConnection>();
+	private readonly lastBackspinAt = new Map<BasePart, number>();
 
 	/** TEMPORARY INSTRUMENTATION. Bodies whose texture creation has logged; see `BALL_TEXTURE_LOG_LIMIT`. */
 	private ballTextureLogs = 0;
@@ -775,6 +798,11 @@ export class BallSpawnerService implements OnStart {
 		// arriving with the ball; at three parts per spawn that is acceptable, and correctness wins.
 		this.attachBallMarkers(ball, entry);
 
+		// Backspin-on-collision. After the markers so the marker welds exist first (they are visual only
+		// and non-colliding, so order does not affect them), and after `Parent` so the ball is in the
+		// DataModel when its `Touched` connection is made.
+		this.attachBackspin(ball);
+
 		// TEMPORARY INSTRUMENTATION. Before `liveBalls.push`, so the spawn line always precedes any
 		// observation of this ball; the observation loop only ever sees balls that already logged.
 		this.beginBallObservation(ball, spawner, entry);
@@ -796,6 +824,114 @@ export class BallSpawnerService implements OnStart {
 		folder.Name = "SpawnedBalls";
 		folder.Parent = Workspace;
 		return folder;
+	}
+
+	// #endregion
+
+	// #region backspin on collision
+
+	/**
+	 * Adds angular velocity to a ball when another ball strikes it, producing occasional backspin.
+	 *
+	 * ## Why this is triggered by a collision and not by spawn
+	 *
+	 * A spawn-time spin would be the code choosing an outcome: every ball would get the same treatment,
+	 * every round would look the same, and the player could not learn anything from it. A collision is
+	 * the honest source — one fruit physically knocking another off-centre genuinely converts linear
+	 * momentum into angular momentum, and **which** balls get struck is decided by where the bodies
+	 * happen to meet. A ball alone in its lane is never struck and simply rides at equilibrium; a ball in
+	 * a busy lane may be struck repeatedly. That spread is the variety, and it is a consequence of the
+	 * scene, not of a random number in this file.
+	 *
+	 * ## Why the impulse lands only on the ball running this handler
+	 *
+	 * `Touched` fires on *both* parts of a contact, so a collision between A and B runs A's handler with
+	 * B as the argument and B's handler with A. Applying the impulse to `self` in each means both balls
+	 * receive exactly one impulse per collision — symmetric, as physics wants — without the double-count
+	 * that applying to both here would create.
+	 *
+	 * ## Cleanup
+	 *
+	 * The connection is stored in `backspinConnections` and disconnected in `destroyBall` and
+	 * `pruneDestroyedBalls`, so nothing outlives the ball. Strictly, a destroyed instance stops raising
+	 * `Touched` whether or not the connection is disconnected, but leaving the connection object in the
+	 * map would leak one entry per ball for the whole session — see the field's comment.
+	 */
+	private attachBackspin(ball: BasePart): void {
+		// Gated at attach rather than inside the handler: with the feature off there is no reason to hold
+		// a connection per ball at all, and the check is paid once per spawn instead of once per contact.
+		// The emitted Luau keeps this as a real `if` — roblox-ts does not fold the constant away — but a
+		// per-spawn branch against a boolean is not worth avoiding, and putting the gate here rather than
+		// in the handler means a disabled feature costs zero connections and zero handler invocations.
+		if (!BALL_BACKSPIN_ENABLED) {
+			return;
+		}
+
+		const connection = ball.Touched.Connect((other) => this.applyBackspin(ball, other));
+		this.backspinConnections.set(ball, connection);
+	}
+
+	private applyBackspin(ball: BasePart, other: BasePart): void {
+		// Another ball, or nothing. The slab, the belt, the welded markers, players and the wedge all
+		// reach this handler and must not spin the ball.
+		if (!other.HasTag(TAGS.ball)) {
+			return;
+		}
+
+		// A ball wedged against another re-fires `Touched` on essentially every physics step; without the
+		// cooldown the impulse would accumulate at ~60/s instead of once per collision.
+		const now = os.clock();
+		const last = this.lastBackspinAt.get(ball);
+		if (last !== undefined && now - last < BALL_BACKSPIN_COOLDOWN) {
+			return;
+		}
+
+		const belt = this.nearestBeltTo(ball.Position);
+		if (belt === undefined) {
+			// No belt means no meaningful rolling axis, and no surface whose speed the slip can be measured
+			// against. Skipping is better than guessing an axis from world X, which would be wrong for any
+			// rotated belt.
+			return;
+		}
+
+		// **The rolling axis, derived rather than assumed.** `RightVector` is the belt's travel direction
+		// and `yAxis` is up; their cross product is horizontal and perpendicular to travel, which is
+		// exactly the axis a body rolling along the belt turns about. For the observed belt
+		// (`RightVector = (1, 0, 0)`) that is `(0, 0, 1)` — **`+Z`**, not `-Z`.
+		//
+		// The sign question is not "does the ball spin forward or backward", it is "which sign makes the
+		// contact point move faster than the belt". The contact point's velocity is `v + w*r` along
+		// `RightVector`, so **adding** angular velocity along `+Z` increases it. At rolling equilibrium the
+		// contact point already moves at belt speed, so any increase puts it *ahead* of the belt and
+		// reverses friction. `+Z` is therefore the backspin direction, and it is what `Cross` returns.
+		//
+		// `.Unit` because a tilted belt's `RightVector` is not perpendicular to world up, so the raw cross
+		// product would not be unit length; the magnitude guard catches the degenerate case of a belt stood
+		// on its end, where the axis is undefined.
+		const axisRaw = belt.CFrame.RightVector.Cross(Vector3.yAxis);
+		if (axisRaw.Magnitude < 1e-3) {
+			return;
+		}
+		const axis = axisRaw.Unit;
+
+		const radius = ball.Size.Y / 2;
+		ball.AssemblyAngularVelocity = ball.AssemblyAngularVelocity.add(axis.mul(BALL_BACKSPIN_IMPULSE));
+
+		this.lastBackspinAt.set(ball, now);
+
+		// One line per impulse, and the only diagnostic in this feature. It exists to settle the one thing
+		// source cannot: whether `+Z` really is the direction that produces backspin in this engine. The
+		// sign of `slip` answers it — positive means the contact point is moving faster than the belt, so
+		// friction is pushing the ball backward, which is the mechanic working. Negative means the impulse
+		// sped the ball up instead and the sign needs inverting.
+		const beltSpeed = this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED);
+		const alongRight = ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector);
+		const omega = ball.AssemblyAngularVelocity.Dot(axis);
+		const slip = alongRight + omega * radius - beltSpeed;
+
+		print(
+			`[Ball] backspin impulse: dOmega=${formatNumber(BALL_BACKSPIN_IMPULSE)} r=${formatNumber(radius)} v=${formatNumber(alongRight)} omegaR=${formatNumber(omega * radius)} u=${formatNumber(beltSpeed)} slip=${formatNumber(slip)} ${slip > 0 ? "contact faster than belt -> friction pushes BACKWARD" : "contact slower than belt -> friction pushes FORWARD (sign inverted)"}`,
+		);
 	}
 
 	// #endregion
@@ -829,11 +965,25 @@ export class BallSpawnerService implements OnStart {
 		for (const ball of this.liveBalls) {
 			if (ball.Parent === undefined) {
 				this.ballKillY.delete(ball);
+				this.releaseBackspin(ball);
 			} else {
 				surviving.push(ball);
 			}
 		}
 		this.liveBalls = surviving;
+	}
+
+	/**
+	 * Drops the backspin connection and its cooldown clock for one ball.
+	 *
+	 * Called from both death paths. `Touched` on a destroyed instance stops firing on its own, so this is
+	 * not what keeps the handler from running — it is what keeps the two maps from growing by one entry
+	 * per ball for the lifetime of the server session.
+	 */
+	private releaseBackspin(ball: BasePart): void {
+		this.backspinConnections.get(ball)?.Disconnect();
+		this.backspinConnections.delete(ball);
+		this.lastBackspinAt.delete(ball);
 	}
 
 	private enforceCap(): void {
@@ -883,6 +1033,7 @@ export class BallSpawnerService implements OnStart {
 		}
 
 		this.ballKillY.delete(ball);
+		this.releaseBackspin(ball);
 		const index = this.liveBalls.indexOf(ball);
 		if (index !== -1) {
 			this.liveBalls.remove(index);

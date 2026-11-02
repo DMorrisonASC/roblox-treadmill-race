@@ -255,3 +255,60 @@ export const BELT_SURFACE_MOTOR_MAX_FORCE = 100000;
  * constrained body starts inside another.
  */
 export const BELT_SURFACE_MOTOR_MAX_ACCELERATION = 10000;
+
+/**
+ * **Placeholder.** Whether a ball-vs-ball collision adds angular velocity to the ball, producing
+ * occasional backspin and a brief backward scoot against the belt.
+ *
+ * A single switch so the whole mechanic can be turned off without deleting the handler, the constants,
+ * or the `Touched` connection it installs.
+ */
+export const BALL_BACKSPIN_ENABLED = true;
+
+/**
+ * **Placeholder.** Angular impulse applied to a ball when it is struck by another ball, in rad/s.
+ *
+ * ## Why backspin moves a ball backwards
+ *
+ * Rolling on the belt is slip-free: the ball's contact point moves at exactly the belt's speed. With
+ * `v` the ball's forward speed, `w` its angular speed about the rolling axis, `r` its radius and `u`
+ * the belt speed, the contact point moves at `v + w*r`, and rolling equilibrium is
+ * `v + w*r = u`. At the measured values — `u = 20`, `v = 6.4` — that needs `w*r = 13.6`.
+ *
+ * Add angular velocity in the *same* rotational sense and `w*r` overshoots what rolling requires, so
+ * the contact point moves **faster than the belt**. Friction then acts **backward** on the ball instead
+ * of forward. That reversal is the whole mechanic; the sign of this impulse is therefore the thing that
+ * matters most about it, and it is why the handler logs the resulting slip once per impulse.
+ *
+ * ## The arithmetic, and why this is 60 rather than 15
+ *
+ * Slip `s = v + w*r - u` decays at `ds/dt = -(1 + m*r²/I) * μ*g`. For a solid sphere `I = (2/5)m*r²`,
+ * so the factor is `1 + 2.5 = 3.5` and `ds/dt = -3.5·μ·g`. For a Rubber-on-Plastic blend, `μ ≈ 0.55`
+ * → `μ·g ≈ 107.9` and `ds/dt ≈ 378` studs/s².
+ *
+ * The ball's speed falls at `μ·g`, so the time to remove `v` is `v/(μ·g)`, and the slip needed to
+ * sustain exactly that long is `3.5·μ·g·v/(μ·g)` — **μ cancels**:
+ *
+ *     Δw_required = 3.5 · v / r
+ *
+ * At `v = 6.4` and `r = 0.5` that is **44.8 rad/s just to bring the ball to rest**, and
+ * `3.5 · (6.4 + 2) / 0.5 = 58.8` for a 2 studs/s scoot in reverse. **60** is that figure rounded up.
+ *
+ * This round started at `15`, which the arithmetic rules out: `Δw·r = 7.5` studs/s of slip decays in
+ * `0.02` s and removes only `2.1` studs/s, taking the ball from `6.4` to `4.3`. That is a visible
+ * hesitation, not backward travel — the ball never reverses, so the feature would have appeared not to
+ * work. The number is a `Placeholder` and is easy to lower if 60 reads as too violent; the *derivation*
+ * is what should not be lost, because it shows the requirement scales with `v/r` and not with `μ`.
+ */
+export const BALL_BACKSPIN_IMPULSE = 60;
+
+/**
+ * **Placeholder.** Minimum seconds between backspin impulses on one ball.
+ *
+ * **Not optional.** `Touched` fires on contact-*state* changes, and a ball wedged against another
+ * re-fires it on essentially every physics step. Without this, the impulse would accumulate ~60×/s and
+ * the ball would spin up without bound and behave like a wheel rather than a struck object. 0.25 s is
+ * ~15 physics steps: long enough that one collision produces exactly one impulse, short enough that
+ * two genuinely separate bumps still register as two.
+ */
+export const BALL_BACKSPIN_COOLDOWN = 0.25;

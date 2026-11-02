@@ -26,7 +26,7 @@
 export const BELT_SPEED_ATTRIBUTE = "BeltSpeed";
 
 /** **Placeholder** belt speed in studs/second. A gameplay constant with no other config to derive it from. */
-export const DEFAULT_BELT_SPEED = 50;
+export const DEFAULT_BELT_SPEED = 10;
 
 /**
  * `Radius` is retired. There is deliberately no constant for it below.

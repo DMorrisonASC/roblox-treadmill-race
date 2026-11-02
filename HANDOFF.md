@@ -281,3 +281,6 @@ Friction isolated as the single variable: slab material SmoothPlastic -> Rubber 
 ## 20. Manual trigger now spawns one body from every bound spawner
 
 Pressing `1` previously spawned from the first registered spawner only (`firstSpawner`), which with four spawners meant three lanes never got a manual body. The manual path now calls the shared `spawnOnePerSpawner("manual")` — the same implementation as the start-of-session one-shot, parameterised only so the summary log line names the trigger. `firstSpawner` deleted; the 100 ms per-player cooldown is unchanged and still gates the whole press, not per spawner. **Unverified in Studio.**
+## 21. Backspin on ball-ball collision
+
+Each spawned ball connects a `Touched` handler; when the other part is tagged `Ball` it adds `BALL_BACKSPIN_IMPULSE` rad/s about `belt.RightVector:Cross(yAxis)` (= `+Z` on a `+X` belt — the sign that puts the contact point ahead of the belt and reverses friction). Per-ball 0.25 s cooldown; impulse applied to self only, so the symmetric `Touched` pair gives each ball exactly one impulse per collision. No spawn-time spin. One log line per impulse reports `slip = v + w*r - u` so a single run settles the sign. **Impulse is 60 rad/s, not the 15 first suggested — 15 only slows the ball (6.4 -> 4.3), it cannot reverse it; see the derivation in `tuning.ts`. Unverified in Studio.**
