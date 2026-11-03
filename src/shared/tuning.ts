@@ -324,6 +324,40 @@ export const BALL_BACKSPIN_TARGET_SLIP = 15;
  * constant's comment.
  */
 export const BALL_BACKSPIN_COOLDOWN = 0.25;
+
+/**
+ * **Placeholder.** Minimum belt speed, in studs/s, before a ball-ball collision may add backspin.
+ *
+ * The arithmetic behind `5`: full belt speed is `BeltSpeed = 10` and `BELT_RAMP_SECONDS = 3`, so the
+ * ramp crosses `5` at `1.5 s` into `Running`. Below `5` the ball is not being carried forward strongly
+ * enough for the spin to be recoverable — the belt cannot out-pull the backward velocity the spin
+ * resolves to, so the spin only pushes the ball back. Above `5` the ball has enough belt momentum
+ * behind it for the spin to read as a correction rather than a reversal.
+ *
+ * **Absolute, not relative to `BeltSpeed`.** That is deliberate — `5` is a claim about how much forward
+ * carry makes backspin legible, which does not obviously scale with a top speed the designer might
+ * raise — but it means this number must be re-derived if `BeltSpeed` changes. At `BeltSpeed = 20` the
+ * gate would open a quarter of the way into the ramp instead of halfway, and the backspin would come
+ * back earlier than it does now.
+ *
+ * ## The two gate mechanisms
+ *
+ * The gate compares belt speed, not round phase, and the alternative is worth naming because it is what
+ * a reader will think of first:
+ *
+ * 1. **Belt speed alone** (chosen) — `TreadmillService.getEffectiveBeltSpeed()`, the *ramped* value.
+ * 2. **Belt speed *and* `RoundService.getPhase() === "Running"`** (rejected).
+ *
+ * The phase check was rejected because belt speed already covers it and covers more. `RoundService`
+ * writes `setBeltSpeed(0)` on entering `Idle`, `Countdown` and `Ended` and once at server start, so
+ * "not `Running`" and "belt at zero" are the same state seen from two sides — but the ramp is
+ * `Running` with the belt *below* full speed, and only the speed check rejects that. The phase check
+ * would additionally be a circular import (`RoundService` imports `BallSpawnerService`, so the reverse
+ * import closes the cycle) bought for nothing. **If the belt-speed read ever stops being reachable, the
+ * phase check is the fallback, and it is the weaker of the two.**
+ */
+export const BALL_BACKSPIN_MIN_BELT_SPEED = 5;
+
 /**
  * **Placeholder.** Whether a ball touching a `TreadmillWall`-tagged part is pushed forward.
  *
@@ -381,3 +415,211 @@ export const WALL_ASSIST_IMPULSE = 1;
  * the convergent velocity delta needs exactly the same bound.
  */
 export const WALL_ASSIST_TARGET_SPEED = 8;
+
+/**
+ * **Placeholder.** Seconds between round ticks.
+ *
+ * This is the cadence of `RoundService.onTick` and of the elimination check, and it is the API future
+ * powers will fire against � see the note in `round-service.ts`. One second is deliberately coarse:
+ * a power that lasts "one tick" is legible to a player, and a per-frame callback would invite powers
+ * that depend on frame timing, which then behave differently on a laggy client.
+ *
+ * Kept separate from the belt ramp, which needs ~60 Hz to look continuous. Conflating them would
+ * either make the belt step in three visible jumps or run powers at 60 Hz.
+ */
+export const TICK_INTERVAL_SECONDS = 1;
+
+/**
+ * **Placeholder.** Length of the `Countdown` phase, in seconds.
+ *
+ * Balls spawn at the moment `Countdown` begins and rest on a stationary belt for this long, so every
+ * contestant has settled before the belt moves. Three seconds is one full spawn-and-settle plus a
+ * beat � long enough that the first tick of `Running` is not measuring a ball mid-fall.
+ */
+export const COUNTDOWN_SECONDS = 3;
+
+/**
+ * **Placeholder.** Seconds for the belt to reach full speed once `Running` begins.
+ *
+ * Linear, not eased. A linear ramp means the acceleration is constant and identical for every ball
+ * regardless of when it lands, which is the property that makes a round reproducible; an eased ramp
+ * would make the first second slower than the last and reward a ball that happened to spawn late.
+ *
+ * Three seconds is roughly the time the belt takes to carry a ball across its width, so the ramp
+ * occupies the same window as the first meaningful movement rather than being a separate phase.
+ */
+export const BELT_RAMP_SECONDS = 3;
+
+/**
+ * **Placeholder.** Hard cap on a round's `Running` phase, in seconds.
+ *
+ * A round normally ends when one ball is left. This bounds the ones that do not � two balls circling
+ * each other, or a ball wedged against a wall out of reach of the zone. On expiry **every survivor is
+ * a co-winner**: the round does not pick a single winner it cannot justify, and it does not call the
+ * round undecided, because a future bet settled on "did my ball survive" has a definite answer.
+ *
+ * 60 s is long enough that a normal round finishes first (the belt is 56 studs at 10 studs/s, so a
+ * ball crossing it takes ~6 s even before collisions) and short enough that a dead round is not
+ * allowed to stall a session.
+ */
+export const ROUND_DURATION_SECONDS = 60;
+
+/**
+ * **Placeholder.** Seconds the `Ended` phase holds before returning to `Idle`.
+ *
+ * The belt is stopped and the surviving balls stay where they are, so the player can see what
+ * finished rather than watching the result vanish in the same frame it is logged. The round's own
+ * numbers are frozen during this window (`getElapsedSeconds` stops counting), so anything reading the
+ * result sees the value the round ended with, not a value drifting afterwards.
+ */
+export const END_HOLD_SECONDS = 5;
+
+/**
+ * **Placeholder.** Speed below which the markers do not turn at all, in studs/s.
+ *
+ * ## The offset it replaces, and the reversal
+ *
+ * The previous model was `SPIN_RATE_OFFSET + gain x |omegaPhysical|` with the offset at `8 rad/s`,
+ * chosen so that a ball with zero physical spin still showed movement. **The offset is deleted and this
+ * deadband takes its place**, because the user's requirement reversed: a *parked* ball must show
+ * stationary markers. The constant was deleted rather than set to `0` because nothing else read it, and
+ * this file's own rule is that a visible-but-inert constant is worse than none — `0` would have left a
+ * knob that reads as tunable and does nothing.
+ *
+ * ## Why a deadband and not just "small"
+ *
+ * The `spin-probe` log reports `|v| = 0.003` studs/s on a ball that is sitting still: contact solver
+ * noise and replication residual, not motion. Fed through the velocity branch at `4 x |v| / 0.5` that
+ * is `0.024 rad/s` — utterly invisible as a rate, and yet it accumulates: `0.024 rad/s` is one full
+ * revolution every 260 seconds, so a ball parked for a minute rotates its markers ~1.4 degrees. That is
+ * not a visual artefact anyone would notice on its own, but it is *the marker angle drifting while the
+ * ball is still*, which is a state nobody can explain from the picture and which would slowly desync
+ * two balls parked side by side. Below the deadband the rate is exactly zero, so the angle is exactly
+ * preserved.
+ *
+ * `0.5` studs/s is two orders of magnitude above the park noise and an eighth of the belt's steady-state
+ * ~4 studs/s, so there is no chance of a genuinely moving ball falling inside it.
+ */
+export const SPIN_DEADBAND_SPEED = 0.5;
+
+/**
+ * **Placeholder.** Multiplier on `|v| / radius` — the sliding ball's drawn rate.
+ *
+ * This is the branch that actually runs today: the `[Spawner] spin-probe` lines report
+ * `|omega| = 0` and `contactSlip = 10` on every body, so physical spin is identically zero and the
+ * physical branch below never fires until the belt is fixed. A ball sliding at `|v| = 4` with
+ * `radius = 0.5` gives `4 x 4 / 0.5 = 32 rad/s`, clamped to `30` — i.e. the steady state sits at the
+ * ceiling, which is what the user asked for when they asked for "more spin when moving".
+ *
+ * ## Re-purposed twice, and the current meaning is the third
+ *
+ * It began as a multiplier on `|v| / radius` (model 1), became a multiplier on `|omega|` (model 2), and
+ * is a multiplier on `|v| / radius` again (model 3). The name has survived all three because it has
+ * always meant "how much faster than true rolling the markers are drawn"; what changed each time is
+ * which quantity was being called "true rolling". The `|omega|` multiplier now lives separately in
+ * `APPARENT_SPIN_GAIN_OMEGA`, because the two branches are in different units — one is `rad/s` per
+ * `rad/s`, the other is `rad/s` per `(studs/s)/stud`, i.e. dimensionless against a *ratio* of geometry
+ * and speed — so a single shared number would tie two unrelated scales together.
+ */
+export const APPARENT_SPIN_GAIN = 4;
+
+/**
+ * **Placeholder.** Multiplier on `|AssemblyAngularVelocity|` — the genuinely-rolling branch.
+ *
+ * Separate from `APPARENT_SPIN_GAIN` because the units differ (see its docblock). `3` is a legibility
+ * multiplier: true rolling at `|omega| = 12.4` (the theoretical `2u/7` equilibrium for `u = 10`,
+ * `r = 0.5`) would draw at `37 rad/s` and clamp to `30`.
+ *
+ * **This branch is dead in the current build, and that is expected.** Every probe reports `|omega| = 0`,
+ * so it would compute `0` and the model falls through to the velocity branch. It exists first in the
+ * chain so that the day the belt actually imparts spin, the markers become physical with no code
+ * change — and so that a body that *is* spinning is never drawn from its translation instead.
+ */
+export const APPARENT_SPIN_GAIN_OMEGA = 3;
+
+/**
+ * **Placeholder.** Ceiling on the drawn angular rate, radians/second.
+ *
+ * **Kept at 30, deliberately.** The clamp is the only thing standing between the velocity branch and
+ * visible strobing: 30 rad/s is ~4.8 revolutions/second, and beyond roughly 5 rev/s a three-marker ball
+ * on a 60 Hz display aliases — consecutive frames land the markers more than half a revolution apart
+ * and the eye reads them as turning backwards.
+ *
+ * Under the current model the clamp is not a rare corner: `APPARENT_SPIN_GAIN = 4` reaches it at
+ * `|v| = 3.75` studs/s, and the belt's steady state is ~4, so a ball riding at belt speed sits *at* the
+ * ceiling. That is intended — the ceiling is the legibility limit, and a ball crossing a 56-stud belt
+ * in 14 seconds at 4.8 rev/s already reads as fast.
+ */
+export const APPARENT_SPIN_MAX_RAD_PER_SEC = 30;
+
+/**
+ * **Placeholder.** Physical angular speed above which the drawn axis is taken from the body's own spin.
+ *
+ * Below this, `AssemblyAngularVelocity.Unit` is numerically meaningless — a vector whose length is
+ * a rounding artefact has no trustworthy direction, and normalising it would aim the markers at
+ * whatever direction the last float bit happened to point. 0.05 rad/s is ~0.008 rev/s: far below any
+ * real rotation, far above solver noise.
+ *
+ * When the spin is below this the axis falls back to the direction of travel, and then to the belt's
+ * own `+RightVector` when the body is not moving either. That chain still matters even though a parked
+ * ball no longer rotates (`SPIN_DEADBAND_SPEED` holds the angle): the axis is computed every frame so
+ * the log line can name which source it used, and because a ball that starts moving must begin turning
+ * about a defined axis on its first moving frame rather than one frame later, when the previous frame's
+ * zero rate would otherwise have left no axis at all.
+ */
+export const SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC = 0.05;
+
+/**
+ * **Placeholder.** Speed above which the fallback axis prefers the ball's travel over the belt's axis.
+ *
+ * `0.5` studs/s — the same number as `SPIN_DEADBAND_SPEED` above, but a different job: that one decides
+ * whether the markers turn at all, this one decides *which way* they turn once they do. They coincide
+ * because both answer "is the ball really moving", and there is no reason for a ball to be turning while
+ * its direction is still being taken from the belt rather than from itself.
+ *
+ * The two fallbacks agree for a ball travelling straight down the belt, so this threshold only decides
+ * *which* they agree on when the ball is deflected by a wall or a collision: a moving ball should read
+ * as rolling the way it is actually going, not the way the belt is pointing. Below it, the ball's own
+ * direction is noise and the belt is the stable truth.
+ */
+export const SPIN_FALLBACK_MIN_SPEED = 0.5;
+
+/**
+ * **Placeholder.** Exponential smoothing time constant for the drawn velocity, in seconds.
+ *
+ * The client has no authority over the body, so it sees a server-owned assembly through replicated
+ * `CFrame` updates rather than a locally simulated one. Those updates arrive at the physics step rate,
+ * not at the render rate, so a raw per-frame `|Δposition| / dt` alternates between "moved a lot" and
+ * "moved nothing" — feeding that into a *direction* makes the markers jitter about an axis as the
+ * ball creeps, which no amount of gain tuning fixes.
+ *
+ * `0.15 s` is short enough that a real acceleration still reads as an acceleration (the belt ramp is
+ * 3 s) and long enough to average out roughly nine physics steps at 60 Hz. Smoothing the *vector*
+ * rather than the scalar speed is what filters the direction, so the spin axis does not jump when the
+ * ball grazes a wall.
+ *
+ * Note what this smoothing now feeds, which differs from the previous two models: it produces the `|v|`
+ * that the velocity branch of the rate reads (`min(MAX, GAIN x |v| / radius)`) as well as the fallback
+ * axis. It therefore *is* part of the rate path again — and that is why `SPIN_DEADBAND_SPEED` has to
+ * exist, since a smoothed speed still settles to the `0.003` studs/s park residual rather than to zero.
+ */
+export const APPARENT_SPIN_SMOOTHING_SECONDS = 0.15;
+
+/**
+ * **Placeholder.** Sign applied to the drawn spin axis. `1` or `-1`, nothing else.
+ *
+ * Applied to *all three* axis sources, which is what keeps it a single knob: the physical spin axis and
+ * both fallback rolling axes point the same way for a forward-rolling ball (all `-Z` for travel along
+ * `+X`), so one flip reverses the picture without making a rolling ball disagree with a sliding one.
+ *
+ * `yAxis:Cross(direction)` is **forward rolling**: for a body travelling `+X` it is `-Z`, the sign that
+ * moves the top of the ball toward `+X`. That is the negation of `applyBackspin`'s axis
+ * (`RightVector:Cross(yAxis)`, the *braking* spin), and the two must not be confused — reusing the
+ * backspin axis would draw the markers turning against the travel direction, which reads as the ball
+ * sliding backwards.
+ *
+ * A constant rather than a literal at the call site so the direction is a one-line edit to reverse,
+ * which is what makes the direction criterion checkable by a single rerun rather than by reading the
+ * cross-product justification again.
+ */
+export const APPARENT_SPIN_SIGN = 1;

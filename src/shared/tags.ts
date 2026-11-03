@@ -42,4 +42,18 @@ export const TAGS = {
 	 * general property of vertical geometry.
 	 */
 	treadmillWall: "TreadmillWall",
+	/**
+	 * The elimination boundary. A ball whose **centre** leaves this part's box is out of the round.
+	 *
+	 * **Distinct from `TreadmillWall`, and the distinction is load-bearing.** A wall is a barrier
+	 * *inside* the playable area — a ball touching one is still racing. A zone is the boundary *around*
+	 * it, and only leaving it ends a ball's round. `RoundService` reads this tag and only this tag;
+	 * it never connects to a wall's `Touched` and never asks whether a ball is touching a wall. The two
+	 * systems are deliberately unaware of each other, because conflating them would mean a ball that
+	 * brushed a guard rail was eliminated, which is the opposite of what the wall is for.
+	 *
+	 * The part is user-placed and invisible-by-design; nothing in this repository creates one. If the
+	 * tag is absent the round still runs — `RoundService` warns once and treats every ball as alive.
+	 */
+	eliminationZone: "EliminationZone",
 } as const;

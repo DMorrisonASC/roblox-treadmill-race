@@ -195,6 +195,13 @@ export class TreadmillService implements OnStart {
 	private readonly surfaces = new Map<BasePart, BeltSurface>();
 
 	/**
+	 * Speed every belt runs at, while set, in place of the `BeltSpeed` attribute. `undefined` means
+	 * "no override — read the attribute", which is the state the service starts in and never leaves
+	 * except while `RoundService` is driving.
+	 */
+	private beltSpeedOverride?: number;
+
+	/**
 	 * The belt's `CanCollide` as the user set it, recorded before `applySpeed` forces it to `false`.
 	 *
 	 * Without this, untagging a belt would leave it permanently non-colliding — the tag is the only
@@ -746,7 +753,78 @@ export class TreadmillService implements OnStart {
 	}
 
 	private readSpeed(part: BasePart): number {
+		// The override wins over the attribute for as long as it is set. `RoundService` drives the belt
+		// through `setBeltSpeed` and the attribute stops being the source of truth during a round — which
+		// is the point of the override: the attribute is a designer knob, and a round is not a designer.
+		// `stepSurface` reads through this every frame, so the ramp's per-frame writes land on the
+		// constraint without `setBeltSpeed` having to reach into the constraint itself.
+		if (this.beltSpeedOverride !== undefined) {
+			return this.beltSpeedOverride;
+		}
+
 		const raw = part.GetAttribute(BELT_SPEED_ATTRIBUTE);
 		return typeIs(raw, "number") ? raw : DEFAULT_BELT_SPEED;
+	}
+
+	/**
+	 * Sets the speed every bound belt runs at, overriding the `BeltSpeed` attribute.
+	 *
+	 * Called by `RoundService` for the ramp and to stop the belt outside `Running`. Nothing else calls
+	 * it, and that is deliberate — the belt has one driver during a round, so "which system is moving
+	 * the belt" has a single answer.
+	 *
+	 * The write is a single number on this service rather than a loop over the surfaces' constraints.
+	 * `stepSurface` already reconciles `constraint.Velocity` against `readSpeed` every frame, so pushing
+	 * the value there would duplicate the write and give two places that can disagree about the current
+	 * speed. The cost is that the change lands on the next `Heartbeat` rather than in the same call —
+	 * one frame, which no player can see and which the ramp's own frame-by-frame writing makes moot.
+	 */
+	public setBeltSpeed(speed: number): void {
+		this.beltSpeedOverride = speed;
+	}
+
+	/**
+	 * The belt's configured speed, ignoring any override.
+	 *
+	 * `RoundService` needs the target to ramp *towards*, and reading `readSpeed` for that would return
+	 * the ramp value itself and converge on whatever it was set to last. This reads the attribute the
+	 * designer set, which is the number a round should end up at.
+	 *
+	 * Resolved from the first bound belt; with no belt bound (before `onStart` completes, or in a scene
+	 * with no tagged belt) it falls back to the global default, because a ramp towards zero is worse
+	 * than a ramp towards the documented placeholder.
+	 */
+	public getBeltSpeed(): number {
+		for (const [belt] of this.surfaces) {
+			if (belt.Parent === undefined) {
+				continue;
+			}
+
+			const raw = belt.GetAttribute(BELT_SPEED_ATTRIBUTE);
+			return typeIs(raw, "number") ? raw : DEFAULT_BELT_SPEED;
+		}
+
+		return DEFAULT_BELT_SPEED;
+	}
+
+	/**
+	 * The speed the belt is *actually* being driven at right now — override if one is set, attribute
+	 * otherwise.
+	 *
+	 * `getBeltSpeed` above deliberately reports the designer's number, because that is what a round
+	 * should ramp towards. This reports the number a ball cares about: is the surface under me moving,
+	 * and how fast. The difference is the whole ramp — `getBeltSpeed` answers `10` one millisecond into
+	 * `Running`, while the constraint is still at `0`.
+	 *
+	 * A narrow no-argument read rather than making `readSpeed(part)` public: the override is one number
+	 * covering every bound belt, so exposing the per-part form would invite callers to pass a part and
+	 * believe the answer was per-part. The only caller is the backspin gate, which has no part to pass.
+	 */
+	public getEffectiveBeltSpeed(): number {
+		if (this.beltSpeedOverride !== undefined) {
+			return this.beltSpeedOverride;
+		}
+
+		return this.getBeltSpeed();
 	}
 }

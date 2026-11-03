@@ -107,3 +107,24 @@ export const SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE = "MaxLiveBalls";
  * comfortably longer than a ball takes to leave the belt in the test scene.
  */
 export const DEFAULT_MAX_LIVE_BALLS = 50;
+
+/**
+ * Attributes written by `BallSpawnerService` on each welded-turned-anchored visual marker.
+ *
+ * ## Why the local offset has to be sent at all
+ *
+ * The markers used to inherit the body's rotation through a `WeldConstraint`, so nothing had to
+ * describe where a marker sat: the weld did. The client-side spin controller has to reconstruct a
+ * marker's pose itself, as `body.CFrame * spin * localFrame`, and `localFrame` is not recoverable on
+ * the client — a marker anchored at its spawn pose and a body that has since moved no longer share a
+ * reference frame, so `body.CFrame:Inverse() * marker.CFrame` is only correct in the spawn frame, and
+ * the controller never runs in that frame.
+ *
+ * Three `Vector3` attributes rather than one: a `CFrame` is not an attribute type. Position plus two
+ * basis vectors determines the rotation exactly (`CFrame.fromMatrix` derives the third column), which
+ * covers the equatorial ring's 90° tilt — the poles are rotationally symmetric and would survive a
+ * lossy encoding, but the ring's plane would not.
+ */
+export const MARKER_LOCAL_POSITION_ATTRIBUTE = "MarkerLocalPosition";
+export const MARKER_LOCAL_RIGHT_ATTRIBUTE = "MarkerLocalRight";
+export const MARKER_LOCAL_UP_ATTRIBUTE = "MarkerLocalUp";

@@ -4,6 +4,9 @@ import {
 	BELT_SPEED_ATTRIBUTE,
 	DEFAULT_BELT_SPEED,
 	DEFAULT_MAX_LIVE_BALLS,
+	MARKER_LOCAL_POSITION_ATTRIBUTE,
+	MARKER_LOCAL_RIGHT_ATTRIBUTE,
+	MARKER_LOCAL_UP_ATTRIBUTE,
 	SPAWNER_KILL_Y_ATTRIBUTE,
 	SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE,
 } from "shared/attributes";
@@ -19,6 +22,7 @@ import { TAGS } from "shared/tags";
 import {
 	BALL_BACKSPIN_COOLDOWN,
 	BALL_BACKSPIN_ENABLED,
+	BALL_BACKSPIN_MIN_BELT_SPEED,
 	BALL_BACKSPIN_TARGET_SLIP,
 	BALL_TEXTURE_ASSET,
 	BALL_TEXTURE_OFFSET_RANGE,
@@ -27,6 +31,7 @@ import {
 	WALL_ASSIST_IMPULSE,
 	WALL_ASSIST_TARGET_SPEED,
 } from "shared/tuning";
+import { TreadmillService } from "./treadmill-service";
 
 /**
  * Three-decimal rounding instead of `string.format`: these numbers span `0.001`-scale local offsets
@@ -165,6 +170,21 @@ const BALL_LOG_LIMIT = 20;
 const BALL_OBSERVE_SECONDS = 0.1;
 
 /**
+ * TEMPORARY INSTRUMENTATION. Seconds after spawn at which each body reports its spin state, once.
+ *
+ * Two seconds is chosen against the belt ramp rather than against nothing: `BELT_RAMP_SECONDS` is 3, so
+ * at 2 s the belt is at roughly two thirds of `BeltSpeed` and the body has had time to be picked up
+ * and to settle into rolling or sliding. Sampling at 0.5 s would catch bodies still falling; sampling
+ * after 3 s would report the steady state but miss the difference between "never spun" and "spun and
+ * decayed".
+ *
+ * Once per body, not on a cadence: the question this answers is binary — is the belt physically
+ * spinning the body at all — and a cadence would bury the other lines in the same way the texture
+ * instrumentation was capped for.
+ */
+const SPIN_PROBE_SECONDS = 2;
+
+/**
  * TEMPORARY INSTRUMENTATION. Cadence of the rolling sample for ball #1, in seconds.
  *
  * 0.5 s is the same cadence as cleanup and belt-length/velocity gives ~5 samples across a 2.4 s
@@ -228,6 +248,8 @@ interface BallObservation {
 	/** TEMPORARY INSTRUMENTATION. `Touched` events seen since spawn; reported once, at first motion. */
 	touchedCount: number;
 	touchedConnection: RBXScriptConnection | undefined;
+	/** TEMPORARY INSTRUMENTATION. Whether the one-shot spin probe has printed for this body. */
+	spinProbeLogged: boolean;
 }
 
 /**
@@ -333,6 +355,18 @@ interface SpawnerFailure {
  */
 @Service()
 export class BallSpawnerService implements OnStart {
+	/**
+	 * Injected for one read: the effective belt speed, which is what the backspin gate compares.
+	 *
+	 * The belt is otherwise reached through the tag (`nearestBeltTo`, `resolveBeltFor`), and that
+	 * stays — those lookups answer "where is the surface under this ball", which is per-ball and
+	 * positional. Speed is different: `setBeltSpeed` writes one number on `TreadmillService` that
+	 * covers every bound belt, so a tag lookup could only ever recover the designer's attribute, never
+	 * the value the ramp has driven the constraint to. This is the smallest way to read that number,
+	 * and `TreadmillService` does not import this file, so there is no cycle.
+	 */
+	constructor(private readonly treadmill: TreadmillService) {}
+
 	private readonly spawners = new Set<BasePart>();
 	private readonly lastManualSpawnAt = new Map<Player, number>();
 
@@ -366,6 +400,14 @@ export class BallSpawnerService implements OnStart {
 	 * cheaper to read than a tagged union.
 	 */
 	private readonly wallAssistConnections = new Map<BasePart, RBXScriptConnection>();
+
+	/**
+	 * Whether a round is in progress, and therefore whether the manual `1` path is live.
+	 *
+	 * Set only by `RoundService`. Defaults to `false` so a server that never sees a round cannot be
+	 * poked into making bodies — the safe default is the one that does nothing.
+	 */
+	private roundActive = false;
 
 	/** TEMPORARY INSTRUMENTATION. Bodies whose texture creation has logged; see `BALL_TEXTURE_LOG_LIMIT`. */
 	private ballTextureLogs = 0;
@@ -413,9 +455,14 @@ export class BallSpawnerService implements OnStart {
 			}
 		});
 
-		// Last, so every tagged spawner is already bound. This is the only automatic spawn in the
-		// service; see `spawnOnePerSpawner` for why the timed stream was removed.
-		this.spawnOnePerSpawner("one-shot");
+		// **The one-shot spawn is gone.** A fresh server now starts with no balls at all, because a
+		// round has not started: balls exist only between `Countdown` and the end of `Ended`, and their
+		// creation is `RoundService`'s to request. Leaving the one-shot here would mean a server that has
+		// never seen a `2` keypress already has four bodies on a stationary belt, which reads as a round
+		// that started without anyone pressing anything.
+		//
+		// The manual `1` path still exists for ad-hoc bodies, but is gated on `Running` — see
+		// `setRoundActive`.
 	}
 
 	// #region binding
@@ -430,12 +477,12 @@ export class BallSpawnerService implements OnStart {
 			return;
 		}
 
-		// Derived before anything observes the part, so every later reader — the bind log, the one-shot
-		// spawn, the kill plane — sees a part with a complete set of values.
+		// Derived before anything observes the part, so every later reader — the bind log, the round's
+		// spawn request, the kill plane — sees a part with a complete set of values.
 		const derived = this.ensureDerivedAttributes(instance);
 
-		// No attribute listener and no `Enabled`: both retired with the stream. The only automatic spawn
-		// is the one-shot at start; every later body comes from the manual path.
+		// No attribute listener and no `Enabled`: both retired with the stream. Nothing spawns from the tag
+		// itself; bodies come from `spawnForRound` (a round) or the manual `1` path.
 		this.spawners.add(instance);
 
 		const id = ++this.nextSpawnerId;
@@ -494,6 +541,16 @@ export class BallSpawnerService implements OnStart {
 	}
 
 	private handleManualSpawn(player: Player): void {
+		// **Gated on the round.** `1` is a test affordance, not a way to participate: a body that appears
+		// mid-round would be an entrant nobody counted, and one that appears in `Idle` would sit on a
+		// stopped belt looking like a round that failed to start. Silently ignored outside `Running`
+		// rather than warned, because a player leaning on `1` during a countdown would otherwise fill
+		// their own output — `RoundService` already logs what phase the round is in, so the silence is
+		// explainable from the log.
+		if (!this.roundActive) {
+			return;
+		}
+
 		const now = os.clock() * 1000;
 		const last = this.lastManualSpawnAt.get(player);
 		if (last !== undefined && now - last < MANUAL_SPAWN_COOLDOWN_MS) {
@@ -513,8 +570,8 @@ export class BallSpawnerService implements OnStart {
 		// width or what happens when two bodies meet. The predictability it bought was the
 		// predictability of only ever seeing a quarter of the scene.
 		//
-		// The loop itself lives in `spawnOnePerSpawner` and is shared with the one-shot start spawn, so
-		// "how many bodies does a trigger produce" is decided in exactly one place.
+		// The loop below lives in `spawnOnePerSpawner`, which is the manual path's own shape: one body per
+		// spawner, regardless of how many are bound.
 		if (this.spawners.size() === 0) {
 			warn(`[Spawner] manual spawn requested but no part is tagged ${TAGS.ballSpawner}.`);
 			return;
@@ -525,46 +582,101 @@ export class BallSpawnerService implements OnStart {
 
 	// #endregion
 
-	// #region one-shot spawn
+	// #region round integration
 
 	/**
-	 * Spawns exactly one body per bound spawner.
+	 * Tells the spawner whether a round is in progress, which is the only thing that decides whether
+	 * the manual `1` path does anything.
 	 *
-	 * **Two callers, one implementation, on purpose.** `onStart` calls it once with `"one-shot"`, and
-	 * the manual `1` trigger calls it with `"manual"`. The manual path previously had its own copy of
-	 * this loop spawning from the first registered spawner only; keeping two loops meant the rule "how
-	 * many bodies does a trigger produce" was written down twice and could drift. The `reason` argument
-	 * exists so the single summary line stays truthful about which trigger fired — passing nothing would
-	 * have produced a log that said "one-shot" on every keypress.
+	 * A setter rather than `RoundService` injecting the phase: the spawner owns its own gate, and the
+	 * caller owns the phase. Every other design has the spawner asking the round a question on every
+	 * keypress, which is a dependency in the wrong direction — a spawner that needs a round is a
+	 * spawner that cannot be used outside one.
+	 */
+	public setRoundActive(active: boolean): void {
+		this.roundActive = active;
+	}
+
+	/** How many parts are currently bound as spawners. `RoundService` spawns one body per spawner. */
+	public getBoundSpawnerCount(): number {
+		return this.spawners.size();
+	}
+
+	/**
+	 * Spawns `count` bodies, distributed round-robin across the bound spawners, and returns them.
 	 *
-	 * ## Why the automatic spawn is one shot and not a stream
+	 * Round-robin rather than "one per spawner until the count is met" because the two are identical
+	 * when `count` equals the spawner count (the round's case) and round-robin degrades gracefully when
+	 * it does not: a scene with two spawners asked for three bodies puts two in one lane rather than
+	 * silently spawning two and reporting success.
 	 *
-	 * The previous revision started a timed stream at `Rate` per second because tagging a part should
-	 * visibly do something. That produced eight bodies a second across four spawners against a cap of
-	 * 50: a permanent mosh pit in four lanes, where body-to-body collisions and the 1 s bounce cooldown
-	 * interrupted any rolling every ~150 ms. Any observation about whether a body rolls or slides was
-	 * being taken inside that pit, so the fixture was preventing the measurement it existed for.
+	 * Each spawn is individually protected for the same reason the loop in `spawnOnePerSpawner` is: a
+	 * malformed spawner must cost one body, not the round. A body that fails is simply absent from the
+	 * returned list, so `RoundService` tracks exactly what exists rather than what was requested.
+	 */
+	public spawnForRound(count: number): BasePart[] {
+		const spawned = new Array<BasePart>();
+
+		const spawners = new Array<BasePart>();
+		for (const spawner of this.spawners) {
+			spawners.push(spawner);
+		}
+
+		if (spawners.size() === 0) {
+			warn(`[Spawner] a round was requested but no part is tagged ${TAGS.ballSpawner}; no bodies spawned.`);
+			return spawned;
+		}
+
+		for (let index = 0; index < count; index++) {
+			const spawner = spawners[index % spawners.size()];
+
+			let ball: BasePart | undefined;
+			const failure = this.runProtected(() => {
+				ball = this.spawnBall(spawner);
+			});
+
+			if (failure !== undefined) {
+				this.reportFailure(spawner, failure);
+				continue;
+			}
+
+			this.reportRecovery(spawner);
+			if (ball !== undefined) {
+				spawned.push(ball);
+			}
+		}
+
+		return spawned;
+	}
+
+	// #endregion
+
+	// #region manual spawn (one body per spawner)
+
+	/**
+	 * Spawns exactly one body per bound spawner. **Called only by the manual `1` trigger.**
 	 *
-	 * The user's actual game is one body per round. One body per spawner, spawned once, is the smallest
-	 * scene that can answer the question: a single body on the belt, nothing to collide with, nothing
-	 * to interrupt rolling. Additional bodies are still one keypress away via the manual path, which is
-	 * deliberate — collision testing needs a second body, and it should not require a code change.
+	 * This used to have two callers — the manual key and an automatic spawn at server start. The
+	 * automatic one is gone (see `onStart`), because bodies now exist only inside a round and
+	 * `RoundService` asks for them through `spawnForRound`. The `reason` argument survives as a single
+	 * literal so the summary line still names its trigger; a second caller would be a signal that the
+	 * round had grown a second way to create bodies, which is exactly what `spawnForRound` exists to
+	 * prevent.
 	 *
-	 * ## Why the automatic one runs here and not on a tag signal
-	 *
-	 * `onStart` has already bound every spawner from `GetTagged`, so `this.spawners` is complete. A tag
-	 * added *after* start does not get an automatic body: this is one spawn per Play session per
-	 * spawner, and a spawner that arrives late is a scene edit, not a new session. That keeps the rule
-	 * "one body per spawner" true and makes the manual path the explicit way to add more.
+	 * The loop is deliberately **not** shared with `spawnForRound`, even though both walk the spawner
+	 * set: this one spawns one per spawner *regardless of count* (a fixed shape, one body each), while
+	 * `spawnForRound` spawns a *requested count* distributed round-robin. Folding them together would
+	 * mean a parameter that means "one each" in one case and "N total" in the other, which is the kind
+	 * of overload that gets misread at the call site.
 	 *
 	 * ## Failure containment
 	 *
 	 * Each spawn is individually protected, for the same reason the old stream tick was: one malformed
 	 * spawner must not prevent the others from producing their body. The failure is logged against the
-	 * spawner that caused it. This matters more for the manual path than for the one-shot, because a
-	 * keypress that silently produced three of four bodies would look like flaky physics.
+	 * spawner that caused it. This matters for the manual path because a keypress that silently produced
+	 * three of four bodies would look like flaky physics.
 	 */
-	private spawnOnePerSpawner(reason: "one-shot" | "manual"): void {
+	private spawnOnePerSpawner(reason: "manual"): void {
 		let spawned = 0;
 
 		for (const spawner of this.spawners) {
@@ -805,11 +917,11 @@ export class BallSpawnerService implements OnStart {
 		// "how many entries are in an array this service happens to remember".
 		CollectionService.AddTag(ball, TAGS.ball);
 
-		// Visual only, and attached *after* `Parent` — unlike the textures above. The reason is the weld:
-		// a `WeldConstraint` couples two parts, and both must already be in the DataModel when it is
-		// created, or the constraint has nothing to act on. Parenting the ball first guarantees that.
-		// The cost is that the three markers replicate as separate child-creation events rather than
-		// arriving with the ball; at three parts per spawn that is acceptable, and correctness wins.
+		// Visual only, and attached *after* `Parent` — unlike the textures above. The markers are anchored
+		// and carry their local offset as attributes, so they need the body to be in the DataModel before
+		// `ball.CFrame.ToObjectSpace` has a meaningful frame to be relative to. The cost is that the three
+		// markers replicate as separate child-creation events rather than arriving with the ball; at three
+		// parts per spawn that is acceptable, and correctness wins.
 		this.attachBallMarkers(ball, entry);
 
 		// Backspin-on-collision. After the markers so the marker welds exist first (they are visual only
@@ -892,6 +1004,47 @@ export class BallSpawnerService implements OnStart {
 	}
 
 	private applyBackspin(ball: BasePart, other: BasePart): void {
+		// **The belt must actually be carrying the ball before a collision is allowed to spin it.**
+		//
+		// Backspin is a response to a collision *on a moving surface*: the spin means something only
+		// because belt friction then has something to resolve it against, and the contact point
+		// outrunning the belt is what converts the spin into a backward velocity change. Over a
+		// stationary surface there is nothing to resolve, so the ball just rolls, which is what a Studio
+		// log showed — the handler firing at `t = 1.067 s` inside `Countdown` with `v = 0`, `omega*r`
+		// going `0 -> 25`, and `u = 10` printed because `u` was read from the `BeltSpeed` attribute, not
+		// from the belt's actual speed. The `10` in that line was never the surface the ball was on.
+		//
+		// ## Why belt speed and not round phase
+		//
+		// Two checks could gate this and they are not the same check: belt speed alone, or belt speed
+		// plus `RoundService.getPhase() === "Running"`. **Belt speed alone is used, and it is the
+		// stricter of the two rather than a weaker substitute.** `RoundService` writes
+		// `setBeltSpeed(0)` on entering `Idle`, `Countdown` and `Ended`, and once at server start, so
+		// "not `Running`" and "belt at zero" are the same state seen from two sides — the speed test
+		// implies the phase test. It also rejects the ramp, which the phase test would not: a collision
+		// at `0.4 s` into `Running` is `Running` and still not being carried. The reverse does not hold,
+		// so belt speed is the check that covers the whole requirement.
+		//
+		// The phase check on top was rejected because reaching it means this file importing
+		// `RoundService` while `RoundService` imports this file — a require cycle bought for a redundant
+		// second opinion on a number the belt already states.
+		//
+		// **`getEffectiveBeltSpeed`, not `getBeltSpeed`.** The former returns the override the ramp
+		// writes; the latter returns the attribute, which stays at the designer's `10` for the entire
+		// round. Reading the attribute here would leave the gate permanently open and change nothing.
+		//
+		// A rejected call is a normal skip, not an error, so it is silent — `[Ball] backspin:` printing
+		// per applied impulse is the only instrumentation this feature has, and a second line for "did
+		// nothing" would bury it.
+		//
+		// Known and deliberate: the slip below still measures against the attribute (`u`), not the ramped
+		// speed. Between this threshold and full speed the two differ, so the applied spin is smaller
+		// than the true slip would justify for up to `1.5 s` of each round. Closing that means changing
+		// the slip calculation, which this change does not do.
+		if (this.treadmill.getEffectiveBeltSpeed() < BALL_BACKSPIN_MIN_BELT_SPEED) {
+			return;
+		}
+
 		// Another ball, or nothing. The slab, the belt, the welded markers, players and the wedge all
 		// reach this handler and must not spin the ball.
 		if (!other.HasTag(TAGS.ball)) {
@@ -1231,6 +1384,7 @@ export class BallSpawnerService implements OnStart {
 			anomalyReported: false,
 			touchedCount: 0,
 			touchedConnection: undefined,
+			spinProbeLogged: false,
 		};
 
 		// Counted from spawn rather than "during the first second" verbatim: first motion arrives
@@ -1365,39 +1519,41 @@ export class BallSpawnerService implements OnStart {
 	}
 
 	/**
-	 * Welds three visual markers — two pole dots and one equatorial band — to a spawned body.
+	 * Places three visual markers — two pole dots and one equatorial band — on a spawned body.
 	 *
 	 * ## Why this exists at all
 	 *
 	 * A sphere has no features, so a sphere rolling at belt speed is pixel-identical to a sphere
 	 * sitting still. The texture route has already cost two rounds and still does not render on a
-	 * curved primitive. Welded geometry cannot fail to render — it is ordinary parts.
+	 * curved primitive. Ordinary parts cannot fail to render.
 	 *
 	 * ## Why the decorations cannot disturb the experiment
 	 *
 	 * `CanCollide = false` — a colliding pole marker would make the body bounce on its own marker, so
 	 * the surface under test would no longer be the belt. This is the single most important property
-	 * here, and it is also why the markers are welded rather than moved by hand each frame: a weld needs
-	 * no per-frame write and no proximity test.
+	 * here, and it is unchanged by anchoring: an anchored, non-colliding part affects nothing the body
+	 * does.
 	 *
-	 * `Massless = true` — a massless part welded to a part with mass contributes nothing to the
-	 * assembly's mass or inertia. Without it, three markers would roughly double the inertia of the
-	 * assembly and quietly change how it rolls, which would turn a visual change into a physics change.
+	 * `Massless = true` — historical, and now inert. It mattered when the markers were welded into the
+	 * body's assembly and a non-massless marker would have doubled its inertia; an anchored marker is
+	 * in no assembly at all, so the flag changes nothing. It is left in place rather than removed
+	 * because it costs one property write and because re-welding them would silently need it back.
 	 *
-	 * `Anchored = false` — an anchored decoration would pin the weld, and therefore the body, in space.
+	 * `Anchored = true` — **reversed from the welded version**, and the reversal is the point of this
+	 * round. An anchored marker cannot follow the body, which is exactly what lets the client draw it
+	 * at a rate of its own choosing; see `createMarker` for why the client-side de-weld alternative is
+	 * not defined behaviour.
 	 *
-	 * ## Why `WeldConstraint` and not `Weld`
+	 * ## Why the markers are still children of the body
 	 *
-	 * `WeldConstraint` exposes exactly `Enabled`, `Part0`, `Part1` — no `C0`/`C1`. That is not a
-	 * limitation: the constraint preserves the rigid relationship that exists between the two parts *at
-	 * the moment it is created*, so the offset is expressed by positioning the decoration first. A
-	 * legacy `Weld` would need the same position expressed as a `C0` relative to the other part's
-	 * coordinate system — one more convention to get wrong for no benefit.
+	 * Ancestry is what gets a marker destroyed with its body, and that is unchanged by anchoring: the
+	 * cap, the kill plane and round teardown all `Destroy()` the body, and children go with it. What
+	 * the weld used to provide — the marker staying *on* the ball — is now the client's job.
 	 *
 	 * ## Ordering
 	 *
-	 * The body is already parented when this runs, and each marker is parented before its constraint is
-	 * created, so `WeldConstraint` always sees two parts that are both in the DataModel.
+	 * The body is already parented when this runs, and each marker is parented before its tags and
+	 * attributes replicate, so a client always receives a marker that already knows its local offset.
 	 *
 	 * ## Cylinder geometry
 	 *
@@ -1431,12 +1587,47 @@ export class BallSpawnerService implements OnStart {
 	}
 
 	/**
-	 * Builds one welded, non-colliding, massless marker under the body.
+	 * Builds one non-colliding, massless visual marker under the body, anchored at its spawn pose.
 	 *
 	 * `Neon` material rather than `SmoothPlastic`: these exist to be tracked by eye at a glance and at a
 	 * distance, and Neon is unaffected by the scene's lighting, so the markers stay legible regardless
 	 * of time of day or shadow. The cost is that Neon blooms slightly at close range, which is
 	 * irrelevant for a test marker and preferable to a marker that disappears in shadow.
+	 *
+	 * ## Why there is no weld here any more
+	 *
+	 * The markers are drawn by `MarkerSpinController` at a rate that is *not* the body's physical
+	 * angular velocity, so they must stop inheriting the body's `CFrame` rigidly. Two mechanisms could
+	 * have done that, and only one of them is defined behaviour:
+	 *
+	 * **Rejected: destroy the weld on the client.** A client-side `Destroy()` of a server-created
+	 * constraint is local, so it looks like it should work — but the marker is then an unanchored part
+	 * whose `CFrame` is simulated for a server-owned assembly, and a client cannot drive the `CFrame`
+	 * of a part the server simulates: the next physics step or replication overwrites the write. The
+	 * controller would be fighting the solver every frame, and whether it won would depend on assembly
+	 * ordering rather than on anything documented.
+	 *
+	 * **Chosen: never create the weld, and anchor the marker.** `Anchored = true` makes the marker's
+	 * `CFrame` an ordinary replicated property that the server sets exactly once, at spawn. A client
+	 * writing that property locally is therefore not in contention with anything: no replication of it
+	 * ever follows, because the server never touches it again. That is what makes
+	 * `MarkerSpinController`'s per-frame writes stable rather than a race.
+	 *
+	 * **The cost, named because it is real:** a client that is not running the controller — before it
+	 * loads, or a Studio session with the script disabled — sees the markers parked at the ball's spawn
+	 * position instead of on the ball. The server view has the same problem permanently, which is
+	 * survivable because nothing renders the server view. The alternative was a marker that visibly
+	 * jitters, which is worse than one that is briefly in the wrong place.
+	 *
+	 * ## Why the local offset is written as attributes
+	 *
+	 * With no weld, the client has to rebuild each marker's pose as `body.CFrame * spin * localFrame`.
+	 * That `localFrame` cannot be derived on the client: the marker stays at its spawn pose while the
+	 * body moves, so `body.CFrame:Inverse() * marker.CFrame` is only the true offset in the frame the
+	 * body spawned in, which the controller never observes. Three `Vector3` attributes (`attributes.ts`)
+	 * carry position and two basis vectors, which is exact — `CFrame.fromMatrix` fills in the third.
+	 * Setting them before `Parent` means they arrive with the marker rather than as separate
+	 * replication events.
 	 */
 	private createMarker(
 		ball: BasePart,
@@ -1452,27 +1643,32 @@ export class BallSpawnerService implements OnStart {
 		marker.CFrame = cframe;
 		marker.Color = style.color;
 		marker.Material = Enum.Material.Neon;
-		marker.Anchored = false;
 		marker.CanCollide = false;
 		marker.Massless = true;
 		marker.CastShadow = false;
 		marker.TopSurface = Enum.SurfaceType.Smooth;
 		marker.BottomSurface = Enum.SurfaceType.Smooth;
 
+		// Anchored, unlike the welded version: see the mechanism note above. The server places it once
+		// and then leaves it alone, which is what frees the client to draw it.
+		marker.Anchored = true;
+
+		// The marker's pose relative to the body, in the body's own frame, captured *before* anything
+		// can move. `ToObjectSpace` is `ball.CFrame:Inverse() * cframe` per the typings, and both
+		// CFrames are the spawn values here, so this is exact rather than approximate.
+		const localFrame = ball.CFrame.ToObjectSpace(cframe);
+		marker.SetAttribute(MARKER_LOCAL_POSITION_ATTRIBUTE, localFrame.Position);
+		marker.SetAttribute(MARKER_LOCAL_RIGHT_ATTRIBUTE, localFrame.RightVector);
+		marker.SetAttribute(MARKER_LOCAL_UP_ATTRIBUTE, localFrame.UpVector);
+
 		// Parented to the body, not to the body's folder. This is what makes cleanup free: `Destroy()` on
 		// the body takes its descendants with it, so the cap and the kill plane cannot leave markers
 		// behind. A welded *sibling* would survive its body being destroyed and would accumulate at
-		// spawn rate until the server ran out of room.
+		// spawn rate until the server ran out of room. Anchoring does not change this — ancestry, not the
+		// constraint, is what gets a child destroyed with its parent.
 		marker.Parent = ball;
 
 		CollectionService.AddTag(marker, TAGS.ballDecoration);
-
-		// Created last, after both parts are parented — see the ordering note above.
-		const weld = new Instance("WeldConstraint");
-		weld.Name = "MarkerWeld";
-		weld.Part0 = ball;
-		weld.Part1 = marker;
-		weld.Parent = marker;
 	}
 
 	/**
@@ -1630,9 +1826,61 @@ export class BallSpawnerService implements OnStart {
 		}
 	}
 
+	/**
+	 * TEMPORARY INSTRUMENTATION. One line per body, `SPIN_PROBE_SECONDS` after spawn, describing how
+	 * the body is actually turning.
+	 *
+	 * ## Why this exists in a round about markers
+	 *
+	 * The markers now spin at a rate derived from the body's *linear* velocity, which means a body
+	 * sliding with zero physical spin renders exactly like one rolling. That destroys the diagnostic the
+	 * markers were originally built for, and no amount of looking at the screen restores it. This line
+	 * restores it in text: `|omega|` is the body's real angular speed, and `contactSlip` separates a
+	 * rolling body from a sliding one.
+	 *
+	 * ## `contactSlip` and its sign
+	 *
+	 * `contactSlip = u - (alongRight + omega*r)` — the negation of the quantity `applyBackspin` calls
+	 * `slip`, and deliberately so: **positive here means the contact point is moving slower than the
+	 * belt**, i.e. friction is pushing the body forward and it has not reached rolling equilibrium.
+	 * Zero is rolling-without-slipping and negative means the contact is outrunning the belt. Reading
+	 * it as "how far from rolling is this body" is the whole point, and that reading only works with
+	 * this sign.
+	 *
+	 * `omega` is projected onto the same axis `applyBackspin` uses (`RightVector:Cross(yAxis)`), not
+	 * taken as `|AssemblyAngularVelocity|`, because a body spinning about a different axis is not
+	 * rolling along the belt and would otherwise be credited with spin it does not have in the
+	 * direction that matters. `|omega|` is printed alongside as the raw magnitude so the two can be
+	 * compared: if they differ, the body is spinning about the wrong axis, which is itself the answer
+	 * to a different question.
+	 *
+	 * Server-side on purpose. `AssemblyAngularVelocity` and `AssemblyLinearVelocity` are both tagged
+	 * **NotReplicated** in the installed typings, so a client cannot read them as replicated state —
+	 * the server is the only place they are authoritative.
+	 */
+	private reportSpinProbe(ball: BasePart, belt: BasePart, beltSpeed: number, velocity: Vector3): void {
+		const radius = ball.Size.Y / 2;
+		const axisRaw = belt.CFrame.RightVector.Cross(Vector3.yAxis);
+		const omega = axisRaw.Magnitude < 1e-3 ? 0 : ball.AssemblyAngularVelocity.Dot(axisRaw.Unit);
+		const alongRight = velocity.Dot(belt.CFrame.RightVector);
+		const contactSlip = beltSpeed - (alongRight + omega * radius);
+
+		print(
+			`[Spawner] spin-probe ball="${ball.GetFullName()}" |omega|=${formatNumber(ball.AssemblyAngularVelocity.Magnitude)} omegaAlong=${formatNumber(omega)} omegaR=${formatNumber(omega * radius)} |v|=${formatNumber(velocity.Magnitude)} alongRight=${formatNumber(alongRight)} u=${formatNumber(beltSpeed)} r=${formatNumber(radius)} contactSlip=${formatNumber(contactSlip)}`,
+		);
+	}
+
 	private observeBall(ball: BasePart, observation: BallObservation, belt: BasePart, now: number): void {
 		const velocity = ball.AssemblyLinearVelocity;
 		const beltSpeed = this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED);
+
+		// TEMPORARY INSTRUMENTATION. The one-shot spin probe. Runs before anything else in this pass so a
+		// body that gets destroyed by the cap on the same tick still reports first, and so the line
+		// appears in spawn order relative to the other one-shots.
+		if (!observation.spinProbeLogged && now - observation.spawnedAt >= SPIN_PROBE_SECONDS) {
+			observation.spinProbeLogged = true;
+			this.reportSpinProbe(ball, belt, beltSpeed, velocity);
+		}
 
 		// Local space of the belt. `PointToObjectSpace` is the only correct frame here because the belt
 		// may be rotated arbitrarily in Studio: comparing world X to the belt's Size.X would report a
