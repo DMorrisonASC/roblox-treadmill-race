@@ -1,6 +1,7 @@
-import { CollectionService, Workspace } from "@rbxts/services";
+import { CollectionService, RunService, Workspace } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
 import {
+	BALL_SPEED_ATTRIBUTE,
 	BELT_SPEED_ATTRIBUTE,
 	DEFAULT_BELT_SPEED,
 	DEFAULT_MAX_LIVE_BALLS,
@@ -26,6 +27,9 @@ import {
 	BALL_BACKSPIN_ENABLED,
 	BALL_BACKSPIN_MIN_BELT_SPEED,
 	BALL_BACKSPIN_TARGET_SLIP,
+	BALL_SPEED_DECAY_RATE,
+	BALL_SPEED_MIN,
+	BALL_SPEED_START,
 	BALL_TEXTURE_ASSET,
 	BALL_TEXTURE_OFFSET_RANGE,
 	BALL_TEXTURE_OFFSET_RANGE_V,
@@ -473,6 +477,16 @@ export class BallSpawnerService implements OnStart {
 			}
 		});
 
+		// **The whole simulation.** One connection for every ball, every frame, and the only thing that moves a
+		// ball along the belt since the physical slab stopped driving anything (see `TreadmillService`).
+		//
+		// On `Heartbeat` because it must run at physics rate: the velocity it writes is what the engine
+		// integrates next step, so a slower cadence would produce visible stutter and a faster one would
+		// rewrite the same value twice. It is gated on `roundActive` ? the flag `RoundService` sets at
+		// `Playing` entry and clears on the way out ? so `Waiting`, `PostGame` and `Intermission` cost one
+		// boolean test per frame and no writes at all.
+		RunService.Heartbeat.Connect((dt) => this.stepBallSpeeds(dt));
+
 		// TEMPORARY INSTRUMENTATION. Separate from the cleanup loop because observation must run at
 		// `BALL_OBSERVE_SECONDS`, not at cleanup's 0.5 s — see the constant's comment. Read-only, so
 		// the two loops cannot interfere.
@@ -569,6 +583,18 @@ export class BallSpawnerService implements OnStart {
 	 */
 	public setRoundActive(active: boolean): void {
 		this.roundActive = active;
+
+		// Leaving `Playing` stops the simulation by clearing the flag, but the attribute is the ball's own
+		// state and would otherwise keep the last value it held ? a ball frozen mid-round with `BALL_SPEED = 4`
+		// reads as "still racing, just not moving" in any log line or future consumer. Zeroing it makes the
+		// stopped state explicit, which is the same reason `Waiting` sets the belt to zero.
+		if (!active) {
+			for (const ball of this.liveBalls) {
+				if (ball.Parent !== undefined) {
+					ball.SetAttribute(BALL_SPEED_ATTRIBUTE, BALL_SPEED_MIN);
+				}
+			}
+		}
 	}
 
 	/** How many parts are currently bound as spawners. `RoundService` spawns one body per spawner. */
@@ -889,6 +915,12 @@ export class BallSpawnerService implements OnStart {
 		// "how many entries are in an array this service happens to remember".
 		CollectionService.AddTag(ball, TAGS.ball);
 
+		// **The ball's own speed, seeded at the reference belt speed.** Written at birth so the first tick that
+		// reads it finds a defined number rather than a missing attribute, and so a ball spawned into a round
+		// that is already running starts neutral (`RELATIVE_SPEED = 0`) rather than inheriting whatever the
+		// previous round's last ball happened to hold.
+		ball.SetAttribute(BALL_SPEED_ATTRIBUTE, BALL_SPEED_START);
+
 		// Visual only, and attached *after* `Parent` — unlike the textures above. The markers are anchored
 		// and carry their local offset as attributes, so they need the body to be in the DataModel before
 		// `ball.CFrame.ToObjectSpace` has a meaningful frame to be relative to. The cost is that the three
@@ -928,6 +960,83 @@ export class BallSpawnerService implements OnStart {
 		folder.Name = "SpawnedBalls";
 		folder.Parent = Workspace;
 		return folder;
+	}
+
+	// #endregion
+
+	// #region the reference-speed model
+
+	/**
+	 * Decays every ball's speed and hands the engine a velocity derived from it.
+	 *
+	 * ## The model, for a reader who has not seen the brief
+	 *
+	 * The belt is **not physical any more**. `BELT_SPEED` (`DEFAULT_BELT_SPEED`, 10) is a fixed reference
+	 * number. Each ball carries `BALL_SPEED` as an attribute, starts at `BALL_SPEED_START` (the same 10), and
+	 * decays toward `BALL_SPEED_MIN` at `BALL_SPEED_DECAY_RATE`.
+	 *
+	 * Every tick the ball's velocity **along the belt** is set to `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED`:
+	 * zero at the start (the ball holds station), negative once decay has begun (the ball slides toward the
+	 * exit edge), and positive only after a pickup (the ball drifts back toward the spawn edge, away from
+	 * elimination). The sign is the whole design: **negative loses ground, positive gains it.**
+	 *
+	 * ## Why the velocity is *set* and the other components are preserved
+	 *
+	 * `AssemblyLinearVelocity` is replaced only along `RightVector`. The vertical component is left to gravity
+	 * (the ball still has to land, bounce and settle), and the across-belt component is left to collisions, so
+	 * a ball knocked sideways keeps drifting sideways. Writing a full velocity vector every tick would flatten
+	 * both, and a ball that could not fall would never settle onto the floor slab.
+	 *
+	 * ## Why the attribute and not a service-side map
+	 *
+	 * The attribute is on the body, replicates with it, and dies with it ? no cleanup on any of the four death
+	 * paths, and a pickup (a different service) can raise it without an API call into this one.
+	 *
+	 * ## `playbackSpeed` clamp
+	 *
+	 * Only balls tagged `Ball` and still parented are touched. The live array already holds exactly those, and
+	 * the `Parent` test catches a body destroyed by `RoundService` between two frames, which would otherwise
+	 * have its velocity written after the engine had already removed it.
+	 */
+	private stepBallSpeeds(dt: number): void {
+		if (!this.roundActive) {
+			return;
+		}
+
+		// The **reference** speed, not the ramp: `BALL_SPEED_START` equals it, so `RELATIVE_SPEED` starts at exactly
+		// zero on the first `Playing` tick and only moves when decay or a pickup moves `BALL_SPEED`.
+		const beltSpeed = this.treadmill.getReferenceBeltSpeed();
+		const right = this.treadmill.getBeltRightVector();
+
+		for (const ball of this.liveBalls) {
+			if (ball.Parent === undefined) {
+				continue;
+			}
+
+			const speed = this.readNumber(ball, BALL_SPEED_ATTRIBUTE, BALL_SPEED_START);
+			// `decayed`, not `next`: `next` is a Lua global and roblox-ts rejects the identifier outright.
+			const decayed = math.max(BALL_SPEED_MIN, speed - BALL_SPEED_DECAY_RATE * dt);
+			if (decayed !== speed) {
+				ball.SetAttribute(BALL_SPEED_ATTRIBUTE, decayed);
+			}
+
+			const relative = decayed - beltSpeed;
+			const velocity = ball.AssemblyLinearVelocity;
+			const along = velocity.Dot(right);
+
+			// Replace only the along-belt component: `velocity - right*along` is everything else (gravity and
+			// sideways drift), and adding `right*relative` back in swaps the one component this model owns.
+			// **`-relative` because the belt's `RightVector` runs front to back.** `RightVector` is `+X`, and in this
+			// model `+X` is the *back* edge (local `+28`, furthest from the origin); `-X` is the front, where the
+			// ball spawns. A positive `RELATIVE_SPEED` means the ball is faster than the belt and must gain ground
+			// toward the **front**, which is `-RightVector` in world space. So the multiply is negated: the sign is
+			// the model's, not the world's.
+			//
+			// Getting this wrong is visible and was: with `+relative`, a ball decaying below belt speed drifted to
+			// local `X = -28` and left the belt at the front after ~11 s, i.e. it exited at the edge it spawned
+			// beside. With the negation it drifts to `+28` and crosses the whole belt.
+			ball.AssemblyLinearVelocity = velocity.sub(right.mul(along)).add(right.mul(-relative));
+		}
 	}
 
 	// #endregion
@@ -1062,9 +1171,9 @@ export class BallSpawnerService implements OnStart {
 
 		const radius = ball.Size.Y / 2;
 		const beltSpeed = this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED);
-		const alongRight = ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector);
+		const ballSpeed = ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector);
 		const omegaBefore = ball.AssemblyAngularVelocity.Dot(axis);
-		const slipBefore = alongRight + omegaBefore * radius - beltSpeed;
+		const slipBefore = ballSpeed + omegaBefore * radius - beltSpeed;
 
 		// **Converge to the target, do not add to it.** The previous version added a constant `60 rad/s`
 		// on every qualifying contact, which compounded: a Studio log showed `omega * r` climbing from 30
@@ -1095,7 +1204,7 @@ export class BallSpawnerService implements OnStart {
 		// velocity, and because it makes the `3.5` factor visible rather than buried in a comment.
 		const slipAfter = slipBefore + addedOmega * radius;
 		print(
-			`[Ball] backspin: addedOmega=${formatNumber(addedOmega)} r=${formatNumber(radius)} v=${formatNumber(alongRight)} omegaR=${formatNumber(omegaBefore * radius)}->${formatNumber((omegaBefore + addedOmega) * radius)} u=${formatNumber(beltSpeed)} slip=${formatNumber(slipBefore)}->${formatNumber(slipAfter)} predictedDv=${formatNumber(-slipAfter / 3.5)} ${slipAfter > 0 ? "contact faster than belt -> friction pushes BACKWARD" : "contact slower than belt -> friction pushes FORWARD (sign inverted)"}`,
+			`[Ball] backspin: addedOmega=${formatNumber(addedOmega)} r=${formatNumber(radius)} v=${formatNumber(ballSpeed)} omegaR=${formatNumber(omegaBefore * radius)}->${formatNumber((omegaBefore + addedOmega) * radius)} u=${formatNumber(beltSpeed)} slip=${formatNumber(slipBefore)}->${formatNumber(slipAfter)} predictedDv=${formatNumber(-slipAfter / 3.5)} ${slipAfter > 0 ? "contact faster than belt -> friction pushes BACKWARD" : "contact slower than belt -> friction pushes FORWARD (sign inverted)"}`,
 		);
 	}
 
@@ -1155,7 +1264,7 @@ export class BallSpawnerService implements OnStart {
 		}
 
 		const forward = belt.CFrame.RightVector;
-		const alongRight = ball.AssemblyLinearVelocity.Dot(forward);
+		const ballSpeed = ball.AssemblyLinearVelocity.Dot(forward);
 
 		// The convergence gate **is** the gate. There is no cooldown and no timestamp: a ball already at
 		// target produces a non-positive delta on every subsequent `Touched`, so repeated firings during
@@ -1165,7 +1274,7 @@ export class BallSpawnerService implements OnStart {
 		// `>=` rather than `===`: a ball can arrive already faster than target (a collision, or a target
 		// lowered between builds) and this must never *reduce* speed — that would be the code undoing
 		// motion it did not cause.
-		const delta = math.min(WALL_ASSIST_IMPULSE, WALL_ASSIST_TARGET_SPEED - alongRight);
+		const delta = math.min(WALL_ASSIST_IMPULSE, WALL_ASSIST_TARGET_SPEED - ballSpeed);
 		if (delta <= 0) {
 			return;
 		}
@@ -1333,7 +1442,7 @@ export class BallSpawnerService implements OnStart {
 		const inside = math.abs(relative.X) <= halfX && math.abs(relative.Z) <= halfZ;
 
 		print(
-			`[Ball:${id}] cap destroy at pos=${formatVector(ball.Position)} local=${formatVector(relative)} aboveSurface=${formatNumber(relative.Y - halfY)} insideFootprint=${inside ? "yes" : "no"} velocity=${formatVector(ball.AssemblyLinearVelocity)} alongRight=${formatNumber(ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector))} BeltSpeed=${formatNumber(this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED))} ${ownerField} ${this.describeOwner(ball)}`,
+			`[Ball:${id}] cap destroy at pos=${formatVector(ball.Position)} local=${formatVector(relative)} aboveSurface=${formatNumber(relative.Y - halfY)} insideFootprint=${inside ? "yes" : "no"} velocity=${formatVector(ball.AssemblyLinearVelocity)} BALL_SPEED=${formatNumber(ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector))} BELT_SPEED=${formatNumber(this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED))} ${ownerField} ${this.describeOwner(ball)}`,
 		);
 	}
 
@@ -1824,7 +1933,7 @@ export class BallSpawnerService implements OnStart {
 	 *
 	 * ## `contactSlip` and its sign
 	 *
-	 * `contactSlip = u - (alongRight + omega*r)` — the negation of the quantity `applyBackspin` calls
+	 * `contactSlip = u - (ballSpeed + omega*r)` — the negation of the quantity `applyBackspin` calls
 	 * `slip`, and deliberately so: **positive here means the contact point is moving slower than the
 	 * belt**, i.e. friction is pushing the body forward and it has not reached rolling equilibrium.
 	 * Zero is rolling-without-slipping and negative means the contact is outrunning the belt. Reading
@@ -1846,11 +1955,11 @@ export class BallSpawnerService implements OnStart {
 		const radius = ball.Size.Y / 2;
 		const axisRaw = belt.CFrame.RightVector.Cross(Vector3.yAxis);
 		const omega = axisRaw.Magnitude < 1e-3 ? 0 : ball.AssemblyAngularVelocity.Dot(axisRaw.Unit);
-		const alongRight = velocity.Dot(belt.CFrame.RightVector);
-		const contactSlip = beltSpeed - (alongRight + omega * radius);
+		const ballSpeed = velocity.Dot(belt.CFrame.RightVector);
+		const contactSlip = beltSpeed - (ballSpeed + omega * radius);
 
 		print(
-			`[Spawner] spin-probe ball="${ball.GetFullName()}" |omega|=${formatNumber(ball.AssemblyAngularVelocity.Magnitude)} omegaAlong=${formatNumber(omega)} omegaR=${formatNumber(omega * radius)} |v|=${formatNumber(velocity.Magnitude)} alongRight=${formatNumber(alongRight)} u=${formatNumber(beltSpeed)} r=${formatNumber(radius)} contactSlip=${formatNumber(contactSlip)}`,
+			`[Spawner] spin-probe ball="${ball.GetFullName()}" |omega|=${formatNumber(ball.AssemblyAngularVelocity.Magnitude)} omegaAlong=${formatNumber(omega)} omegaR=${formatNumber(omega * radius)} |v|=${formatNumber(velocity.Magnitude)} BALL_SPEED=${formatNumber(ballSpeed)} u=${formatNumber(beltSpeed)} r=${formatNumber(radius)} contactSlip=${formatNumber(contactSlip)}`,
 		);
 	}
 
@@ -1903,21 +2012,21 @@ export class BallSpawnerService implements OnStart {
 
 				// The along-right component is the discriminator the brief's "velocity magnitude" test
 				// cannot supply on its own: a ball sliding off the side, or simply falling, also has a
-				// magnitude. `alongRight ~= BeltSpeed` means it is being carried; `alongRight ~= 0` means
+				// magnitude. `ballSpeed ~= BeltSpeed` means it is being carried; `ballSpeed ~= 0` means
 				// the surface is moving underneath a ball that is not moving with it.
 				//
 				// `overFootprint` exists because the magnitude test alone is easy to misread: a ball spawned
 				// above the belt reaches any threshold from gravity alone, before it has touched anything.
 				// `overFootprint=yes vertical=above-surface` means it was still in the air over the belt, so
 				// this line says nothing about the belt yet; `overFootprint=yes level-with-body` with
-				// `alongRight` near zero is a ball actually sitting on the belt and not being carried. The
+				// `ballSpeed` near zero is a ball actually sitting on the belt and not being carried. The
 				// sample series and the leave line are what settle it either way.
 				//
 				// Ownership is re-read here, not carried over from the spawn line, because engine ownership
 				// can be reassigned between the two moments and the spawn reading may predate the
 				// assignment — see `describeOwner`. A change between the two lines is itself a finding.
 				print(
-					`[Ball:${observation.id}] first motion after ${formatNumber(now - observation.spawnedAt)}s velocity=${formatVector(velocity)} speed=${formatNumber(velocity.Magnitude)} alongRight=${formatNumber(velocity.Dot(belt.CFrame.RightVector))} BeltSpeed=${formatNumber(beltSpeed)} threshold=${formatNumber(threshold)} overFootprint=${overFootprint ? "yes" : "no"} vertical=${vertical} local=${formatVector(relative)} touches=${observation.touchedCount} ${this.describeOwner(ball)}`,
+					`[Ball:${observation.id}] first motion after ${formatNumber(now - observation.spawnedAt)}s velocity=${formatVector(velocity)} speed=${formatNumber(velocity.Magnitude)} BALL_SPEED=${formatNumber(velocity.Dot(belt.CFrame.RightVector))} BELT_SPEED=${formatNumber(beltSpeed)} threshold=${formatNumber(threshold)} overFootprint=${overFootprint ? "yes" : "no"} vertical=${vertical} local=${formatVector(relative)} touches=${observation.touchedCount} ${this.describeOwner(ball)}`,
 				);
 			}
 		}
@@ -1939,7 +2048,7 @@ export class BallSpawnerService implements OnStart {
 			const overshoot = math.max(overX, overZ);
 
 			print(
-				`[Ball:${observation.id}] left belt side=${side} after ${formatNumber(now - observation.spawnedAt)}s at pos=${formatVector(ball.Position)} local=${formatVector(relative)} half=(x=${formatNumber(halfX)}, z=${formatNumber(halfZ)}) overshoot=${formatNumber(overshoot)} vertical=${vertical} (localY=${formatNumber(relative.Y)}, halfY=${formatNumber(halfY)}) velocity=${formatVector(velocity)} alongRight=${formatNumber(velocity.Dot(belt.CFrame.RightVector))} BeltSpeed=${formatNumber(beltSpeed)} touches=${observation.touchedCount} ${this.describeOwner(ball)}`,
+				`[Ball:${observation.id}] left belt side=${side} after ${formatNumber(now - observation.spawnedAt)}s at pos=${formatVector(ball.Position)} local=${formatVector(relative)} half=(x=${formatNumber(halfX)}, z=${formatNumber(halfZ)}) overshoot=${formatNumber(overshoot)} vertical=${vertical} (localY=${formatNumber(relative.Y)}, halfY=${formatNumber(halfY)}) velocity=${formatVector(velocity)} BALL_SPEED=${formatNumber(velocity.Dot(belt.CFrame.RightVector))} BELT_SPEED=${formatNumber(beltSpeed)} touches=${observation.touchedCount} ${this.describeOwner(ball)}`,
 			);
 			return;
 		}
@@ -1959,8 +2068,8 @@ export class BallSpawnerService implements OnStart {
 	 * Rolling sample: velocity, position, and the belt's current velocity for the tracked ball.
 	 *
 	 * One line every `BALL_SAMPLE_SECONDS`. This is the series that answers "riding or sliding"
-	 * independently of the one-shot events: a riding ball holds `alongRight` near `BeltSpeed` while
-	 * `local.X` marches toward the edge, a sliding ball holds `alongRight` away from `BeltSpeed` while
+	 * independently of the one-shot events: a riding ball holds `ballSpeed` near `BeltSpeed` while
+	 * `local.X` marches toward the edge, a sliding ball holds `ballSpeed` away from `BeltSpeed` while
 	 * `local.X` barely moves. It is also the only place the effective acceleration is visible, because
 	 * consecutive samples give a Δv over a known Δt.
 	 *
@@ -1988,8 +2097,15 @@ export class BallSpawnerService implements OnStart {
 		}
 
 		const velocity = ball.AssemblyLinearVelocity;
+		// The three numbers that describe this model, all in one line: the ball's own speed from its
+		// attribute, the reference belt speed, and the difference ? which is the velocity the physics engine
+		// is being handed every tick. `velocity=` stays because it is the *observed* value from the engine, so
+		// a disagreement between it and `RELATIVE_SPEED` is visible rather than hidden.
+		const ballSpeed = this.readNumber(ball, BALL_SPEED_ATTRIBUTE, 0);
+		// The model's reference, so `RELATIVE_SPEED` in the line is the number the simulation used.
+		const beltSpeed = this.treadmill.getReferenceBeltSpeed();
 		print(
-			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(belt.CFrame.PointToObjectSpace(ball.Position))} velocity=${formatVector(velocity)} alongRight=${formatNumber(velocity.Dot(belt.CFrame.RightVector))} beltVelocity=${formatVector(this.surfaceVelocityOf(belt))} ${this.describeOwner(ball)}`,
+			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(belt.CFrame.PointToObjectSpace(ball.Position))} velocity=${formatVector(velocity)} BALL_SPEED=${formatNumber(ballSpeed)} BELT_SPEED=${formatNumber(beltSpeed)} RELATIVE_SPEED=${formatNumber(ballSpeed - beltSpeed)} ${this.describeOwner(ball)}`,
 		);
 	}
 
@@ -2028,19 +2144,6 @@ export class BallSpawnerService implements OnStart {
 	// #endregion
 
 	// #region attribute reads
-
-	/**
-	 * The moving surface's real velocity for a belt, or zero if it cannot be found.
-	 *
-	 * The sample line used to print `belt.AssemblyLinearVelocity`, which has been zero since the slab
-	 * mechanism replaced the anchored-belt velocity — so every sample read `beltVelocity=(0, 0, 0)`
-	 * next to a ball moving at 3 studs/s, which reads as "the belt has stopped". The surface is the thing
-	 * that actually moves, so it is the thing worth printing.
-	 */
-	private surfaceVelocityOf(belt: BasePart): Vector3 {
-		const surface = belt.FindFirstChild("TreadmillSurface");
-		return surface !== undefined && surface.IsA("BasePart") ? surface.AssemblyLinearVelocity : Vector3.zero;
-	}
 
 	private readNumber(part: Instance, attribute: string, fallback: number): number {
 		const raw = part.GetAttribute(attribute);

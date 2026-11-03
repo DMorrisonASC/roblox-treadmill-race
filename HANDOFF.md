@@ -18,13 +18,9 @@ forgotten.
 `TreadmillBelt`, `BallSpawner`, `Ball`. Both services bind through `CollectionService`, so no instance
 paths appear in TypeScript.
 
-## 3. Belt uses `AssemblyLinearVelocity` on the anchored part
+## 3. Belt drag: first mechanism, superseded
 
-Verified: `AssemblyLinearVelocity` is tagged NotReplicated in the installed typings; the conveyor
-behaviour is documented on the deprecated `BasePart.Velocity` page, which names
-`AssemblyLinearVelocity` as its replacement. A `LinearVelocity` constraint cannot drag an arbitrary
-loose ball because it needs an `Attachment` — it was never a viable fallback. Axis is
-`+RightVector`; negative `BeltSpeed` reverses.
+This item described dragging balls with `AssemblyLinearVelocity` on the anchored belt. Studio refuted it (~0.1 studs/s², no rotation), it was replaced twice, and **the current belt is described in item 18**. No `AssemblyLinearVelocity` conveyor exists in the tree.
 
 ## 4. Balls are server-only and tagged at birth
 
@@ -267,17 +263,25 @@ observation about rolling-vs-sliding was being made inside it. Manual `1` still 
   _stationary_ surface. For a belt moving at `u`, no-slip means `v + ωr = u`, so the settled state
   of a sphere released from rest is `v = (2/7)u ≈ 2.86` with `ω = (u - v)/r ≈ 14.3 rad/s` — not
   `v = u` with `ω = u/r`. The correct discriminator is contact slip `u - (v + ωr)`.
-- **Prior logs are consistent with COM-force, not contact torque:** `alongRight` reached ≈10.2 while
+- **Prior logs are consistent with COM-force, not contact torque:** the along-belt component reached ≈10.2 while
   the markers showed no visible rotation, i.e. `v ≈ u` with `ω ≈ 0`. Under contact friction the ball
   would settle at `2u/7` _with_ strong spin. Mechanism hypothesis 1 is therefore the leading cause.
 - Next measurement, not yet taken: `AssemblyAngularVelocity` on a single body, plus `u - (v + ωr)`.
 
-## 18. Belt drag mechanism replaced: moving collider on a PrismaticConstraint motor
+## 18. Belt as a reference number: `BALL_SPEED` / `BELT_SPEED` / `RELATIVE_SPEED`
 
-Replaces the anchored-belt AssemblyLinearVelocity mechanism from item 3, which Studio showed producing ~0.1 studs/s² and no rotation. The belt is now CanCollide = false and hosts an invisible, Massless, unanchored slab driven along Attachment0's X axis by a motorised PrismaticConstraint; balls rest on the slab so friction acts at the contact point. **Unverified in Studio.**
-## 19. Belt surface material -> Rubber; bounce gated off (BELT_BOUNCE_ENABLED = false)
+**This replaces every earlier belt mechanism** — the anchored-velocity conveyor (item 3), and the invisible motorised slab that followed it. There is no moving surface, no constraint, no per-belt `Heartbeat`, no teleport reset and no pinned network owner. Under the belt sits one **static, anchored, frictionless floor** (`CustomPhysicalProperties`, friction 0) whose only job is to be something gravity can settle a ball against.
 
-Friction isolated as the single variable: slab material SmoothPlastic -> Rubber via BELT_SURFACE_MATERIAL, and the Touched bounce assist short-circuited behind BELT_BOUNCE_ENABLED = false (impulse/chance/cooldown constants and the connection kept, so flipping the boolean restores it). No CustomPhysicalProperties, no FrictionWeight, ball material untouched. **Unverified in Studio.**
+`BELT_SPEED` (the belt's `BeltSpeed` attribute, 10) is a **reference number**. Each ball carries `BALL_SPEED` as an attribute, seeded at `BALL_SPEED_START` (10) and decayed toward `BALL_SPEED_MIN` (0) at `BALL_SPEED_DECAY_RATE` (0.3 studs/s²) every tick by `BallSpawnerService.stepBallSpeeds`. Each tick the ball's velocity along the belt is set to `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED`, with gravity and sideways drift preserved. Zero is stationary, negative loses ground toward the exit, positive gains it back toward the spawn end. Decay runs toward zero, not a terminal value, so every ride is finite.
+
+**The ramp is a visual effect only.** `RoundService` still ramps 0 → 10 on `Playing` entry, but that value is published as `BELT_VISUAL_SPEED` (`BeltSpeedActual`) and read by `BeltScrollController` alone; `stepBallSpeeds` reads `getReferenceBeltSpeed()`, so `RELATIVE_SPEED` is exactly `0` on the first `Playing` tick. They were one number for one round, and that made every ball drift forward for the first three seconds of every round with no pickup involved. `[Treadmill] bind` prints both.
+
+Pickups raise `BALL_SPEED` to `BOOST_TARGET_BALL_SPEED` (12) — above the reference, which is what flips `RELATIVE_SPEED` positive; see item 42. **Unverified in Studio.**
+
+## 19. Belt surface material: no longer applicable
+
+This item set the movable slab's material to Rubber to raise friction. There is no movable slab and no friction any more (item 18) — the floor is friction 0 by design, so the surface cannot fight the velocity model. The bounce assist stays gated off behind `BELT_BOUNCE_ENABLED = false`.
+
 ## 20. Manual trigger now spawns one body from every bound spawner
 
 Pressing `1` previously spawned from the first registered spawner only (`firstSpawner`), which with four spawners meant three lanes never got a manual body. The manual path now calls the shared `spawnOnePerSpawner("manual")` — the same implementation as the start-of-session one-shot, parameterised only so the summary log line names the trigger. `firstSpawner` deleted; the 100 ms per-player cooldown is unchanged and still gates the whole press, not per spawner. **Unverified in Studio.**
@@ -345,7 +349,7 @@ implement.
 
 ## 29. Marker spin decoupled from the body: anchored markers, client-drawn rotation
 
-`BallSpawnerService.createMarker` no longer creates the `WeldConstraint`. Each marker is `Anchored = true` at its spawn pose and carries three `Vector3` attributes (`MarkerLocalPosition`, `MarkerLocalRight`, `MarkerLocalUp` — `ball.CFrame:ToObjectSpace(spawnCue)`), because with no weld a client cannot recover the local offset: the marker stays at spawn while the body moves, so `body.CFrame:Inverse() * marker.CFrame` is only correct in the spawn frame. Anchoring is the mechanism that was chosen over a client-side weld destroy because a client write to the `CFrame` of a *simulated* part is overwritten by the solver, while a client write to an anchored part whose `CFrame` the server never touches again is uncontended. New `MarkerSpinController` (`src/client/controllers/marker-spin-controller.ts`) draws all three markers per body on `RenderStepped` from smoothed `CFrame`-delta velocity — **not `AssemblyLinearVelocity`, which the installed typings tag `NotReplicated`** — at `APPARENT_SPIN_GAIN = 2` × `v/r`, clamped to `APPARENT_SPIN_MAX_RAD_PER_SEC = 30`, deadband `APPARENT_SPIN_MIN_SPEED = 0.1`, smoothing `APPARENT_SPIN_SMOOTHING_SECONDS = 0.15`. Axis is `yAxis:Cross(vhat)`, verified as *forward* rolling (for `+X` travel it is `-Z`), which is the negation of `applyBackspin`'s `RightVector:Cross(yAxis)`; `APPARENT_SPIN_SIGN = 1` exists so the direction is one edit to reverse. The drawn rate is a display choice, not physics: a sliding body now renders as rolling, so `[Spawner] spin-probe` prints `|omega|`, `omegaR`, `alongRight`, `u` and `contactSlip = u - (alongRight + omega*r)` once per body at 2 s to preserve the rolling-versus-sliding diagnostic. Ball textures are still applied (six per body, `attachBallTexture` unchanged) and item 14/15 disagree about whether they render; if they do, they will rotate at the physical rate underneath markers drawn faster, and the call — not the property — is what would have to go. **Unverified in Studio.**
+`BallSpawnerService.createMarker` no longer creates the `WeldConstraint`. Each marker is `Anchored = true` at its spawn pose and carries three `Vector3` attributes (`MarkerLocalPosition`, `MarkerLocalRight`, `MarkerLocalUp` — `ball.CFrame:ToObjectSpace(spawnCue)`), because with no weld a client cannot recover the local offset: the marker stays at spawn while the body moves, so `body.CFrame:Inverse() * marker.CFrame` is only correct in the spawn frame. Anchoring is the mechanism that was chosen over a client-side weld destroy because a client write to the `CFrame` of a *simulated* part is overwritten by the solver, while a client write to an anchored part whose `CFrame` the server never touches again is uncontended. New `MarkerSpinController` (`src/client/controllers/marker-spin-controller.ts`) draws all three markers per body on `RenderStepped` from smoothed `CFrame`-delta velocity — **not `AssemblyLinearVelocity`, which the installed typings tag `NotReplicated`** — at `APPARENT_SPIN_GAIN = 2` × `v/r`, clamped to `APPARENT_SPIN_MAX_RAD_PER_SEC = 30`, deadband `APPARENT_SPIN_MIN_SPEED = 0.1`, smoothing `APPARENT_SPIN_SMOOTHING_SECONDS = 0.15`. Axis is `yAxis:Cross(vhat)`, verified as *forward* rolling (for `+X` travel it is `-Z`), which is the negation of `applyBackspin`'s `RightVector:Cross(yAxis)`; `APPARENT_SPIN_SIGN = 1` exists so the direction is one edit to reverse. The drawn rate is a display choice, not physics: a sliding body now renders as rolling, so `[Spawner] spin-probe` prints `|omega|`, `omegaR`, `BALL_SPEED`, `u` and `contactSlip = u - (BALL_SPEED + omega*r)` once per body at 2 s to preserve the rolling-versus-sliding diagnostic. Ball textures are still applied (six per body, `attachBallTexture` unchanged) and item 14/15 disagree about whether they render; if they do, they will rotate at the physical rate underneath markers drawn faster, and the call — not the property — is what would have to go. **Unverified in Studio.**
 
 ## 30. Marker spin round 2: dual velocity source, tag rescan, and a read-back probe
 
@@ -535,3 +539,64 @@ WinnerName.Value ──OnChange─▶ Fusion Value ──┘
 **Palette.** `BASE` = the five brand colours plus white/black/`robux` (real). `TINTS` = 25 `**Placeholder.**` values: four each for teal/red/orange/yellow, six for brown (the four-surface family needs four ascending values plus two more for a continuous ascent), `inkDim`, `inkDisabled`, `border`. Written out as hex, no `lighten()` — a tint is a designed value, not a procedural scale. Accent/success mapping unchanged: orange accent, white onAccent, teal success, yellow warning, red error.
 
 **Unverified in Studio.** No Studio session was run against this item: whether the banner renders at the top centre under the topbar, whether the `Computed` → `Text` binding actually repaints on a phase change, the three cascade probes, and the reuse branch's `[Ui] found` are all unconfirmed. `npm run build`, `npm run lint` and `prettier --check` are green; the emitted Lua was inspected for the Fusion and big-ui call shapes.
+
+## 42. Pickups, and the belt as a reference number: `BALL_SPEED` / `BELT_SPEED` / `RELATIVE_SPEED`
+
+**The belt is a reference number, not a surface** (item 18). Nothing in the world pushes a ball: its along-belt motion is `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED`, written from its own attribute every tick. The floor under the belt is static, anchored and frictionless, and exists only so gravity has something to settle a ball against.
+
+**The model.** `BELT_SPEED` (`DEFAULT_BELT_SPEED`, 10) is a **reference number**, not a surface. Each ball carries `BALL_SPEED` as an attribute: seeded at `BALL_SPEED_START` (10) at spawn, decayed toward `BALL_SPEED_MIN` (0) at `BALL_SPEED_DECAY_RATE` (0.3 studs/s²) every tick, and each tick `BallSpawnerService.stepBallSpeeds` sets the ball's velocity along the belt to `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED`, leaving gravity and sideways drift untouched. Zero is stationary, negative is losing ground toward the exit, positive is gaining it back toward the spawn end. Decay is toward **zero**, not a terminal value: a terminal value is an equilibrium a ball could hold forever, and a race with an immortal ball is not a race.
+
+**Pickups (`src/server/services/pickup-service.ts`, `TAGS.pickup = "Pickup"`).** A touch writes `BALL_SPEED = BOOST_TARGET_BALL_SPEED` (12) on the ball — the attribute, not a velocity, because velocity is rewritten from the attribute on the next tick and a velocity write would look like it did nothing. **The boost target moved above belt speed, reversing its earlier meaning:** under the physical model a boost *below* the belt was the durable choice because the surface kept pulling the ball along; under this model nothing pulls anything, and 12 is the only value that flips `RELATIVE_SPEED` positive, i.e. back toward the spawn end and away from elimination. A boost of 8 here would push the ball toward the exit faster.
+
+**Cluster: 3 triangles, not 5.** At five across a 10-stud span the centres were 2.5 studs apart and the parts 1.5 wide, so a 1-stud ball could straddle two and collect both in the same millisecond (13:14 log: `BALL_SPEED 3.276 -> 8` then `6.559 -> 8`). Three centres 5 studs apart cannot be spanned by one ball. `PICKUP_COUNT = MAX_CONCURRENT_PICKUPS = 3`; `PICKUP_CLUSTER_LOCAL_X = -15` (first third), 15 s top-up fills empty slots only. Shape is `Enum.PartType.Wedge` sized `(2, 1, 2)` — `Enum.PartType.Triangle` does not exist in the installed typings, and the earlier `SpecialMesh(Prism)` version at 0.1 studs thick was invisible in Studio.
+
+**Phase handling.** `PickupService` subscribes to `ReplicatedStorage.RoundState` (`GetPropertyChangedSignal("Value")`): `Playing` spawns and starts the top-up loop, **every other phase** stops the loop and clears `Workspace.SpawnedPickups`. `setRoundActive(false)` sets `BALL_SPEED = 0` on every live ball and `stepBallSpeeds` returns immediately unless a round is active, so nothing writes velocity outside `Playing`.
+
+**Two numbers, split: `BELT_SPEED` (reference) and `BELT_VISUAL_SPEED` (effect).** `BELT_SPEED` is the belt's `BeltSpeed` attribute — a constant, read through `TreadmillService.getReferenceBeltSpeed()`, and the **only** thing `stepBallSpeeds` subtracts. `BELT_VISUAL_SPEED` is the ramped scroll rate, published to each belt's `BeltSpeedActual` attribute by `setBeltSpeed`, and read by `BeltScrollController` **only**. The wire name stayed `BeltSpeedActual`; only the symbol is new (`BELT_VISUAL_SPEED_ATTRIBUTE`).
+
+They were one number for one round, and that was the bug: while the ramp ran, `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED` read `+10`, `+6`, `+2`, so **every ball drifted forward at the start of every round with no triangle involved** — the one thing only a pickup is supposed to cause. A value that ramps is a value the physics model did not consent to; the reference is the comparison, the visual is the effect. `RELATIVE_SPEED` is exactly `0` on the first `Playing` tick because `BALL_SPEED_START = 10` and `BELT_SPEED = 10`, and it only leaves zero when decay or a pickup moves `BALL_SPEED`.
+
+The belt's `[Treadmill] bind` line now prints both, so the split is observable in one line: `BELT_SPEED=<reference> BELT_VISUAL_SPEED=<ramped>`. `getEffectiveBeltSpeed()` still reports the ramp and has exactly one reader: the backspin gate, where "is the belt physically carrying anything" is what it was written for. **Invariant worth knowing:** `RELATIVE_SPEED = 0` at tick one holds while the belt's `BeltSpeed` attribute equals `DEFAULT_BELT_SPEED` (10). A designer who sets the attribute to 12 gets `-2` at tick one, because `BALL_SPEED_START` is the constant, not the attribute.
+
+**Unverified in Studio.** Whether the ball drifts, whether a boost flips it forward, whether a boosted ball can leave through the *front* face of the `EliminationZone` (the code is face-agnostic; whether the zone covers that face is scene data), and the ride time at `BALL_SPEED_DECAY_RATE = 0.3` are unconfirmed. `npm run build`, `npm run lint` and `prettier --check` are green. **The number to doubt first is the decay rate:** drift is `RATE * t`, so at 0.3 the ball spends 33 s of headroom and covers the 51 studs from spawn to exit in roughly 18 s; if the ride is too long, raise it.
+
+
+## 43. Drift sign flipped and spin gain doubled (supersedes item 42's velocity sign)
+
+**The velocity write is negated.** `BallSpawnerService.stepBallSpeeds` now writes
+`right.mul(-relative)` where `relative = BALL_SPEED - BELT_SPEED`, instead of `right.mul(relative)`.
+`RightVector` is `+X`, and in this model `+X` is the **back** edge (local `+28`) while `-X` is the **front** (local `-28`, where the ball spawns). A positive `RELATIVE_SPEED` means faster than the belt and must gain ground toward the front, i.e. `-RightVector`. The sign is the model's, not the world's.
+
+**What the wrong sign did, measured:** the 14:08 log shows the ball leaving `local X = -23` and crossing `-25.78` and `-28.10`, exiting at `left belt side=-RightVector` after 11.3 s ? it fell off the edge it spawned beside, 5 studs away, instead of crossing the 51 studs to the far edge. With the negation it drifts `+X` and traverses the belt.
+
+**Spin gain doubled, `APPARENT_SPIN_GAIN` 4 ? 8.** The reference-speed model made the ball slow: it spends most of a ride at 0.1?2 studs/s of `RELATIVE_SPEED`, where the old gain drew `1.6?12 rad/s` ? the low end reading as stationary. At 8 the same drift draws `8?24 rad/s`. The clamp is now reached at `|v| = 1.9` studs/s, so a boosted ball (`+2`) sits at the ceiling by design. `SPIN_RATE_OFFSET` does not exist; the offset stays zero so a stationary ball does not spin.
+
+**Nothing else reads `RELATIVE_SPEED`.** Grepped: the only consumer is the velocity write; the sample log line prints it read-only, and the pickup writes `BALL_SPEED` (an attribute), not a velocity, so neither needs a sign change.
+
+**Unverified in Studio.** Whether the ball now exits at `+RightVector`, the ride time under the corrected sign, and whether the doubled spin reads as faster without aliasing. `npm run build`, `npm run lint` and `prettier --check` are green.
+
+
+## 44. Marker spin driven by `BALL_SPEED`, not world velocity
+
+**The rate input changed from `|AssemblyLinearVelocity|` to the ball's `BALL_SPEED` attribute.** Under the reference-speed model a ball's world velocity is `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED`, so at spawn it is exactly **zero** and during a normal ride it is a small negative number. Driving the markers from `|v|` therefore drew a ball that visually sat still with no rotation, then a ball rotating slowly *backwards* as it lost ground ? as if it were sliding on a stationary floor. That is the same class of bug item 43 fixed for the drift sign, one layer up.
+
+The ball is rolling on a surface moving at `BELT_SPEED`; relative to that surface its speed is `BALL_SPEED`. That is what the markers show. The rate is now `min(APPARENT_SPIN_MAX_RAD_PER_SEC, APPARENT_SPIN_GAIN x BALL_SPEED / radius)`, always **positive**, so the markers always turn forward and there is no backward case at all. `BALL_SPEED` cannot be `NaN` (every writer is `math.max(0, ...)` or a constant) and a missing attribute reads `0`, which lands in the deadband and holds the markers still.
+
+**`APPARENT_SPIN_GAIN` 8 ? 1.5.** With the input at `|v|` a large gain was needed to make a 0.1?2 studs/s drift visible; once the input became `BALL_SPEED` (10 at spawn) that same gain pinned the markers at the clamp for the entire ride ? the crossing sat at `BALL_SPEED = 1.875`, i.e. 27 s in, while a ride lasts ~18 s. At `1.5` spawn draws exactly `30 rad/s` (at the ceiling) and the end of a ride draws `1.5 x 4.6 / 0.5 = 13.8 rad/s`, less than half ? so the decay is visible in the marker rate, which is the point of the change.
+
+**Log fields.** `speed=` became `BALL_SPEED=`, and the velocity-source field is now `velocitySource=` (it still reports `velocity`/`delta` because the world velocity is still what picks the **axis**). `rateSource` values are now `physical` / `attribute` / `deadband` ? no `velocity` value survives. `|v|` is still printed, because a disagreement between it and `BALL_SPEED` is how this bug would show up again.
+
+**Unverified in Studio.** Whether the markers read as fast at spawn and slower at the end, whether a pickup visibly speeds them up, and whether the clamp still avoids aliasing at 30 rad/s. `npm run build`, `npm run lint` and `prettier --check` are green.
+
+**Follow-up in the same round ? the attribute branch was unreachable.** The first version of item 44 used `if (physicalSpin > SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC) ... else if (ballSpeed ...)`, and the 14:30 log shows the physical branch winning within a second: a ball resting on the floor accumulates solver residual (`omegaPhysical` climbing 0.001 ? 0.09), which crosses the 0.05 threshold, so every line read `rateSource=physical omegaVisual=0.2` and the new input was never consulted. The markers looked identical to before the change. The two candidates are now computed and **the larger wins** (`attributeRate >= physicalRate && attributeRate > 0` ? `attribute`), which needs no new threshold: solver noise is slow so it loses, and genuine rotation is fast so it still wins. `SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC` keeps its original job ? deciding when `AssemblyAngularVelocity` is meaningful enough to be an **axis**.
+
+**Second follow-up ? the markers were drawn along the wrong axis, so they turned with the belt instead of against it.** `APPARENT_SPIN_SIGN` is now `-1`. The old justification ("`yAxis:Cross(direction)` is forward rolling for a ball travelling `+X`") is correct for a *rolling* ball, and wrong for this one: under the reference-speed model the ball is carried on a surface moving at `BELT_SPEED` and slides slowly toward the exit, so its contact point is dragged the way the surface moves and its top turns **against** belt travel. Drawing the forward-rolling axis made the markers turn with the belt while the ball crawled the other way ? the "spinning backwards" report.
+
+The **travel axis is also gone**. It was derived from `state.velocity`, which is ~0.05 studs/s for most of a ride (below `SPIN_FALLBACK_MIN_SPEED`, so the branch rarely fired) and, on a boost, reverses and would have flipped the markers while the rate ? now from `BALL_SPEED`, always positive ? stayed the same. The axis is now a constant function of the belt (`beltSpinAxis()`, `yAxis:Cross(RightVector)`) except when the body has genuine spin above `SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC`, where its own rotation is the truer answer.
+
+**Third follow-up ? the rate and the axis are now each a single source, so the markers cannot reverse.** The 14:39 log shows the cause of the mid-ride flip: `omegaPhysical` climbs `0.394 -> 7.296` and tracks `2 x |v|`, i.e. the bodies really are rolling in world space, and once that crossed `SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC` the **physical branch won the rate and the physical axis won the direction** - so the markers reversed while `BALL_SPEED` was still climbing. Both competitors are gone:
+
+- **Rate:** `min(MAX, APPARENT_SPIN_GAIN x BALL_SPEED / radius)` above `SPIN_DEADBAND_SPEED`, else `0`. `rateSource` is `attribute` or `deadband`, nothing else.
+- **Axis:** `beltSpinAxis()` always - a constant for a given belt. `axisSource` is `belt`, nothing else.
+
+`omegaPhysical` is still printed as a diagnostic and decides nothing. `APPARENT_SPIN_GAIN_OMEGA` and `SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC` are no longer imported by the controller (both constants remain in `tuning.ts`). The requirement this satisfies is the user's: **the ball never renders a backwards spin** - one direction for its whole life, rate set by the attribute, axis set by the belt.

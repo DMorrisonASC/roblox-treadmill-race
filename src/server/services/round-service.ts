@@ -524,8 +524,11 @@ export class RoundService implements OnStart {
 		this.phase = "Waiting";
 		const generation = ++this.generation;
 
-		// Bodies exist from here, so anything that wants to tag them at spawn has them available.
-		this.spawner.setRoundActive(true);
+		// **Not `true` any more.** `Waiting` used to switch the spawner's simulation on, which meant the
+		// `BALL_SPEED` decay ran while a body sat on a stopped belt and the ball drifted before the round even
+		// began. The flag is now set in `enterPlaying` and nowhere else, so the model runs for exactly the phase
+		// it describes.
+		this.spawner.setRoundActive(false);
 
 		this.treadmill.setBeltSpeed(0);
 
@@ -600,6 +603,14 @@ export class RoundService implements OnStart {
 
 		print(`[Round] ${from} → Playing (elapsed=0, ${reason}, competitors=${competitors.size()})`);
 		this.publishPhase();
+
+		// **The simulation switch, at the one place `Playing` begins.** Without this, `BallSpawnerService`'s
+		// `stepBallSpeeds` returns on its first line and `BALL_SPEED` never decays: a Studio run that reached
+		// `Playing` through `forcePlaying` (key `2` from `Intermission`) sat with `BALL_SPEED=10`,
+		// `RELATIVE_SPEED=0` and a motionless ball for 34 s, because `forcePlaying` never passes through
+		// `enterWaiting`, which was the only caller. `forceWaiting`, `forcePlaying` and the timers all reach
+		// `Playing` through this function, so this is the choke point rather than three call sites.
+		this.spawner.setRoundActive(true);
 
 		this.warnIfNoZone();
 		this.startBeltRamp();

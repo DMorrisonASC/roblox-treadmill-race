@@ -29,6 +29,34 @@ export const BELT_SPEED_ATTRIBUTE = "BeltSpeed";
 export const DEFAULT_BELT_SPEED = 10;
 
 /**
+ * Attribute on a belt: the **visual** scroll rate, in studs/second, for `BeltScrollController`.
+ *
+ * ## This is the second half of a split, and the split is the point
+ *
+ * `BELT_SPEED` (the `BeltSpeed` attribute) is the **reference number** the `BALL_SPEED` model compares
+ * against. It is a constant while `Playing` and it never ramps. This attribute is the **effect**: the rate the
+ * surface texture scrolls at, which does ramp from 0 over `BELT_RAMP_SECONDS` so the belt does not appear to
+ * snap to full speed the instant a round begins.
+ *
+ * They were one number for one round, and that was a bug: `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED` briefly
+ * read `+10`, `+6`, `+2` during the ramp, so **every ball drifted forward at the start of every round with no
+ * pickup involved** ? the one thing only a triangle is supposed to cause. A value that ramps is a value the
+ * physics model did not consent to; the reference is the comparison, the visual is the effect.
+ *
+ * The wire name stays `BeltSpeedActual` so nothing already reading it has to change.
+ */
+export const BELT_VISUAL_SPEED_ATTRIBUTE = "BeltSpeedActual";
+
+/**
+ * Attribute on a ball: its own speed in the reference-speed model, in studs/second.
+ *
+ * Written by `BallSpawnerService` (seeded at spawn, decayed every tick, zeroed when the round stops) and by
+ * `PickupService` (boost). Kept **on the ball** rather than in a service-side map for the same reason the owner
+ * is: the body is what gets destroyed and replicated, so a map entry would need cleanup on every death path.
+ */
+export const BALL_SPEED_ATTRIBUTE = "BALL_SPEED";
+
+/**
  * `Radius` is retired. There is deliberately no constant for it below.
  *
  * ## Why the sphere radius stopped being an attribute

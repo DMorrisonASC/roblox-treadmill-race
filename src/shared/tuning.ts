@@ -1,3 +1,5 @@
+import { DEFAULT_BELT_SPEED } from "./attributes";
+
 /**
  * Gameplay tuning that is deliberately **not** a Studio attribute.
  *
@@ -79,36 +81,6 @@ export const BALL_TEXTURE_OFFSET_RANGE = 4;
  * shifted sideways. Two independent offsets give a random 2D phase.
  */
 export const BALL_TEXTURE_OFFSET_RANGE_V = 4;
-
-/**
- * **Placeholder.** Material of the invisible moving collider — i.e. the friction half of the
- * ball/surface pair.
- *
- * `Rubber` is the shipped choice for this round, and it is the **only** thing this round changes about
- * friction: no `CustomPhysicalProperties`, no `FrictionWeight`, on either the slab or the ball. That
- * restriction is the point — a single material swap is attributable, whereas material *and* weights
- * would not be.
- *
- * Arithmetic, with the caveat below: the engine combines two parts' friction by a weight-averaged
- * blend, and both parts are at the default `FrictionWeight = 1`. Commonly cited defaults are
- * `SmoothPlastic ≈ 0.2`, `Plastic ≈ 0.3`, `Rubber ≈ 0.8`, giving:
- *  - before: `(0.2 + 0.3) / 2 = 0.25`
- *  - after:  `(0.8 + 0.3) / 2 = 0.55`
- *
- * **The per-material friction values are not documented in the engine API reference.** The
- * `PhysicalProperties` page documents that `Friction` exists and that material sets its defaults, but
- * publishes no table of those defaults; 0.2/0.3/0.8 are the widely repeated figures and should be
- * treated as approximate. The *ratio* is what matters for the experiment: Rubber should roughly
- * double the grip, and if it does not, the material is not the lever and the next step is
- * `CustomPhysicalProperties` rather than a different material.
- *
- * `Rubber` at ~0.8 is above the range a real treadmill belt runs at (belt-to-sole is about 0.4–0.6).
- * The milder alternative, if Rubber reads as too grippy or the ball starts to judder, is
- * `Enum.Material.Plastic` (≈0.3), which would blend to `(0.3 + 0.3) / 2 = 0.3` — closer to the low
- * end of the real range and only slightly above the current 0.25, so it is a small step rather than a
- * step back. `SmoothPlastic` is not offered as the fallback because it is what this round replaced.
- */
-export const BELT_SURFACE_MATERIAL = Enum.Material.Rubber;
 
 /**
  * **Placeholder.** Whether the belt's imperfect-surface bounce assist is active.
@@ -213,48 +185,6 @@ export const BELT_SURFACE_THICKNESS = 0.1;
  * sees an unchanged flat surface moving at an unchanged speed, so nothing it experiences changes.
  */
 export const BELT_SURFACE_LIP = 1;
-
-/**
- * **Placeholder.** Remaining travel, in studs, at which the moving collider is rewound to the start of
- * its pass.
- *
- * The reset has to fire *before* the constraint reaches `UpperLimit`, because once it is against the
- * limit the motor is pushing into a wall: the slab stops, and every ball on it decelerates as though
- * the belt had stopped. Firing 0.1 studs early costs 0.01 s of travel at `BeltSpeed = 10` and
- * guarantees the motor never fights the limit. This is a distance, not a fraction, so it stays
- * correct if `BELT_SURFACE_LIP` is retuned.
- */
-export const BELT_SURFACE_RESET_THRESHOLD = 0.1;
-
-/**
- * **Placeholder.** `PrismaticConstraint.MotorMaxForce` for the moving collider, in the engine's force
- * units.
- *
- * Arithmetic: a 0.367-mass ball (measured, `Plastic` at `Size = (1,1,1)`) resting on the slab presses
- * down with `0.367 x 196.2 = 72`. The friction it can apply back along the belt is at most
- * `μ_eff x N`, and `μ_eff` measured from the round-1 log is `<= 0.22`, so the worst-case drag the
- * motor must overcome is about `16`. 100000 is therefore roughly 6000x the load and cannot be the
- * limiting factor; the constraint will hold speed unless something is badly wrong elsewhere.
- *
- * It is deliberately not tighter. A force chosen to just exceed the load would make the slab sag
- * briefly under every impulse (a ball landing, the reset) and would couple the surface's speed to how
- * many bodies are on it, which is the sort of hidden feedback that is miserable to debug. The cost of
- * a huge number is that the slab behaves as though welded to a rail — which is exactly what this
- * mechanism wants, since it is not supposed to be a physical object but a moving ground plane. Tune
- * down only if the surface reads as magnetically rigid when something collides with it edge-on.
- */
-export const BELT_SURFACE_MOTOR_MAX_FORCE = 100000;
-
-/**
- * **Placeholder.** `PrismaticConstraint.MotorMaxAcceleration` for the moving collider, studs/s².
- *
- * Arithmetic: reaching `BeltSpeed = 10` from rest takes `10 / 10000 = 0.001` s, which is under one
- * physics step, so the slab is at speed from its first frame. The number exists to be *finite*
- * rather than infinite: an unbounded acceleration makes the constraint's solver impulse unbounded on
- * the first step, which is what produces the classic "part launched on spawn" artefact when a
- * constrained body starts inside another.
- */
-export const BELT_SURFACE_MOTOR_MAX_ACCELERATION = 10000;
 
 /**
  * **Placeholder.** Whether a ball-vs-ball collision adds angular velocity to the ball, producing
@@ -553,7 +483,28 @@ export const SPIN_DEADBAND_SPEED = 0.5;
  * `rad/s`, the other is `rad/s` per `(studs/s)/stud`, i.e. dimensionless against a *ratio* of geometry
  * and speed — so a single shared number would tie two unrelated scales together.
  */
-export const APPARENT_SPIN_GAIN = 4;
+export const APPARENT_SPIN_GAIN = 1.5;
+
+/**
+ * ## Why 1.5, and why the input is `BALL_SPEED` rather than the world velocity
+ *
+ * The rate is `GAIN x BALL_SPEED / radius`, so at `radius = 0.5` the drawn rate is `20 x GAIN` at spawn
+ * (`BALL_SPEED = 10`) and proportionally less as the attribute decays. Two constraints fix the number:
+ *
+ * - **Spawn must not sit far above the clamp**, or the markers are pinned at `APPARENT_SPIN_MAX_RAD_PER_SEC`
+ *   and the decay is invisible. At `1.5` the spawn rate is exactly `30`, i.e. at the ceiling.
+ * - **The end of a ride must be visibly slower.** A ride lasts ~18 s at `BALL_SPEED_DECAY_RATE = 0.3`, by which
+ *   point `BALL_SPEED` has fallen to ~4.6, so the drawn rate is `1.5 x 4.6 / 0.5 = 13.8 rad/s` (~2.2 rev/s) -
+ *   less than half the spawn rate, clearly slower to the eye.
+ *
+ * At the previous values this could not work. With the input at `|v|` (the world velocity, i.e.
+ * `RELATIVE_SPEED`) the ball spent most of a ride at 0.1-2 studs/s and read as stationary; doubling the gain to
+ * 8 fixed the magnitude but, once the input became `BALL_SPEED`, put the clamp crossing at `BALL_SPEED = 1.875`
+ * - 27 s into a ride that ends at ~18 s, so the markers would hold the same rate for the whole round.
+ *
+ * **The offset stays at zero.** A stationary ball must not spin, so there is no `SPIN_RATE_OFFSET` to carry the
+ * rate when `BALL_SPEED` is zero; `SPIN_DEADBAND_SPEED` remains the only thing that holds the markers still.
+ */
 
 /**
  * **Placeholder.** Multiplier on `|AssemblyAngularVelocity|` — the genuinely-rolling branch.
@@ -577,10 +528,9 @@ export const APPARENT_SPIN_GAIN_OMEGA = 3;
  * on a 60 Hz display aliases — consecutive frames land the markers more than half a revolution apart
  * and the eye reads them as turning backwards.
  *
- * Under the current model the clamp is not a rare corner: `APPARENT_SPIN_GAIN = 4` reaches it at
- * `|v| = 3.75` studs/s, and the belt's steady state is ~4, so a ball riding at belt speed sits *at* the
- * ceiling. That is intended — the ceiling is the legibility limit, and a ball crossing a 56-stud belt
- * in 14 seconds at 4.8 rev/s already reads as fast.
+ * Under the current gain the clamp is reached at `BALL_SPEED = 30 x 0.5 / 1.5 = 10`, i.e. exactly at spawn, and
+ * a pickup (`BALL_SPEED = 12`) sits above it. That is intended — the ceiling is the legibility limit, and beyond
+ * ~4.8 rev/s three markers on a 60 Hz display alias into a backwards read.
  */
 export const APPARENT_SPIN_MAX_RAD_PER_SEC = 30;
 
@@ -653,5 +603,146 @@ export const APPARENT_SPIN_SMOOTHING_SECONDS = 0.15;
  * A constant rather than a literal at the call site so the direction is a one-line edit to reverse,
  * which is what makes the direction criterion checkable by a single rerun rather than by reading the
  * cross-product justification again.
+ *
+ * ## Why this is now `-1`
+ *
+ * The reasoning above is right about a **rolling** ball and wrong about this one. Under the reference-speed
+ * model the ball does not roll the way its travel implies: it is carried on a surface moving at `BELT_SPEED`
+ * and slides slowly toward the exit. A ball in that situation is a ball on a treadmill - its contact point is
+ * dragged the way the surface moves, so the top of the ball turns **against** the belt's travel. Drawing the
+ * forward-rolling axis made the markers turn with the belt while the ball visibly crawled the other way, which
+ * reads as the ball spinning backwards.
+ *
+ * The flip applies to the physical branch too. That branch only fires when the body has real spin of its own,
+ * and backspin about `+Z` is the spin this scene actually produces, so the same sign is still the consistent
+ * answer there.
  */
-export const APPARENT_SPIN_SIGN = 1;
+export const APPARENT_SPIN_SIGN = -1;
+
+// #region pickups (boost triangles)
+
+/**
+ * **Placeholder.** How many triangles one cluster holds — and therefore how many are spawned at `Playing`
+ * entry.
+ *
+ * **Three, not five.** At five across a 10-stud span the centres were 2.5 studs apart and the parts 1.5 wide, so
+ * a 1-stud ball could straddle two adjacent triangles and collect both in the same millisecond - the 13:14 log
+ * shows it: `BALL_SPEED 3.276 -> 8` immediately followed by `6.559 -> 8`. Three centres 5 studs apart cannot be
+ * spanned by one ball, so one pass takes one boost.
+ */
+export const PICKUP_COUNT = 3;
+
+/**
+ * **Placeholder.** How many triangles may exist at once.
+ *
+ * Equal to `PICKUP_COUNT` today, and separate from it on purpose: `PICKUP_COUNT` is "how many a cluster is
+ * laid out as", this is "how many the world may hold". They are the same number while the cluster is the only
+ * source, and they stop being the same number the moment a second cluster or a random spawner is added.
+ */
+export const MAX_CONCURRENT_PICKUPS = 3;
+
+/**
+ * **Placeholder.** Cluster position along the belt, in the belt's **local X**, in studs.
+ *
+ * The belt is 56 studs long, so its local X spans `-28 … +28`. `-15` is inside the first third (which ends at
+ * about `-9.3`), which is the point: the boost has to apply for most of the ride to be worth taking. A cluster
+ * near the leading edge would boost a ball for a couple of studs and then drop it off the end.
+ *
+ * Local X rather than world X because the belt is user-placed and can be moved: a world constant would leave
+ * the cluster floating beside the belt the first time the belt moves in Studio. The world X is
+ * `belt.CFrame` applied to this offset, and it is logged at cluster spawn so the two are comparable.
+ */
+export const PICKUP_CLUSTER_LOCAL_X = -15;
+
+/**
+ * **Placeholder.** How far inside each `Z` edge of the belt the outermost triangle's **centre** sits, in studs.
+ *
+ * The belt is 12 wide, so the usable span is 10 with this inset, and three centres sit 5 studs apart — wide
+ * enough that a 1.5-stud triangle never overhangs the edge and a 1-stud ball cannot span two of them.
+ */
+export const PICKUP_Z_EDGE_INSET = 1;
+
+/**
+ * **Placeholder.** A triangle's size.
+ *
+ * **It was `(1.5, 0.1, 1.5)` and that was invisible in Studio.** A 0.1-stud-thick part on a brown belt, a few
+ * studs from the camera, is a sliver ? and a `SpecialMesh` prism of that thickness is thinner still. The first
+ * Studio run reported five pickups spawning and being collected while nothing at all was visible on the belt,
+ * which is exactly what a 0.1-stud slab looks like. `Y = 1` makes it a standing wedge a player can see from the
+ * chase camera; the ball passes through it (`CanCollide = false`) so the height costs nothing physically.
+ */
+export const PICKUP_SIZE = new Vector3(2, 1, 2);
+
+/** **Placeholder.** Triangle colour — red, because nothing else on the belt is red. */
+export const PICKUP_COLOR = Color3.fromRGB(200, 30, 30);
+
+/**
+ * **Placeholder.** Seconds between top-up attempts while `Playing`.
+ *
+ * A top-up never exceeds `MAX_CONCURRENT_PICKUPS`, so this is a *replacement* cadence, not a spawn rate: a
+ * round that runs forever holds at most five triangles, and a triangle taken at `t = 3 s` is replaced at the
+ * next multiple of 15. Longer than a ball takes to cross the belt, so a replacement never appears in front of
+ * the ball that just took the last one.
+ */
+export const PICKUP_SPAWN_INTERVAL_SECONDS = 15;
+
+/**
+ * **Placeholder.** The speed a ball starts `Playing` with, in studs/second.
+ *
+ * Equal to the reference belt speed, which is what makes `RELATIVE_SPEED` exactly zero at the green light:
+ * every ball begins stationary on the belt and the race is decided entirely by what happens to that number
+ * afterwards. See the model note at the top of `BALL_SPEED_DECAY_RATE`.
+ */
+export const BALL_SPEED_START = DEFAULT_BELT_SPEED;
+
+/**
+ * **Placeholder.** How fast a ball's speed bleeds away, in studs/second per second.
+ *
+ * ## The model this constant belongs to
+ *
+ * The belt is no longer a physical surface. `BELT_SPEED` (`DEFAULT_BELT_SPEED`, 10) is a **reference number**
+ * and nothing else: there is no moving slab, no constraint, no friction driving anything.
+ *
+ * Every ball carries its own **`BALL_SPEED`**, an attribute on the ball, starting at `BALL_SPEED_START` and
+ * decaying toward `BALL_SPEED_MIN` at this rate. Each tick the server sets the ball's velocity along the belt
+ * to `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED` times the belt's `RightVector`:
+ *
+ * - `BALL_SPEED = BELT_SPEED` -> `RELATIVE_SPEED = 0` -> the ball holds station on the belt.
+ * - `BALL_SPEED < BELT_SPEED` -> negative -> the ball is dragged **backward**, toward the exit edge.
+ * - `BALL_SPEED > BELT_SPEED` -> positive -> the ball drifts **forward**, toward the spawn edge, i.e. away
+ *   from the exit.
+ *
+ * Because every ball starts at the reference speed and only ever decays, the drift is always backward and
+ * every ball is eventually eliminated unless a pickup tops it up. A rate of `0.3` means the 10 studs/s of
+ * headroom takes about 33 s to spend, and the drift is quadratic (`v = RATE * t`), so most of the travel
+ * happens late ? the ball hangs near the spawn end for the first half of its life and then accelerates away.
+ *
+ * Decay toward **zero**, not toward some terminal value: a terminal value would be an equilibrium a ball could
+ * sit at forever, and a race where a ball can survive indefinitely is not a race. Zero is the floor that makes
+ * every ride finite.
+ */
+export const BALL_SPEED_DECAY_RATE = 0.3;
+
+/** **Placeholder.** The floor `BALL_SPEED` decays to. Zero, because a negative ball speed is meaningless. */
+export const BALL_SPEED_MIN = 0;
+
+/**
+ * **Placeholder.** The speed a pickup sets a ball to, in studs/second. Above `BELT_SPEED` on purpose.
+ *
+ * ## Why above the reference, which is the opposite of the old model
+ *
+ * Before this rework the belt was a physical surface at ~10 and a pickup pushed a ball to **8** ? *below* the
+ * belt ? because a physical surface moving faster than the ball can only pull it along, and a ball faster than
+ * the surface gets braked by it. Under the faked model none of that applies: velocity is set directly, so a
+ * boost above the reference is the only thing that flips `RELATIVE_SPEED` positive, and positive is the
+ * direction that carries the ball **away from the exit** and back toward the spawn end. A boost of `8` under
+ * this model would push the ball *toward* elimination faster, which is exactly backwards.
+ *
+ * The trade is stated rather than hidden: a pickup now buys time by reversing the drift, and the ball drifts
+ * forward until its decay brings `BALL_SPEED` back under the reference, at which point it turns around and
+ * resumes losing ground.
+ */
+export const BOOST_TARGET_BALL_SPEED = 12;
+
+/** **Placeholder.** The folder `PickupService` parents its triangles into, created on demand. */
+export const PICKUPS_FOLDER_NAME = "SpawnedPickups";

@@ -56,4 +56,18 @@ export const TAGS = {
 	 * tag is absent the round still runs — `RoundService` warns once and treats every ball as alive.
 	 */
 	eliminationZone: "EliminationZone",
+	/**
+	 * A stationary boost marker sitting on the belt's surface. A ball touching one has its along-belt speed
+	 * raised to `BOOST_TARGET_BALL_SPEED` and the marker is consumed.
+	 *
+	 * **Not `TreadmillWall`, deliberately.** The wall assist exists to keep a ball that is already racing
+	 * from stalling against a barrier; a pickup is a one-shot reward that is destroyed on use. Sharing the
+	 * tag would mean every wall became a consumable and every pickup became a permanent push, and the two
+	 * behaviours cannot be told apart from geometry alone.
+	 *
+	 * Server-only: these parts are created by `PickupService`, never by the scene, so unlike the belt and
+	 * the spawner there is nothing for a designer to tag by hand. The tag still exists so cleanup can find
+	 * them by the same mechanism as `Ball` rather than by folder position.
+	 */
+	pickup: "Pickup",
 } as const;

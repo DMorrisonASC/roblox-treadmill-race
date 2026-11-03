@@ -5,16 +5,14 @@ import {
 	MARKER_LOCAL_RIGHT_ATTRIBUTE,
 	MARKER_LOCAL_UP_ATTRIBUTE,
 } from "shared/attributes";
+import { BALL_SPEED_ATTRIBUTE } from "shared/attributes";
 import { TAGS } from "shared/tags";
 import {
 	APPARENT_SPIN_GAIN,
-	APPARENT_SPIN_GAIN_OMEGA,
 	APPARENT_SPIN_MAX_RAD_PER_SEC,
 	APPARENT_SPIN_SIGN,
 	APPARENT_SPIN_SMOOTHING_SECONDS,
-	SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC,
 	SPIN_DEADBAND_SPEED,
-	SPIN_FALLBACK_MIN_SPEED,
 } from "shared/tuning";
 
 /** One marker and the pose it holds relative to its body, read once when the marker is first seen. */
@@ -128,6 +126,24 @@ function describeNumber(value: number): string {
 /** TEMPORARY INSTRUMENTATION. A `Vector3` as `(x, y, z)`, so a position stays greppable on one line. */
 function describeVector(value: Vector3): string {
 	return `(${describeNumber(value.X)}, ${describeNumber(value.Y)}, ${describeNumber(value.Z)})`;
+}
+
+/**
+ * TEMPORARY INSTRUMENTATION. Who owns a body, rendered so the answer fits in a log field.
+ *
+ * **`GetNetworkOwner` is a server-only call** and raises on a client that does not own the body. It used to
+ * succeed here only because the local player owned the balls; with the ball spawned server-owned (`auto=true`)
+ * it throws, and because the call sat *before* the marker was registered, the throw aborted `track()` and no
+ * marker was ever tracked. Wrapped so the answer degrades to `unreadable(client)` instead of taking the caller
+ * down with it.
+ */
+function describeNetworkOwner(body: BasePart): string {
+	const [ok, owner] = pcall(() => body.GetNetworkOwner());
+	if (!ok) {
+		return "unreadable(client)";
+	}
+
+	return typeIs(owner, "Instance") ? owner.Name : "server";
 }
 
 /**
@@ -283,9 +299,8 @@ export class MarkerSpinController implements OnStart {
 			// re-litigating it or adding a second round of instrumentation to find out.
 			if (!state.ownerLogged) {
 				state.ownerLogged = true;
-				const owner = body.GetNetworkOwner();
 				print(
-					`[MarkerSpin] owner body="${body.GetFullName()}" owner=${owner === undefined ? "server" : owner.Name} localPlayer=${Players.LocalPlayer?.Name ?? "none"} |omegaPhysical|=${describeNumber(body.AssemblyAngularVelocity.Magnitude)} |v|=${describeNumber(body.AssemblyLinearVelocity.Magnitude)}`,
+					`[MarkerSpin] owner body="${body.GetFullName()}" owner=${describeNetworkOwner(body)} localPlayer=${Players.LocalPlayer?.Name ?? "none"} |omegaPhysical|=${describeNumber(body.AssemblyAngularVelocity.Magnitude)} |v|=${describeNumber(body.AssemblyLinearVelocity.Magnitude)}`,
 				);
 			}
 
@@ -501,104 +516,80 @@ export class MarkerSpinController implements OnStart {
 				const alpha = 1 - math.exp(-frameDt / APPARENT_SPIN_SMOOTHING_SECONDS);
 				state.velocity = state.velocity.add(currentVelocity.sub(state.velocity).mul(alpha));
 
-				const speed = state.velocity.Magnitude;
+				// The smoothed world velocity is still needed for one thing only: the `|v|` field of the log
+				// line, which is the cross-check against `BALL_SPEED`. It is no longer the rate (see `ballSpeed`)
+				// and no longer the axis (see the axis note below).
+
+				// **The spin rate comes from `BALL_SPEED`, not from the world velocity.**
+				//
+				// This is the same class of bug item 43 fixed for the drift sign, one layer up. Under the
+				// reference-speed model a ball's world velocity is `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED`,
+				// so at spawn it is **zero** and during a normal ride it is a small negative number. Driving the
+				// markers from `|v|` therefore drew a ball that visually sat still with no rotation, then a ball
+				// that slowly rotated *backwards* as it lost ground - as if it were sliding on a stationary floor.
+				//
+				// The ball is not on a stationary floor. It is rolling on a surface moving at `BELT_SPEED`, and
+				// relative to that surface its speed is `BALL_SPEED`. That is the number the markers should show:
+				// fast at spawn, slowing as the attribute decays, jumping on a pickup. The rate is therefore
+				// always positive and the markers always turn forward - there is no backward case any more.
+				//
+				// A missing attribute reads as `0`, which yields the deadband and holds the markers still. That is
+				// the correct answer for a body with no `BALL_SPEED` rather than a guess, and `BALL_SPEED` cannot be
+				// `NaN`: every writer is `math.max(0, ...)` or a constant.
+				const rawBallSpeed = body.GetAttribute(BALL_SPEED_ATTRIBUTE);
+				const ballSpeed = typeIs(rawBallSpeed, "number") && rawBallSpeed === rawBallSpeed ? rawBallSpeed : 0;
 				// TEMPORARY INSTRUMENTATION. Hoisted so the log lines can report the rate actually applied
 				// this frame, which of the three axis sources produced it, and which branch set the rate.
 				let omegaThisFrame = 0;
 				let axisSource = "none";
 				let rateSource = "deadband";
 
-				// ## The model: three branches, in this order
+				// ## The model, and why it is one branch now
 				//
-				// 1. **Physical spin** — `min(MAX, APPARENT_SPIN_GAIN_OMEGA x |omega_physical|)`, above
-				//    `SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC`.
-				// 2. **Velocity** — `min(MAX, APPARENT_SPIN_GAIN x |v| / radius)`, above `SPIN_DEADBAND_SPEED`.
-				// 3. **Deadband** — `0`.
+				// The rate is `min(MAX, APPARENT_SPIN_GAIN x BALL_SPEED / radius)`, or `0` below
+				// `SPIN_DEADBAND_SPEED`. That is the whole thing.
 				//
-				// **The order is the design, not an accident of writing.** Branch 1 comes first so that a body
-				// which is genuinely rolling is drawn from its own rotation and never from its translation:
-				// a rolling ball's `|v|` and its `|omega|` describe the same motion, and drawing the former
-				// while the latter is available would make the markers wrong for any ball whose `v` and
-				// `omega` disagree — which is precisely every ball in a collision. Today branch 1 always
-				// falls through, because the probe reports `|omega| = 0` on every body; it stays first so that
-				// the day the belt imparts real spin the model becomes physical with no code change.
+				// Earlier versions chained branches: a physical-spin branch first (draw the body's own rotation
+				// if it has any), then a velocity branch, then the deadband. The physical branch was there so a
+				// genuinely rolling ball would be drawn from its rotation rather than its translation, and it
+				// stayed first on the reasoning that it could only ever improve the picture. It cannot, here.
+				// The bodies do accumulate real spin - `omegaPhysical` tracks `2 x |v|` - and that spin points
+				// wherever the solver put it, which is not the direction this model calls forward. Selecting it
+				// whenever it crossed a threshold made the markers **reverse mid-ride with no change in
+				// `BALL_SPEED`**, which is the one thing the user asked never to see.
 				//
-				// Branch 2 is what actually runs: the ball slides, so its translation is the only motion it
-				// has, and `|v| / radius` is the rate it *would* be turning at if it were rolling instead of
-				// sliding. That is a fiction, and it is the fiction the user asked for.
+				// `omegaPhysical` is still printed. It no longer decides anything.
 				//
-				// Branch 3 exists because the smoothed `|v|` of a parked ball settles at ~`0.003` studs/s
-				// rather than at zero — solver noise and replication residual. Through branch 2 that is
-				// `0.024 rad/s`: invisible as a rate, but it accumulates into the marker angle forever, so a
-				// ball parked for a minute drifts its markers by ~1.4 degrees and two balls parked side by
-				// side slowly desync. Below the deadband the rate is exactly `0`, so `angle += omega * dt`
-				// leaves the angle bit-for-bit untouched and the markers hold still.
+				// **The rate comes from `BALL_SPEED` and from nothing else.**
 				//
-				// A hard threshold means the rate steps from `0` to `GAIN x DEADBAND / radius` = `4` rad/s
-				// (~0.64 rev/s) at the crossing. That is the onset of rotation rather than a glitch — the
-				// speed crossing 0.5 studs/s has itself been smoothed over `APPARENT_SPIN_SMOOTHING_SECONDS`
-				// — but it is a step, not a ramp, and no taper is applied.
+				// The physical spin of these bodies is not a second opinion, it is a by-product of the solver
+				// resolving contact on a floor this codebase moves them along: the log shows `omegaPhysical`
+				// tracking `2 x |v|` exactly (0.394 at `|v| = 0.203`, 7.296 at `|v| = 3.589`), i.e. the ball really
+				// is rolling, in world space, in whichever direction the engine decided. Letting that compete with
+				// the attribute is what made the markers **change direction mid-ride**: the two agreed for a while
+				// and then the physical branch took over, reversing the picture with no change in `BALL_SPEED`.
 				//
-				// ## `AssemblyAngularVelocity` on a client
-				//
-				// **This is replicated state, and it is only current for the machine that simulates the
-				// assembly.** The server log reports `owner=<player>` on the balls, so the client is the
-				// simulator here and the read is good — but on a client that does *not* own the body the
-				// value may be stale or exactly zero even while the ball visibly spins. That case is not
-				// solved in this round: such a client falls through to branch 2 and draws the sliding rate
-				// instead of the rolling one, which is wrong in magnitude and never blank. `[MarkerSpin]
-				// owner` prints once per body so the question is answerable from the log rather than
-				// re-argued.
-				const physicalOmega = body.AssemblyAngularVelocity;
-				const physicalSpin = physicalOmega.Magnitude;
-
+				// The user's requirement is that the ball never renders a backwards spin. The only way to guarantee
+				// that is to have one source of truth for the rate and one for the axis, both derived from the
+				// model. `omegaPhysical` is still printed as a diagnostic; it no longer decides anything.
 				let omega: number;
-				if (physicalSpin > SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC) {
-					omega = math.min(APPARENT_SPIN_MAX_RAD_PER_SEC, APPARENT_SPIN_GAIN_OMEGA * physicalSpin);
-					rateSource = "physical";
-				} else if (speed > SPIN_DEADBAND_SPEED) {
-					omega = math.min(APPARENT_SPIN_MAX_RAD_PER_SEC, (APPARENT_SPIN_GAIN * speed) / state.radius);
-					rateSource = "velocity";
+				if (ballSpeed > SPIN_DEADBAND_SPEED) {
+					omega = math.min(APPARENT_SPIN_MAX_RAD_PER_SEC, (APPARENT_SPIN_GAIN * ballSpeed) / state.radius);
+					rateSource = "attribute";
 				} else {
 					omega = 0;
 					rateSource = "deadband";
 				}
 
-				// ## Axis resolution: physical spin, then travel, then the belt
+				// ## Axis: always the belt's, never the body's
 				//
-				// Three sources, in decreasing order of truthfulness. The chain is independent of the rate
-				// branches above and runs even when `omega = 0`, for two reasons: the log line names which
-				// source it used, and a ball that starts moving must turn about a defined axis on its first
-				// moving frame rather than one frame later.
+				// **Every source of variance is gone.** The physical-spin axis and the travel axis both changed
+				// direction mid-ride - the first because the solver's rolling direction is not the model's, the
+				// second because the world velocity reverses on a boost - and either one flipping made the markers
+				// reverse while `BALL_SPEED` was still climbing. The axis is now a pure function of the belt, so the
+				// ball turns the same way for its whole life: forward at spawn, slower as the attribute decays,
+				// faster on a pickup, never backwards.
 				let axis: Vector3 | undefined;
-
-				if (physicalSpin > SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC) {
-					// The ball is genuinely spinning; draw what it is doing. `.Unit` is safe here because the
-					// threshold above has already excluded the degenerate vectors.
-					axis = physicalOmega.Unit;
-					axisSource = "physical";
-				} else if (speed >= SPIN_FALLBACK_MIN_SPEED) {
-					// Not spinning, but moving: draw the rolling axis its travel implies. This is the case the
-					// probe proves is happening — `|omega| = 0`, `contactSlip = 10`, `alongRight` climbing to
-					// ~4.4 — so this branch is the normal path, not the exception.
-					//
-					// `yAxis:Cross(direction)` is forward rolling: for travel along `+X` it is `-Z`, the sign
-					// that moves the top of the ball toward `+X`. It is the *negation* of `applyBackspin`'s
-					// axis (`RightVector:Cross(yAxis)`, the braking spin), so reusing that one would draw the
-					// markers turning against the travel direction.
-					const axisRaw = Vector3.yAxis.Cross(state.velocity.Unit);
-
-					// A body moving straight up or down has no rolling axis — the cross product of parallel
-					// vectors is the zero vector, and `.Unit` of it is not a unit vector. Un-guarded, that
-					// writes a NaN into the accumulated rotation, after which every marker vanishes for the
-					// rest of the body's life while still costing a write per marker per frame. Falling
-					// through to the belt axis instead is the correct recovery: the ball is in free fall, and
-					// the belt's direction is still a meaningful axis to draw on it.
-					if (axisRaw.Magnitude >= 1e-3) {
-						axis = axisRaw.Unit;
-						axisSource = "travel";
-					}
-				}
 
 				if (axis === undefined) {
 					// Neither spinning nor moving: a ball at rest on the belt. The rate is `0` here, so nothing
@@ -702,7 +693,7 @@ export class MarkerSpinController implements OnStart {
 					const frameLabel = traceThisFrame ? `boot f=${BOOT_TRACE_FRAMES - bootFramesRemaining}` : "state";
 
 					print(
-						`[MarkerSpin] ${frameLabel} bodies=${bodies.size()} tracked=${trackedMarkers.size()} markers=${state.markers.size()} body="${body.GetFullName()}" |v|=${describeNumber(replicatedVelocity.Magnitude)} source=${source} speed=${describeNumber(speed)} rateSource=${rateSource} omegaPhysical=${describeNumber(physicalSpin)} axis=${axisSource} omegaVisual=${describeNumber(omegaThisFrame)} r=${describeNumber(state.radius)} angle=${describeNumber(state.angle)} bodyPos=${describeVector(position)} markerPos=${firstMarker === undefined ? "none" : describeVector(firstMarker.Position)} writeError=${describeNumber(writeError)}`,
+						`[MarkerSpin] ${frameLabel} bodies=${bodies.size()} tracked=${trackedMarkers.size()} markers=${state.markers.size()} body="${body.GetFullName()}" |v|=${describeNumber(replicatedVelocity.Magnitude)} velocitySource=${source} BALL_SPEED=${describeNumber(ballSpeed)} rateSource=${rateSource} omegaPhysical=${describeNumber(body.AssemblyAngularVelocity.Magnitude)} axis=${axisSource} omegaVisual=${describeNumber(omegaThisFrame)} r=${describeNumber(state.radius)} angle=${describeNumber(state.angle)} bodyPos=${describeVector(position)} markerPos=${firstMarker === undefined ? "none" : describeVector(firstMarker.Position)} writeError=${describeNumber(writeError)}`,
 					);
 				}
 			}

@@ -1,6 +1,6 @@
 import { CollectionService, RunService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
-import { BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED } from "shared/attributes";
+import { BELT_VISUAL_SPEED_ATTRIBUTE } from "shared/attributes";
 import { TAGS } from "shared/tags";
 import { BELT_TEXTURE_SCROLL_SIGN, BELT_TEXTURE_STUDS_PER_TILE } from "shared/tuning";
 
@@ -111,8 +111,16 @@ export class BeltScrollController implements OnStart {
 					continue;
 				}
 
-				const raw = belt.GetAttribute(BELT_SPEED_ATTRIBUTE);
-				const speed = typeIs(raw, "number") ? raw : DEFAULT_BELT_SPEED;
+				// **Only the visual speed.** `BeltSpeedActual` is the ramped scroll rate, published by
+				// `TreadmillService.setBeltSpeed`, and it is the one number that may legitimately move while the
+				// round spins up. `BeltSpeed` (the reference the `BALL_SPEED` model compares against) is
+				// deliberately *not* read here: they were one value for one round, which made every ball drift
+				// forward during the ramp with no pickup involved.
+				//
+				// Absent means zero, not "the designer's number". A belt the round has never driven has no visual
+				// speed, and treating a missing attribute as full speed is how a stopped belt scrolls in `Waiting`.
+				const visual = belt.GetAttribute(BELT_VISUAL_SPEED_ATTRIBUTE);
+				const speed = typeIs(visual, "number") ? visual : 0;
 
 				// Negative speed (a reversed belt) reverses the scroll for free, because the sign of the
 				// rate follows the sign of the speed.
