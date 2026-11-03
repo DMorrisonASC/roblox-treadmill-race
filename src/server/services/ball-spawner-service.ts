@@ -1,4 +1,4 @@
-import { CollectionService, Players, ReplicatedStorage, Workspace } from "@rbxts/services";
+import { CollectionService, Workspace } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
 import {
 	BELT_SPEED_ATTRIBUTE,
@@ -7,10 +7,12 @@ import {
 	MARKER_LOCAL_POSITION_ATTRIBUTE,
 	MARKER_LOCAL_RIGHT_ATTRIBUTE,
 	MARKER_LOCAL_UP_ATTRIBUTE,
+	OWNER_DISPLAY_NAME_ATTRIBUTE,
+	OWNER_USER_ID_ATTRIBUTE,
 	SPAWNER_KILL_Y_ATTRIBUTE,
 	SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE,
 } from "shared/attributes";
-import { REMOTES_FOLDER_NAME, SPAWN_BALL_REMOTE_NAME } from "shared/remotes";
+
 import {
 	pickPoolEntry,
 	poolMaxExtent,
@@ -46,6 +48,21 @@ function formatNumber(value: number): string {
 /** A `Vector3` as `(x, y, z)` on one line, so a vector stays greppable instead of wrapping. */
 function formatVector(value: Vector3): string {
 	return `(${formatNumber(value.X)}, ${formatNumber(value.Y)}, ${formatNumber(value.Z)})`;
+}
+
+/**
+ * The owner a spawned body competes for.
+ *
+ * `userId` is the identity and may be negative for a synthetic debug owner; `displayName` is only for the
+ * log and a later results screen. Both are written onto the body as attributes at creation, which is the
+ * one moment they cannot be forgotten - see `spawnBall`.
+ *
+ * Declared at module scope rather than inside the class: it is a data shape, and `RoundService` names it in
+ * its own signatures. An interface nested in a class is not visible to another file at all.
+ */
+export interface BallOwner {
+	readonly userId: number;
+	readonly displayName: string;
 }
 
 /** Every `NormalId`, in enum order. Used to paint all six faces of a spawned body. */
@@ -114,9 +131,6 @@ const MARKER_RING_COLOR = Color3.fromRGB(80, 80, 255);
 function laneRadius(size: Vector3): number {
 	return math.max(size.X, size.Y, size.Z) / 2;
 }
-
-/** **Placeholder** minimum time between accepted manual spawns, per player, in milliseconds. */
-const MANUAL_SPAWN_COOLDOWN_MS = 100;
 
 /**
  * Cleanup cadence. Every 0.5 s a single loop walks the live-ball list once: kill-plane cull, then
@@ -324,11 +338,12 @@ interface SpawnerFailure {
  *
  * ## Why balls are created on the server only
  *
- * The client's only power here is asking: it fires a RemoteEvent and the server decides whether a
- * ball exists. That costs a round-trip of latency on the manual trigger, which is irrelevant for a
- * test fixture and is the whole point of "server-authoritative" — a client that could create its
- * own balls could also create a thousand of them, and every later slice that counts balls would
- * have to defend against that.
+ * **Nothing but `RoundService` asks for a body.** There is no client-facing spawn request any more: the
+ * old `1` key spawned from here and is now the round's `Waiting` key, which is why the ghost ball in the
+ * 21:20 log existed at all — it was created here, unknown to the round, and survived a teardown that
+ * only destroys bodies the round knows about. A single creation path is the whole point of
+ * "server-authoritative" here, and it is also the only way the owner contract can hold: every body has an
+ * owner because the round is the only thing that makes one.
  *
  * ## Cap semantics
  *
@@ -368,7 +383,17 @@ export class BallSpawnerService implements OnStart {
 	constructor(private readonly treadmill: TreadmillService) {}
 
 	private readonly spawners = new Set<BasePart>();
-	private readonly lastManualSpawnAt = new Map<Player, number>();
+
+	/**
+	 * The same spawners, in bind order, so "lane `i`" means one thing.
+	 *
+	 * `Set` iteration order over instance keys is not a language guarantee — it happens to be insertion
+	 * order for a Lua table with reference keys until a rehash moves things around. A round assigns
+	 * competitors to lanes by position, and a lane that silently swaps spawners between rounds makes the
+	 * spawn log a lie about which lane a body came from. Maintaining an array alongside the set costs one
+	 * push and one filter per bind/unbind and makes the mapping stated rather than incidental.
+	 */
+	private readonly spawnerLanes = new Array<BasePart>();
 
 	/** Spawn order, oldest first — the order the cap evicts in. */
 	private liveBalls = new Array<BasePart>();
@@ -433,9 +458,13 @@ export class BallSpawnerService implements OnStart {
 			this.unbindSpawner(instance),
 		);
 
-		this.createManualSpawnRemote();
-
-		Players.PlayerRemoving.Connect((player) => this.lastManualSpawnAt.delete(player));
+		// **The manual spawn remote is gone with the `1` key.** `1` now forces the round to `Waiting`, so
+		// nothing fires `SpawnBall` any more; leaving the remote and its handler in place would leave a
+		// second way to create a body that `RoundService` never heard about. That second way is exactly
+		// what produced the ghost in the 21:20 log — a ball created here, untracked by the round, still
+		// rolling 274 studs past the belt's end five seconds into `Intermission`, because the round's
+		// teardown only ever destroys bodies it knows about. One creation path is worth more than the
+		// affordance the key provided.
 
 		task.spawn(() => {
 			while (true) {
@@ -456,12 +485,12 @@ export class BallSpawnerService implements OnStart {
 		});
 
 		// **The one-shot spawn is gone.** A fresh server now starts with no balls at all, because a
-		// round has not started: balls exist only between `Countdown` and the end of `Ended`, and their
+		// round has not started: balls exist only between `Waiting` and the end of `PostGame`, and their
 		// creation is `RoundService`'s to request. Leaving the one-shot here would mean a server that has
-		// never seen a `2` keypress already has four bodies on a stationary belt, which reads as a round
-		// that started without anyone pressing anything.
+		// never entered `Waiting` already has four bodies on a stationary belt, which reads as a round
+		// that started on its own.
 		//
-		// The manual `1` path still exists for ad-hoc bodies, but is gated on `Running` — see
+		// The manual `1` path still exists for ad-hoc bodies, but is gated on the round being active — see
 		// `setRoundActive`.
 	}
 
@@ -482,8 +511,9 @@ export class BallSpawnerService implements OnStart {
 		const derived = this.ensureDerivedAttributes(instance);
 
 		// No attribute listener and no `Enabled`: both retired with the stream. Nothing spawns from the tag
-		// itself; bodies come from `spawnForRound` (a round) or the manual `1` path.
+		// itself; every body comes from `RoundService` asking for one.
 		this.spawners.add(instance);
+		this.spawnerLanes.push(instance);
 
 		const id = ++this.nextSpawnerId;
 		this.spawnerIds.set(instance, id);
@@ -514,70 +544,14 @@ export class BallSpawnerService implements OnStart {
 		print(`[Spawner] unbound ${this.labelFor(instance)}: tag removed or instance destroyed.`);
 
 		this.spawners.delete(instance);
+		const laneIndex = this.spawnerLanes.indexOf(instance);
+		if (laneIndex >= 0) {
+			// Shifted rather than swapped-with-last: lane indices are what the round logs, so removing one
+			// spawner must not renumber the others behind it.
+			this.spawnerLanes.remove(laneIndex);
+		}
 		this.spawnerIds.delete(instance);
 		this.spawnerFailures.delete(instance);
-	}
-
-	// #endregion
-
-	// #region manual trigger
-
-	private createManualSpawnRemote(): void {
-		let folder = ReplicatedStorage.FindFirstChild(REMOTES_FOLDER_NAME);
-		if (folder === undefined || !folder.IsA("Folder")) {
-			const created = new Instance("Folder");
-			created.Name = REMOTES_FOLDER_NAME;
-			created.Parent = ReplicatedStorage;
-			folder = created;
-		}
-
-		const event = new Instance("RemoteEvent");
-		event.Name = SPAWN_BALL_REMOTE_NAME;
-		event.Parent = folder;
-
-		// The client sends no arguments, and this handler ignores everything past the player anyway:
-		// anything a client sends is attacker-controlled, so nothing it says may influence the result.
-		event.OnServerEvent.Connect((player) => this.handleManualSpawn(player));
-	}
-
-	private handleManualSpawn(player: Player): void {
-		// **Gated on the round.** `1` is a test affordance, not a way to participate: a body that appears
-		// mid-round would be an entrant nobody counted, and one that appears in `Idle` would sit on a
-		// stopped belt looking like a round that failed to start. Silently ignored outside `Running`
-		// rather than warned, because a player leaning on `1` during a countdown would otherwise fill
-		// their own output — `RoundService` already logs what phase the round is in, so the silence is
-		// explainable from the log.
-		if (!this.roundActive) {
-			return;
-		}
-
-		const now = os.clock() * 1000;
-		const last = this.lastManualSpawnAt.get(player);
-		if (last !== undefined && now - last < MANUAL_SPAWN_COOLDOWN_MS) {
-			return;
-		}
-		this.lastManualSpawnAt.set(player, now);
-
-		// `Enabled` is deliberately not consulted: it gates the timed *stream*, and the manual trigger
-		// is the thing you use to poke a spawner that is otherwise off. A spawner disabled by an
-		// attribute but still tagged is exactly the fixture state "press 1 and watch one ball appear".
-		//
-		// **Every bound spawner fires, one ball each.** This is a reversal: the previous rule spawned
-		// from the first registered spawner only, on the grounds that one ball from a known place kept
-		// a multi-spawner test predictable. That reasoning did not survive the fixture it was written
-		// for — with four spawners across four lanes, "one ball from the first one" meant three lanes
-		// never received a manual ball at all, so the key could not be used to test the belt's full
-		// width or what happens when two bodies meet. The predictability it bought was the
-		// predictability of only ever seeing a quarter of the scene.
-		//
-		// The loop below lives in `spawnOnePerSpawner`, which is the manual path's own shape: one body per
-		// spawner, regardless of how many are bound.
-		if (this.spawners.size() === 0) {
-			warn(`[Spawner] manual spawn requested but no part is tagged ${TAGS.ballSpawner}.`);
-			return;
-		}
-
-		this.spawnOnePerSpawner("manual");
 	}
 
 	// #endregion
@@ -599,40 +573,76 @@ export class BallSpawnerService implements OnStart {
 
 	/** How many parts are currently bound as spawners. `RoundService` spawns one body per spawner. */
 	public getBoundSpawnerCount(): number {
-		return this.spawners.size();
+		return this.spawnerLanes.size();
 	}
 
 	/**
-	 * Spawns `count` bodies, distributed round-robin across the bound spawners, and returns them.
+	 * Spawns one body in a specific lane, returning it or `undefined` if the lane does not exist or the
+	 * spawn failed.
 	 *
-	 * Round-robin rather than "one per spawner until the count is met" because the two are identical
-	 * when `count` equals the spawner count (the round's case) and round-robin degrades gracefully when
-	 * it does not: a scene with two spawners asked for three bodies puts two in one lane rather than
-	 * silently spawning two and reporting success.
+	 * **Lane-indexed rather than "give me the next spawner".** A round assigns one competitor per player
+	 * and logs which lane each went to; with a round-robin call the caller would only learn the lanes by
+	 * re-deriving the distribution from the result count, which is wrong the moment one spawn fails. Here
+	 * the lane is an argument, so a failure is reported against the lane that failed and the caller's
+	 * lane bookkeeping stays correct.
 	 *
-	 * Each spawn is individually protected for the same reason the loop in `spawnOnePerSpawner` is: a
-	 * malformed spawner must cost one body, not the round. A body that fails is simply absent from the
-	 * returned list, so `RoundService` tracks exactly what exists rather than what was requested.
+	 * The failure is logged through the same `reportFailure` path as every other spawn, so a broken
+	 * spawner is named once per attempt rather than swallowed by a `undefined` return.
 	 */
-	public spawnForRound(count: number): BasePart[] {
-		const spawned = new Array<BasePart>();
-
-		const spawners = new Array<BasePart>();
-		for (const spawner of this.spawners) {
-			spawners.push(spawner);
+	public spawnInLane(laneIndex: number, owner: BallOwner): BasePart | undefined {
+		const spawner = this.spawnerLanes[laneIndex];
+		if (spawner === undefined || spawner.Parent === undefined) {
+			return undefined;
 		}
 
+		let ball: BasePart | undefined;
+		const failure = this.runProtected(() => {
+			ball = this.spawnBall(spawner, owner);
+		});
+
+		if (failure !== undefined) {
+			this.reportFailure(spawner, failure);
+			return undefined;
+		}
+
+		this.reportRecovery(spawner);
+		return ball;
+	}
+
+	/**
+	 * Spawns one body per owner, distributed round-robin across the bound spawners, and returns them.
+	 *
+	 * **Owners, not a count.** The owner has to be written on the body at creation, and a count would
+	 * force the caller to re-derive which body got which owner from the returned order — a mapping that is
+	 * only correct if every spawn succeeds. Passing the owners in makes the association exact, and it is
+	 * what lets a failed spawn cost one competitor rather than shifting every later owner onto the wrong
+	 * body.
+	 *
+	 * Round-robin rather than "one per spawner until the owners run out" because the two are identical
+	 * when the counts match and round-robin degrades gracefully when they do not: a scene with two
+	 * spawners asked for three bodies puts two in one lane rather than silently spawning two and
+	 * reporting success.
+	 *
+	 * Each spawn is individually protected: a malformed spawner must cost one body, not the round. A body
+	 * that fails is simply absent from the returned list, so `RoundService` tracks exactly what exists
+	 * rather than what was requested.
+	 */
+	public spawnForRound(owners: ReadonlyArray<BallOwner>): BasePart[] {
+		const spawned = new Array<BasePart>();
+
+		const spawners = this.spawnerLanes;
 		if (spawners.size() === 0) {
 			warn(`[Spawner] a round was requested but no part is tagged ${TAGS.ballSpawner}; no bodies spawned.`);
 			return spawned;
 		}
 
-		for (let index = 0; index < count; index++) {
+		for (let index = 0; index < owners.size(); index++) {
 			const spawner = spawners[index % spawners.size()];
+			const owner = owners[index];
 
 			let ball: BasePart | undefined;
 			const failure = this.runProtected(() => {
-				ball = this.spawnBall(spawner);
+				ball = this.spawnBall(spawner, owner);
 			});
 
 			if (failure !== undefined) {
@@ -647,58 +657,6 @@ export class BallSpawnerService implements OnStart {
 		}
 
 		return spawned;
-	}
-
-	// #endregion
-
-	// #region manual spawn (one body per spawner)
-
-	/**
-	 * Spawns exactly one body per bound spawner. **Called only by the manual `1` trigger.**
-	 *
-	 * This used to have two callers — the manual key and an automatic spawn at server start. The
-	 * automatic one is gone (see `onStart`), because bodies now exist only inside a round and
-	 * `RoundService` asks for them through `spawnForRound`. The `reason` argument survives as a single
-	 * literal so the summary line still names its trigger; a second caller would be a signal that the
-	 * round had grown a second way to create bodies, which is exactly what `spawnForRound` exists to
-	 * prevent.
-	 *
-	 * The loop is deliberately **not** shared with `spawnForRound`, even though both walk the spawner
-	 * set: this one spawns one per spawner *regardless of count* (a fixed shape, one body each), while
-	 * `spawnForRound` spawns a *requested count* distributed round-robin. Folding them together would
-	 * mean a parameter that means "one each" in one case and "N total" in the other, which is the kind
-	 * of overload that gets misread at the call site.
-	 *
-	 * ## Failure containment
-	 *
-	 * Each spawn is individually protected, for the same reason the old stream tick was: one malformed
-	 * spawner must not prevent the others from producing their body. The failure is logged against the
-	 * spawner that caused it. This matters for the manual path because a keypress that silently produced
-	 * three of four bodies would look like flaky physics.
-	 */
-	private spawnOnePerSpawner(reason: "manual"): void {
-		let spawned = 0;
-
-		for (const spawner of this.spawners) {
-			const failure = this.runProtected(() => {
-				if (this.spawnBall(spawner) !== undefined) {
-					spawned++;
-				}
-			});
-
-			if (failure !== undefined) {
-				this.reportFailure(spawner, failure);
-			} else {
-				this.reportRecovery(spawner);
-			}
-		}
-
-		// One line, always, so "did the trigger fire and how many bodies did it produce" is answerable
-		// without counting spawn lines. `bound` is printed alongside `spawned` because the interesting
-		// failure is the two disagreeing.
-		print(
-			`[Spawner] ${reason} spawn: bound=${this.spawners.size()} spawned=${spawned} cap=${this.effectiveMaxLiveBalls()}`,
-		);
 	}
 
 	// #endregion
@@ -865,7 +823,7 @@ export class BallSpawnerService implements OnStart {
 
 	// #region spawning
 
-	private spawnBall(spawner: BasePart): BasePart | undefined {
+	private spawnBall(spawner: BasePart, owner: BallOwner): BasePart | undefined {
 		if (spawner.Parent === undefined) {
 			return undefined;
 		}
@@ -892,6 +850,20 @@ export class BallSpawnerService implements OnStart {
 		ball.Material = Enum.Material.Plastic;
 		ball.TopSurface = Enum.SurfaceType.Smooth;
 		ball.BottomSurface = Enum.SurfaceType.Smooth;
+
+		// **The owner is written here, at creation, and nowhere else.** Two properties on the body rather
+		// than a table inside `RoundService`, because the body is what gets destroyed, replicated and
+		// enumerated: an owner held in a service-side map would need cleanup on every death path (cap,
+		// kill plane, elimination, teardown) and one missed path would leak an entry that later reads as a
+		// live competitor. Attributes replicate with the instance, so a client can answer "who owns this"
+		// without asking the server.
+		//
+		// Written before `Parent` so the body never exists in the world, even for one frame, without an
+		// owner: `RoundService` handles a spawn's return value immediately, and a body that were briefly
+		// ownerless would be an orphan by its own rule — ignored by the winner check it was just counted
+		// into.
+		ball.SetAttribute(OWNER_USER_ID_ATTRIBUTE, owner.userId);
+		ball.SetAttribute(OWNER_DISPLAY_NAME_ATTRIBUTE, owner.displayName);
 
 		// `fromMatrix` rather than `CFrame.Angles` composition: `randomSpawnRotation` already returned the
 		// images of the world X and Y axes, so passing them as the basis vectors is exact — no matrix
@@ -1010,19 +982,20 @@ export class BallSpawnerService implements OnStart {
 		// because belt friction then has something to resolve it against, and the contact point
 		// outrunning the belt is what converts the spin into a backward velocity change. Over a
 		// stationary surface there is nothing to resolve, so the ball just rolls, which is what a Studio
-		// log showed — the handler firing at `t = 1.067 s` inside `Countdown` with `v = 0`, `omega*r`
-		// going `0 -> 25`, and `u = 10` printed because `u` was read from the `BeltSpeed` attribute, not
-		// from the belt's actual speed. The `10` in that line was never the surface the ball was on.
+		// log showed — the handler firing at `t = 1.067 s` while the round was still in its pre-`Playing`
+		// phase with `v = 0`, `omega*r` going `0 -> 25`, and `u = 10` printed because `u` was read from the
+		// `BeltSpeed` attribute, not from the belt's actual speed. The `10` in that line was never the
+		// surface the ball was on.
 		//
 		// ## Why belt speed and not round phase
 		//
 		// Two checks could gate this and they are not the same check: belt speed alone, or belt speed
-		// plus `RoundService.getPhase() === "Running"`. **Belt speed alone is used, and it is the
+		// plus `RoundService.getPhase() === "Playing"`. **Belt speed alone is used, and it is the
 		// stricter of the two rather than a weaker substitute.** `RoundService` writes
-		// `setBeltSpeed(0)` on entering `Idle`, `Countdown` and `Ended`, and once at server start, so
-		// "not `Running`" and "belt at zero" are the same state seen from two sides — the speed test
+		// `setBeltSpeed(0)` on entering `Intermission`, `Waiting` and `PostGame`, and once at server start,
+		// so "not `Playing`" and "belt at zero" are the same state seen from two sides — the speed test
 		// implies the phase test. It also rejects the ramp, which the phase test would not: a collision
-		// at `0.4 s` into `Running` is `Running` and still not being carried. The reverse does not hold,
+		// at `0.4 s` into `Playing` is `Playing` and still not being carried. The reverse does not hold,
 		// so belt speed is the check that covers the whole requirement.
 		//
 		// The phase check on top was rejected because reaching it means this file importing
@@ -1337,8 +1310,19 @@ export class BallSpawnerService implements OnStart {
 		const id = observation === undefined ? "unlogged" : `#${observation.id}`;
 		const belt = observation === undefined ? this.nearestBeltTo(ball.Position) : observation.belt;
 
+		// **The owner is what makes a cap eviction a gameplay event rather than housekeeping.** Every body
+		// now carries an owner, so a cap that removes one is removing *a competitor* — and a cap that eats
+		// competitors silently would look like a round where half the field never arrived. Printed on every
+		// cap line, tracked or not, because the interesting case is precisely the body this service never
+		// logged.
+		const ownerName = ball.GetAttribute(OWNER_DISPLAY_NAME_ATTRIBUTE);
+		const owner = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);
+		const ownerField = `owner=${typeIs(owner, "number") ? tostring(owner) : "none"}(${typeIs(ownerName, "string") ? ownerName : "none"})`;
+
 		if (belt === undefined || belt.Parent === undefined) {
-			print(`[Ball:${id}] cap destroy pos=${formatVector(ball.Position)} no belt resolvable, footprint unknown`);
+			print(
+				`[Ball:${id}] cap destroy pos=${formatVector(ball.Position)} no belt resolvable, footprint unknown ${ownerField}`,
+			);
 			return;
 		}
 
@@ -1349,7 +1333,7 @@ export class BallSpawnerService implements OnStart {
 		const inside = math.abs(relative.X) <= halfX && math.abs(relative.Z) <= halfZ;
 
 		print(
-			`[Ball:${id}] cap destroy at pos=${formatVector(ball.Position)} local=${formatVector(relative)} aboveSurface=${formatNumber(relative.Y - halfY)} insideFootprint=${inside ? "yes" : "no"} velocity=${formatVector(ball.AssemblyLinearVelocity)} alongRight=${formatNumber(ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector))} BeltSpeed=${formatNumber(this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED))} ${this.describeOwner(ball)}`,
+			`[Ball:${id}] cap destroy at pos=${formatVector(ball.Position)} local=${formatVector(relative)} aboveSurface=${formatNumber(relative.Y - halfY)} insideFootprint=${inside ? "yes" : "no"} velocity=${formatVector(ball.AssemblyLinearVelocity)} alongRight=${formatNumber(ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector))} BeltSpeed=${formatNumber(this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED))} ${ownerField} ${this.describeOwner(ball)}`,
 		);
 	}
 

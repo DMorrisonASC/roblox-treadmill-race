@@ -96,6 +96,31 @@ export const DEFAULT_BELT_SPEED = 10;
  */
 export const SPAWNER_KILL_Y_ATTRIBUTE = "KillY";
 
+/**
+ * Attributes on every `Ball`-tagged body naming who the body competes for.
+ *
+ * ## Why an id and not just a name
+ *
+ * `OwnerDisplayName` is what a results screen shows and what the log prints, and it is **not** the
+ * identity: display names can change, and two accounts can share one. `OwnerUserId` is the identity, and
+ * it is a signed integer specifically so a synthetic debug owner can be `-1`, `-2`, ... — a value no real
+ * `Player.UserId` can ever take, so a "competitor" that is not a person is indistinguishable in type from
+ * one that is and needs no second flag to decode.
+ *
+ * ## Why the body and not one of its markers
+ *
+ * `RoundService` enumerates bodies, so an owner it has to reach through a child marker would be a lookup
+ * per body per tick. The body is also the thing that gets destroyed, so the owner goes away with it
+ * rather than needing cleanup.
+ *
+ * **A body with no `OwnerUserId` is an orphan and does not compete.** It is not counted, it does not
+ * start or end a round, and it cannot win. That is the rule that makes a stray body harmless: the
+ * alternative — treating "no owner" as an owner — would let a body nobody bet on hold a round open
+ * forever.
+ */
+export const OWNER_USER_ID_ATTRIBUTE = "OwnerUserId";
+export const OWNER_DISPLAY_NAME_ATTRIBUTE = "OwnerDisplayName";
+
 /** Attribute on a `BallSpawner` part: hard cap on live balls. */
 export const SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE = "MaxLiveBalls";
 /**

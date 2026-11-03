@@ -769,7 +769,7 @@ export class TreadmillService implements OnStart {
 	/**
 	 * Sets the speed every bound belt runs at, overriding the `BeltSpeed` attribute.
 	 *
-	 * Called by `RoundService` for the ramp and to stop the belt outside `Running`. Nothing else calls
+	 * Called by `RoundService` for the ramp and to stop the belt outside `Playing`. Nothing else calls
 	 * it, and that is deliberate — the belt has one driver during a round, so "which system is moving
 	 * the belt" has a single answer.
 	 *
@@ -814,7 +814,7 @@ export class TreadmillService implements OnStart {
 	 * `getBeltSpeed` above deliberately reports the designer's number, because that is what a round
 	 * should ramp towards. This reports the number a ball cares about: is the surface under me moving,
 	 * and how fast. The difference is the whole ramp — `getBeltSpeed` answers `10` one millisecond into
-	 * `Running`, while the constraint is still at `0`.
+	 * `Playing`, while the constraint is still at `0`.
 	 *
 	 * A narrow no-argument read rather than making `readSpeed(part)` public: the override is one number
 	 * covering every bound belt, so exposing the per-part form would invite callers to pass a part and

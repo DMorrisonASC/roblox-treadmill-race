@@ -329,7 +329,7 @@ export const BALL_BACKSPIN_COOLDOWN = 0.25;
  * **Placeholder.** Minimum belt speed, in studs/s, before a ball-ball collision may add backspin.
  *
  * The arithmetic behind `5`: full belt speed is `BeltSpeed = 10` and `BELT_RAMP_SECONDS = 3`, so the
- * ramp crosses `5` at `1.5 s` into `Running`. Below `5` the ball is not being carried forward strongly
+ * ramp crosses `5` at `1.5 s` into `Playing`. Below `5` the ball is not being carried forward strongly
  * enough for the spin to be recoverable — the belt cannot out-pull the backward velocity the spin
  * resolves to, so the spin only pushes the ball back. Above `5` the ball has enough belt momentum
  * behind it for the spin to read as a correction rather than a reversal.
@@ -346,12 +346,12 @@ export const BALL_BACKSPIN_COOLDOWN = 0.25;
  * a reader will think of first:
  *
  * 1. **Belt speed alone** (chosen) — `TreadmillService.getEffectiveBeltSpeed()`, the *ramped* value.
- * 2. **Belt speed *and* `RoundService.getPhase() === "Running"`** (rejected).
+ * 2. **Belt speed *and* `RoundService.getPhase() === "Playing"`** (rejected).
  *
  * The phase check was rejected because belt speed already covers it and covers more. `RoundService`
- * writes `setBeltSpeed(0)` on entering `Idle`, `Countdown` and `Ended` and once at server start, so
- * "not `Running`" and "belt at zero" are the same state seen from two sides — but the ramp is
- * `Running` with the belt *below* full speed, and only the speed check rejects that. The phase check
+ * writes `setBeltSpeed(0)` on entering `Intermission`, `Waiting` and `PostGame` and once at server
+ * start, so "not `Playing`" and "belt at zero" are the same state seen from two sides — but the ramp is
+ * `Playing` with the belt *below* full speed, and only the speed check rejects that. The phase check
  * would additionally be a circular import (`RoundService` imports `BallSpawnerService`, so the reverse
  * import closes the cycle) bought for nothing. **If the belt-speed read ever stops being reachable, the
  * phase check is the fallback, and it is the weaker of the two.**
@@ -420,7 +420,7 @@ export const WALL_ASSIST_TARGET_SPEED = 8;
  * **Placeholder.** Seconds between round ticks.
  *
  * This is the cadence of `RoundService.onTick` and of the elimination check, and it is the API future
- * powers will fire against � see the note in `round-service.ts`. One second is deliberately coarse:
+ * powers will fire against — see the note in `round-service.ts`. One second is deliberately coarse:
  * a power that lasts "one tick" is legible to a player, and a per-frame callback would invite powers
  * that depend on frame timing, which then behave differently on a laggy client.
  *
@@ -430,16 +430,19 @@ export const WALL_ASSIST_TARGET_SPEED = 8;
 export const TICK_INTERVAL_SECONDS = 1;
 
 /**
- * **Placeholder.** Length of the `Countdown` phase, in seconds.
+ * **Placeholder.** Length of the `Waiting` phase, in seconds.
  *
- * Balls spawn at the moment `Countdown` begins and rest on a stationary belt for this long, so every
- * contestant has settled before the belt moves. Three seconds is one full spawn-and-settle plus a
- * beat � long enough that the first tick of `Running` is not measuring a ball mid-fall.
+ * Balls spawn at the moment `Waiting` begins and rest on a stationary belt for this long, so every
+ * contestant has settled before the belt moves. Fifteen seconds is far longer than the ~1 s a body
+ * needs to fall and settle, and that is deliberate: `Waiting` is the lobby window a later pick prompt
+ * uses, so it is sized for a person reading a prompt and choosing rather than for physics. A round
+ * whose players have all chosen can leave early once that early-exit exists; until then the timer is
+ * the only exit.
  */
-export const COUNTDOWN_SECONDS = 3;
+export const WAITING_SECONDS = 15;
 
 /**
- * **Placeholder.** Seconds for the belt to reach full speed once `Running` begins.
+ * **Placeholder.** Seconds for the belt to reach full speed once `Playing` begins.
  *
  * Linear, not eased. A linear ramp means the acceleration is constant and identical for every ball
  * regardless of when it lands, which is the property that makes a round reproducible; an eased ramp
@@ -451,28 +454,57 @@ export const COUNTDOWN_SECONDS = 3;
 export const BELT_RAMP_SECONDS = 3;
 
 /**
- * **Placeholder.** Hard cap on a round's `Running` phase, in seconds.
+ * **Placeholder.** Seconds of no eliminations before `Playing` says so, once, in the log.
  *
- * A round normally ends when one ball is left. This bounds the ones that do not � two balls circling
- * each other, or a ball wedged against a wall out of reach of the zone. On expiry **every survivor is
- * a co-winner**: the round does not pick a single winner it cannot justify, and it does not call the
- * round undecided, because a future bet settled on "did my ball survive" has a definite answer.
+ * ## What this replaces, and what it deliberately is not
  *
- * 60 s is long enough that a normal round finishes first (the belt is 56 studs at 10 studs/s, so a
- * ball crossing it takes ~6 s even before collisions) and short enough that a dead round is not
- * allowed to stall a session.
+ * There used to be a `PLAYING_CAP_SECONDS` (60 s) that **ended** the round on expiry and awarded the win
+ * to whoever was furthest along. It is deleted: in the only runs that exercised it, it fired while a
+ * competitor was still travelling and named a winner that the race did not support. A time limit that
+ * invents a result is worse than no time limit.
+ *
+ * The consequence is that `Playing` can now run forever — a competitor wedged at the belt's edge, moving
+ * backwards, or parked against a wall keeps the round alive. That is accepted and handled by hand in
+ * Studio. This constant does **not** end anything: it produces one line naming the state so a stuck round
+ * is visible in the log instead of looking like a server that stopped.
+ *
+ * 60 s is the same number the cap used, which is intentional and not laziness: it is the point at which
+ * "no elimination" stops looking like a slow heat and starts looking like a stuck one, and keeping it
+ * means logs from before and after the change are comparable on the same axis.
+ *
+ * **The clock behind it resets on every elimination**, so the line reports 60 s of *nothing happening*
+ * rather than 60 s of wall time. A round shedding a competitor every ten seconds never warns.
  */
-export const ROUND_DURATION_SECONDS = 60;
+export const ROUND_IDLE_WARN_SECONDS = 60;
 
 /**
- * **Placeholder.** Seconds the `Ended` phase holds before returning to `Idle`.
+ * **Placeholder.** Seconds the `PostGame` phase holds before returning to `Intermission`.
  *
  * The belt is stopped and the surviving balls stay where they are, so the player can see what
  * finished rather than watching the result vanish in the same frame it is logged. The round's own
  * numbers are frozen during this window (`getElapsedSeconds` stops counting), so anything reading the
  * result sees the value the round ended with, not a value drifting afterwards.
+ *
+ * This is the window a later results screen renders into. It is blank today by design: the phase exists
+ * and holds for its five seconds with nothing in it, which is what makes it observable as a state
+ * rather than as a gap between two other states.
  */
-export const END_HOLD_SECONDS = 5;
+export const POST_GAME_SECONDS = 5;
+
+/**
+ * **Placeholder.** Seconds `Intermission` waits before opening the next round's `Waiting`.
+ *
+ * Thirty seconds is the gap between two rounds: long enough that the end of one round and the start of
+ * the next are distinguishable events in the log and on screen, short enough that a player who joined
+ * mid-round is not sitting in a lobby for a minute.
+ *
+ * **The timer re-arms rather than advancing when no player is connected.** A server that has been empty
+ * for an hour must still be in `Intermission` on the first join, not part-way through a round nobody
+ * watched — a round that ran to completion with no players would burn a round's worth of spawning,
+ * physics and elimination against an empty scene and leave the first joiner watching its `PostGame`.
+ * `RoundService` re-arms this same duration; it does not shorten or pause the phase.
+ */
+export const INTERMISSION_SECONDS = 30;
 
 /**
  * **Placeholder.** Speed below which the markers do not turn at all, in studs/s.
