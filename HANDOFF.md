@@ -902,6 +902,11 @@ give `npm test` a real exit code, but it needs a Studio plugin installed by hand
 that **`npm test` prints the invocation instead of running anything** ? it is a signpost, not a test script, and that
 is deliberate rather than unfinished.
 
+**→ Superseded — item 54.** The `runCLI`-in-Studio route described below was replaced by `@isentinel/jest-roblox`
+with the `studio-cli` backend, so `npm test` now really runs the suite and returns an exit code. That change is the thing
+this item argued was impossible without a hand-installed plugin, a client flag edit and an open Studio; `studio-cli`
+manages all three itself. The findings below are still accurate about Jest Lua itself and are kept as history.
+
 **Three findings from the packages that no amount of guessing would have produced:**
 
 1. `runCLI(cwd, argv, projects)` ? **`argv` is an object, not an array.** `runCLI(cwd, ["--ci"], [cwd])` fails to
@@ -970,7 +975,7 @@ sufficient for config discovery. `npm run build`, `npm run lint` and `prettier -
 the emitted `*.spec.luau` files import `@rbxts/jest-globals` from the mapped `rbxts_include.node_modules` path, which
 is the thing most likely to have been wrong.
 
-## 53. `npm test` runs the suite: jest-roblox with the `studio-cli` backend
+## 54. `npm test` runs the suite: jest-roblox with the `studio-cli` backend
 
 **The suite had never been run, because it had never been written.** `src/server/test/` held five files, all 0 bytes
 (sha256 `E3B0C442?`, the empty-string hash), created minutes before the round that asked to migrate them. There were no
@@ -985,7 +990,7 @@ and quits it; only the `studio` (attached) backend reuses an open one.
 **Result: 3 files, 31 tests, green.** `shared` 22, `server` 9.
 
 **Specs live beside the code they test** (option b), not in a `test/` folder ?
-`src/shared/odds.spec.ts`, `src/shared/economy.config.spec.ts`, `src/server/services/economy-service.spec.ts`. Imports
+`src/shared/odds.spec.ts`, `src/shared/economy.config.spec.ts`, `src/server/test/economy-service.spec.ts` (moved out of `services/` — see item 56). Imports
 are relative (`./odds`, `./economy.config`) and each file imports `describe`/`it`/`expect` from `@rbxts/jest-globals`
 as before.
 
@@ -1040,3 +1045,344 @@ on exactly that error, and was removed rather than guarded into vacuity.
 **Unverified in Studio.** That a published place round-trips a profile, that the lock refuses a second session, and that
 `BindToClose` saves on stop ? unchanged from items 51 and 52. The suite itself is verified: it ran headless, 31 tests,
 exit 0.
+
+## 55. The shop placeholder replaced by a two-column store on big-ui
+
+**One file changed: `src/client/controllers/shop-controller.ts`, 389 -> 1525 lines.** The entry point is untouched ?
+the left-edge `Shop` / `Inventory` rail, the (B) phase rule and the lazily-built panels are exactly as item 50 left them.
+What changed is the `shop` panel's *content*: three dummy tiles and a `TabStrip` of invented categories replaced by the
+store below. The `inventory` panel still uses `Panel`/`PanelHeader`/`PanelFooter`; only the store is Fusion.
+
+**The store is Fusion + big-ui `Text`, not the `Panel` builder.** The reference's layout is a screen-filling sheet whose
+two columns share a nested layout, which `Panel`'s fixed-pixel bands cannot express. `PhaseBannerController` already
+established the pattern for that case: `Fusion.scoped`, `Fusion.New(scope, "Frame")` for containers, big-ui only for
+type. `shop-controller.ts` is now the **second** place in the tree that uses big-ui, and the first that uses it outside
+the banner.
+
+**Colours are re-applied after big-ui builds a label, and that is the one thing big-ui cannot do here.** `Text` resolves
+`color` through big-ui's global typography/palette table, and the only direction ever pushed into that table is the
+**dark** HUD (`getTheme()`); `surfaceOpaqueTheme()` deliberately pushes nothing. Left alone, every label would be pale
+ink on paper. big-ui sets `TextColor3` once as a static property, so writing it after construction is a real override
+rather than a race with a computed. `storeText()` is the single place that does it.
+
+**Buttons are raw `TextButton`s via Fusion, not big-ui `Button`.** big-ui's `Button` paints its background from the
+global dark palette through a `Computed` that re-runs on hover, so hydrating light values would be overwritten the first
+time the pointer moved. Same reasoning as the banner's "big-ui has no plain container primitive" note.
+
+**Layout, all `**Placeholder.**`:** `STORE_WIDTH_SCALE 0.8`, `STORE_HEIGHT_SCALE 0.85`, header 56, tab row 44, status
+band 30, inset `SPACING.lg`, column gap `SPACING.md`, preview 120, owned row 34, rarity swatch 22. The sheet is
+`UDim2.fromScale` at `AnchorPoint (0.5, 0.5)` / `Position (0.5, 0.5)`, with one shadow as a **sibling** frame offset
+`SPACING.sm` at 0.75 transparency ? a child cannot draw behind its own parent.
+
+**Two tabs, not four.** The reference shows four categories; this economy has two actions. `Shop` and `Fusion` are real
+tabs and **both columns are always visible** ? a tab states which column you are reading (accents its border and its own
+fill) rather than swapping content. Inventing two purchasable categories to fill four slots would draw buttons that lead
+nowhere.
+
+**The four rarity border colours are the only colour literals in the file** and exist because the theme has no rarity
+dimension: `common #9AA0A6`, `rare #3B82C4`, `epic #8B5CF6`, `legendary #D99A1E`. They render as the 2 px borders on the
+prize-preview chips and as the left list's row borders, which is what makes a list of ball ids scannable by tier.
+
+**Left column ? the coin chest.** Preview block (trough frame with the word `CHEST`, not an image: no chest asset exists
+and an invented `rbxassetid` would be a silent broken image), name, `${COIN_CHEST_COST} coins per open`, `PRIZE PREVIEW`
+with one chip per rarity carrying `chestOdds()` percentages, an odds line, and `Open Chest ? 100`. Fires
+`OpenCoinChest:FireServer()` with no arguments.
+
+**Right column ? fusion.** Preview (`FUSE`), explanation, `YOUR BALLS` reading the `OwnedBalls` attribute through
+`decodeOwnedBalls`, a `ScrollingFrame` of rows (one per owned ball, border in its rarity colour, `x<count>`), and a
+button that fires `FuseBalls:FireServer(ballId)`. **Clicking a row selects it**; the selection is what the button acts
+on. Until something is selected the button is disabled and reads `Select a ball`; with fewer than `FUSION_INPUT_COUNT`
+it reads `Need 2 ? you have <n>`; for a legendary it reads `Cannot fuse` and never fires. The selected rarity's
+`fusionOdds()` shows above the button. Empty profile shows `Nothing yet ? open a chest.`
+
+**Why the right column scrolls and the left does not.** The left column is four fixed chips ? its height is knowable. The
+right column lists the player's balls, which starts empty and grows without bound, so it is the only region whose height
+is a function of profile state. `ScrollingFrame` + `AutomaticCanvasSize.Y` + `UIFlexItem(Fill)`.
+
+**Both action buttons share one press guard** (`busy`), disabled for `ECONOMY_ACTION_COOLDOWN_MS` (500 ms) and released
+by the reply as well as by the timer. The server rate-limits per player per remote at the same figure; the client guard
+exists so a triple-click does not produce two silent server-side refusals.
+
+**Refusals are shown, not swallowed.** The server replies with `{ ok: false, reason }` where `reason` is one of
+`insufficient-coins`, `not-enough`, `top-tier`, `no-profile`, `save-failed`, `unknown-ball`, `empty-pool`, `bad-request`.
+`reasonText` maps the four a player can act on to sentences and everything else to "That did not work. Try again." ? a
+player cannot do anything with the word `save-failed`. Success shows `You got <ball>` or `Fused into <ball>`; a failed
+roll shows "The fusion failed ? both balls are gone."
+
+**The store computes nothing.** Every price, fusion target and percentage comes from `economy.config.ts` via
+`chestOdds()` / `fusionOdds()`, and the owned list comes from the `OwnedBalls` attribute the server writes. Changing a
+weight changes the display because the display is a *call*, not a copy ? the same rule item 51 used to justify putting
+the tables in `shared/`.
+
+**Two layout hedges worth knowing.** The columns body and the owned list each carry a concrete pixel height *as well as*
+`UIFlexItem(Fill)`. `Fill` is the mechanism this tree uses for leftover space, but it is the one thing about this panel I
+cannot verify without Studio; if it does not apply, the store shows two short columns instead of two invisible ones.
+
+**Unverified in Studio.** Everything visual: that the sheet appears at 0.8 x 0.85, that the columns are equal width, that
+the header row does not collide with the coin balance, that the chips fit, that the odds text matches `odds.ts`, that a
+chest press drops coins and adds a ball, that a fusion press consumes and updates, that the rarity borders are
+distinguishable on paper, and that the store is absent outside `Intermission` (it inherits the rail's rule unchanged).
+`npm run build`, `npm run lint` and `prettier --check "src/**/*.ts"` are green; the place builds.
+
+## 56. Two first-run failures from item 55: a repeated escape bug, and specs inside Flamework's scan path
+
+**Both were found by opening Studio, not by the build.** `npm run build`, `npm run lint` and `npm test` were all green
+before either fix, which is the point worth recording.
+
+**1. `shop-controller:488: String literal contains malformed escape sequence` — the item 50.1 bug, again.** The new
+store's labels were written with TypeScript escapes (`\u2014`, `\u00b7`, `\u2192`, `\u00d7`) inside template strings.
+roblox-ts passes escapes through to Luau verbatim, and Luau only accepts the **braced** form `\u{2014}`, so every one of
+them is a malformed literal — and a malformed literal is a **load** error, which is why the whole controller failed
+to preload and the store never existed. Twelve occurrences, all replaced with the literal UTF-8 character in the source.
+**The rule from item 50 was already written down and was not followed: no `\uXXXX` in a `src/` string, ever.** Run
+`grep "\\\\u[0-9a-fA-F]{4}" src` before shipping. The emitted Luau now contains the real bytes
+(`Text = "\xc3\x97"`), verified by reading `out/`.
+
+**2. `economy-service.spec` was being preloaded by Flamework in a normal Play session.** `main.server.ts` calls
+`Flamework.addPaths("src/server/services")`, which the transformer expands into *every* module under that directory —
+including a `.spec` file placed beside its subject. In Studio Play (not in a `jest-roblox` run) Flamework tried to
+preload it, `@rbxts/jest-globals` threw outside a Jest context, and the server logged
+`failed to preload: Requested module experienced an error while loading`.
+
+**The fix is placement, not a guard:** the spec moved to **`src/server/test/economy-service.spec.ts`**, which is outside
+every `addPaths` root. The `include` glob (`src/server/**/*.spec.ts`) and `outDir` (`out/server`) in `jest.config.ts`
+both still match, so the runner is unaffected — 31 tests still pass. **This is the real cost of "specs beside the
+code" in a Flamework tree and it is now a rule: a server spec must not live under `src/server/services` or
+`src/client/controllers`.** `src/shared` is safe because nothing registers it with Flamework.
+
+**Still open, unrelated:** `ContentId: rbxassetid://203785492 failed due to: Asset type does not match requested type`
+appears every session and no code added in items 51-55 requests that asset.
+
+## 57. Store rebuilt to the reference's layout, and `rarity` becomes a theme slot
+
+**Two files changed.** `src/client/controllers/shop-controller.ts` (1525 -> 1859 lines, rewritten around the reference's
+structure) and `src/shared/ui/theme.ts` (333 -> 372, gaining a `rarity` slot in both directions). The rail, the (B) phase
+rule, the inventory panel, the economy service, the config, the odds module and both remotes are untouched.
+
+**The rarity colours moved out of the controller and into `Theme`.** Item 54 kept them as a `RARITY_COLOURS` const in the
+store. That was wrong for the reason this file's own module comment gives: a rarity colour is a *meaning*, not a
+component detail, so the next element that draws a tier would have invented a fifth violet. `Theme.colors.rarity` is now
+`Record<Rarity, Color3>` ? keyed by the economic union, so adding a tier to `economy.config.ts` is a type error here until
+a colour is chosen. Light direction (`**Placeholder.**`): common `#9AA0A6`, rare `#3B82C4`, epic `#8B5CF6`, legendary
+`#D99A1E`. Dark direction reuses brand tints (`inkDim`, `tealLight`, `tealLighter`, `yellow`) so the HUD can show a tier
+without a second table.
+
+**What the reference actually contributed: structure, not colour.** Header (title left, coin pill right, close far
+right), a row of large category cards, two panels side by side, each with a title, a preview beside a facts list, a
+``Prize Preview`` shelf of cards, and a wide action button at the foot. Every colour is `surfaceOpaqueTheme()`'s; the
+reference's navy/gold/cyan do not appear. Its vividness comes back through the rarity ladder, the accent and tinted card
+borders ? all theme values.
+
+**Two categories, two panels, no invented third.** `Shop` (coin chest) and `Fusion` are the two real actions. Both panels
+are always visible; a tab accents its panel's title dot, its own fill and its panel border weight, rather than swapping
+content. Inventing two purchasable categories to fill the reference's four slots would have drawn buttons that lead
+nowhere.
+
+**Chest panel.** Tinted `CHEST` preview beside a facts list (`Cost 100`, `Grants 1 ball`, then one coloured row per tier
+from `chestOdds()`), a `Prize Preview` shelf with one card per rarity (tinted art block, a circle for the ball, tier name
+beneath), and `Open ? 100` firing `OpenCoinChest:FireServer()`.
+
+**Fusion panel.** Tinted `FUSE` preview beside facts (`Selected`, and the success chance for the selected tier from
+`fusionOdds()`), a `Your Balls` shelf of owned-ball cards read from the `OwnedBalls` attribute (tier-tinted border, a
+circle, `x<count>`), and a button that reads `Select a ball` / `Need 2 ? you have 1` / `Cannot fuse` / `Fuse 2 into
+Epic` before it fires `FuseBalls:FireServer(ballId)`.
+
+**Responsive, for real.** Below `STORE_NARROW_WIDTH` (900 px) the two panels **stack vertically and each takes the full
+width**; above it they share the row. Re-evaluated at build, on open, and on every `ViewportSize` change. Shrinking a
+two-column desktop layout to phone width gives two 150-pixel columns with clipped labels; stacking is the alternative the
+prompt asked for. The card shelves are horizontal `ScrollingFrame`s, so a narrow panel shows fewer cards rather than
+narrower ones, and `capToViewport` still supplies a pixel ceiling on the 0.9-scale sheet.
+
+**Illustrations are tinted blocks, not assets.** No shop, ball or gem image exists in the tree, and an invented
+`rbxassetid` is a silent broken image on every client. Category cards, prize cards and owned cards all use a tinted
+`Frame` plus a `UICorner` circle where a ball silhouette helps.
+
+**No literals left in a colour position.** `grep fromHex src/client/controllers/shop-controller.ts` is **0**; every colour
+reads `this.light.*`. Geometry literals are the named `**Placeholder.**` constants at the top of the file. And
+`grep "\u[0-9a-fA-F]{4}"` is **0** ? item 56's escape trap is avoided by writing the characters directly.
+
+**Unverified in Studio ? all of it.** The store has still never rendered: items 55 and 56 both died at preload. What has
+*not* been observed: the 0.9 x 0.9 sheet, the header row not colliding with the coin pill, the category cards' art strip,
+equal panel widths, the stack below 900 px, the prize shelf scrolling, the owned cards selecting, both action buttons,
+and the light-paper look. `npm run build`, `npm run lint`, `prettier --check "src/**/*.ts"` and `npm test` (31 tests) are
+green, and the place builds.
+
+## 58. Store rebuilt as the brief's hierarchy; big-ui `Text` dropped because it was invisible
+
+**The screenshot from item 57 showed the real bug: every big-ui `Text` label was invisible** ? the "Store" title, the coin
+number, "Coin Chest", the rarity statistics, the prize names. Every raw `TextButton` rendered fine ("Shop", "Fusion", "X",
+"Open ? 100"), which is what identified the cause.
+
+**Why big-ui `Text` was blank.** Not a typo, a structural mismatch. `Text` reads `TextColor3` and `TextTransparency` from
+big-ui's module-level `Palette`, which `configureTheme` deep-merges. `getTheme()` is the only direction ever pushed into
+that table and it is the **dark** HUD palette; `surfaceOpaqueTheme()` deliberately pushes nothing, because pushing it
+would repaint the phase banner. So a store label asking big-ui for `"primary"` got **pale ink on pale paper**. Assigning
+`TextColor3` after `Text()` returns did not survive the library's hydration ? verified in the emitted Luau: the
+assignment is present and the label still renders blank.
+
+**Fix: the store builds plain `TextLabel`s through Fusion.** A local `text()` helper sets `Font`, `TextSize`,
+`TextColor3` from `scale.ts` and `surfaceOpaqueTheme()` with nothing in between. `big-ui` is no longer imported by this
+file at all. Recorded as a rule: **big-ui `Text` is a dark-HUD component; do not use it inside a light surface.**
+
+**Layout rebuilt to the brief's Section 1, as nested lists rather than positioned bands:**
+
+```
+Store                  (Frame, AutomaticSize.Y, vertical UIListLayout)
+  Header               (horizontal: "Store", spacer[UIFlexItem Fill], coin pill, close)
+  CategoryTabs         (horizontal: 2 equal buttons)
+  Content              (vertical: one section visible at a time)
+    CoinChestSection   (vertical)
+      "Coin Chest"     (title)
+      PreviewRow       (horizontal: 124px chest square, RarityStats)
+      PrizeHeader      (horizontal: "Prize Preview", "View All >")
+      PrizeShelf       (horizontal ScrollingFrame, auto-scrolling, 2x duplicated content)
+      PurchaseButtons  (horizontal: Open 1 | Open 10)
+    FusionSection      (vertical, hidden unless the Fusion tab)
+```
+
+**The empty space is gone because the sheet sizes itself.** `Size = UDim2.new(0.78, 0, 0, 0)` + `AutomaticSize.Y` +
+`capToViewport`'s pixel ceiling. The previous version forced 90% of screen height and laid two panels inside it; this one
+hugs the chest section. The chest preview is a **fixed 124 px square**, not a fraction of the panel width, so it can no
+longer stretch into a wide empty box.
+
+**The prize shelf shows real prizes, not a diagram of the odds.** It is filled from `BALL_POOL` ? every ball id the chest
+can actually roll, one card each, border tinted by `theme.colors.rarity`. `fillPrizeShelf` lays that list out **twice**,
+and `drivePrizeShelf` scrolls `CanvasPosition.X` by `SHELF_SCROLL_SPEED` per second, wrapping at half the canvas width,
+so the seam is invisible. One `RenderStepped` connection for the controller's lifetime, gated on the store being open.
+
+**`theme.colors.coin` is a new domain slot** (light `#E9B949`, dark `BASE.yellow`), separate from `rarity.legendary`'s
+amber so a price and a legendary border never read as the same signal. Every colour in the store still comes from
+`surfaceOpaqueTheme()`; `grep fromHex` in the controller is **0** and `grep "\u[0-9a-fA-F]{4}"` is **0**.
+
+**Two deviations, both because the brief's template names features this game does not have:**
+
+1. **Tabs are `Balls` and `Fusion`, not `Balls` and `Emotes`.** There is no emote data, storage or grant path, so an
+   `Emotes` tab would open an empty section ? which the same brief forbids ("Do not add unnecessary categories", "Do not
+   create placeholder content"). `Fusion` is the game's other real action and is fully implemented.
+2. **`Open 10` is ten ordinary opens queued on the client.** The economy has one verb ? `OpenCoinChest`, one ball per
+   accepted call, rate-limited to `ECONOMY_ACTION_COOLDOWN_MS`. There is no bulk remote and adding one would change
+   `EconomyService`, which is out of scope. So `openChests(count)` queues `count` presses, drains one per cooldown, and
+   shows exactly `count * COIN_CHEST_COST`. Every open is individually validated and charged; if the player runs out
+   mid-queue the rest are dropped rather than fired into certain refusal. **No economy behaviour was added** ? but it is
+   the one place where "ten" is client-sequenced rather than a server concept, and it should be replaced by a real bulk
+   path if one is ever built.
+
+**Unverified in Studio.** The store has still never rendered ? items 55, 56 and 57 all failed before paint. Unobserved:
+that labels now appear at all, the header row's spacer behaviour, the 124 px preview beside the stats, the shelf's
+auto-scroll and its seam, the two button halves, the single-column proportions, and the tab switch between sections.
+`npm run build`, `npm run lint`, `prettier --check "src/**/*.ts"` and `npm test` (31 tests) are green; the place builds.
+
+**Files at the end of this item:** `src/client/controllers/shop-controller.ts` 2117 lines (was 1859), and
+`src/shared/ui/theme.ts` 386 lines (was 372, +`colors.coin`). Nothing else in `src/` changed. Geometry as shipped, all
+`**Placeholder.**`: `STORE_WIDTH_SCALE 0.78`, `HEADER_HEIGHT 54`, `TAB_HEIGHT 52`, `SECTION_TITLE_HEIGHT 26`,
+`PREVIEW_ROW_HEIGHT 132`, `CHEST_SQUARE 124`, `PRIZE_HEADER_HEIGHT 24`, `SHELF_HEIGHT 96`, `CARD_WIDTH 88`, `CARD_ART 56`,
+`BUTTON_ROW_HEIGHT 66`, `SHELF_SCROLL_SPEED 26`, `COIN_SIZE 22`, `SWATCH 26`.
+
+**→ Those geometry values were superseded by item 59**, which shrank the panel to stop the purchase buttons being
+clipped.
+
+## 59. Store no longer clips its purchase buttons; sheet sized by content, not by the screen
+
+**The bug was circular sizing, and it was mine.** Item 58 gave the shell `AutomaticSize.Y` and the sheet
+`Size = UDim2.fromScale(1, 1)` ? so the shell waited for the sheet's height while the sheet asked for 100% of the shell's.
+Roblox resolves that by leaving the sheet at its floor, the content overflowed, and the sheet's `ClipsDescendants = true`
+sliced the bottom band off. The bottom band is the purchase row, which is exactly what the screenshot showed missing.
+
+**Three changes, in order of importance:**
+
+1. **The sheet drives the shell.** `Sheet.Size = UDim2.new(1, 0, 0, 0)` with `AutomaticSize = Enum.AutomaticSize.Y`.
+   It now reports its own content height and the shell follows, so there is no dependency to resolve wrongly.
+2. **`ClipsDescendants = false` on the sheet.** Every child is inset by `SHEET_INSET`, so the rounded corner has nothing
+   to cut. Leaving clipping on would silently amputate again if the content ever outgrew the cap; a panel that overflows
+   visibly gets reported, one that clips does not. The prize and owned shelves still clip themselves, which is what a
+   scroller is for.
+3. **Fixed width, not a fraction.** `STORE_MAX_WIDTH = 880` pixels, with `capToViewport` still clamping to 92% x 88% of
+   the viewport. A fraction made the store a 1500-pixel-wide letterbox on a monitor beside a 480-pixel-tall body; a fixed
+   column capped by the viewport is a comfortable shape on desktop and still shrinks on a phone.
+
+**The vertical budget was also trimmed** so the whole store fits a modest window rather than relying on the cap:
+`HEADER_HEIGHT 50`, `TAB_HEIGHT 46`, `SECTION_TITLE_HEIGHT 24`, `PREVIEW_ROW_HEIGHT 116`, `CHEST_SQUARE 108`,
+`PRIZE_HEADER_HEIGHT 22`, `SHELF_HEIGHT 82`, `CARD_WIDTH 82`, `CARD_ART 46`, `BUTTON_ROW_HEIGHT 58`,
+`SHEET_INSET = SPACING.md`, `BAND_GAP = SPACING.xs + 2`, `COIN_SIZE 20`, `SWATCH 24`. That is **484 px of content**
+against a 634 px cap on a 720-tall viewport ? it fits with room, and the chest preview is still the largest single
+element in the panel.
+
+**Verified in the emitted Luau**, not just in the source: `Sheet` carries `Size = UDim2.new(1, 0, 0, 0)`,
+`AutomaticSize = Enum.AutomaticSize.Y`, `ClipsDescendants = false`.
+
+**Unverified in Studio.** That the buttons are now fully visible is the specific claim this item makes and it has not
+been seen on screen ? item 58 has still never rendered either. What *is* verified is that the circular sizing is gone
+from the tree and that the content budget (484) is under the height cap (0.88 x viewport) at any ordinary resolution.
+`npm run build`, `npm run lint`, `prettier --check "src/**/*.ts"` and `npm test` (31 tests) are green; the place builds.
+
+## 60. Backend-only Robux chest: rare+ pool, renormalised odds, idempotent receipts
+
+**No client code, no `PolicyService` gate, no schema bump.** The chest exists as config + odds + one grant function + one
+`ProcessReceipt` assignment, callable only from the command bar.
+
+**Two claims in the brief were false, and both changed the shape of the work.**
+
+1. **There is no `FakeStore`/`FakePlayer`/`Log` pattern.** `src/server/test/economy-service.spec.ts` says so in its own
+   header: `EconomyService` cannot be constructed in this runtime because its field initialiser builds a
+   `PlayerDataStore`, whose first act is `DataStoreService.GetDataStore`, and **an unpublished place throws** there. The
+   existing suite asserts tables, not behaviour, for exactly that reason.
+2. **The constructor is not a test seam.** It is `private readonly store = new PlayerDataStore();` ? a field
+   initialiser, not a parameter. The seam the brief attributes to item 53 was never built.
+
+**The deviation that follows: the seam is a function parameter, not constructor injection.** `applyRobuxChestGrant` takes
+`(profile, purchaseId, save, roll, pickBall)` and lives at module scope; `grantRobuxChestPurchase` is a five-line wrapper
+that supplies `this.store.saveAsync`. Constructor injection was rejected because `PlayerDataStore` carries no `@Service()`,
+so a `constructor(private readonly store: PlayerDataStore)` would make Flamework resolve an unregistered type at
+`ignite()` ? a runtime break that cannot be verified without Studio, on a project that has already been bitten by that
+exact class of change. The function seam proves everything criteria 4, 5 and 6 ask about, with no engine services and no
+DI risk.
+
+**Pool and odds, derived not typed.** `ROBUX_CHEST_RARITIES = RARITIES.filter(r => r !== "common")`, and
+`robuxChestWeights()` returns a **full `Record<Rarity, number>`** with `common: 0` and every other tier copied from
+`RARITY_WEIGHTS`. **The invariant is arithmetic:** `rollFromWeights` subtracts each weight from a roll that starts in
+`[0, total)`, so a zero-weight tier can never satisfy `roll < 0` on its own step. There is no filter branch to forget and
+no way for the roll to disagree with the displayed table, because `oddsFrom` reads the same map.
+
+`oddsFrom(weights)` was extracted from `chestOdds()` (the apportionment was inlined, not a helper) and drops zero-weight
+tiers, which is what makes one function serve both tables while leaving `chestOdds()` byte-identical ? all four coin
+weights are positive, so all four rows survive. Coin **60 / 30 / 9 / 1** unchanged; Robux **75 / 22.5 / 2.5**, sum 100 by
+`toBe`.
+
+**Dedupe without a schema bump.** `Profile.purchases: Array<string>` is **required in memory, optional on disk**.
+`readStored` treats a missing list as empty ? a *default*, not a guess about what an old value meant ? so the "refuse
+unknown versions, never upgrade" rule holds and `SCHEMA_VERSION` stays 1. A malformed list is also treated as empty:
+refusing the profile would cost the player their whole account state over a field they never wrote.
+
+**A data-loss bug caught while adding it:** the lock-clearing write in `release()` rebuilds the stored value field by
+field, so omitting `purchases` from that literal would have wiped the purchase history on every logout ? re-opening the
+door to a duplicate grant on the next purchase. The field is now restated there with a comment saying why every field has
+to be.
+
+**`ProcessReceipt`** is assigned once in `EconomyService.onStart`, verified against `@rbxts/types`: the property is
+`((receiptInfo: ReceiptInfo) => Enum.ProductPurchaseDecision) | undefined`, `ReceiptInfo` carries `PlayerId`,
+`PurchaseId`, `ProductId`, and the decision members are `PurchaseGranted` / `NotProcessedYet`. `receiptDecision` maps
+`granted` and `duplicate` to **`PurchaseGranted`** ? answering `NotProcessedYet` for a duplicate would retry forever and
+block the player's next purchase ? and `no-profile` / `save-failed` to `NotProcessedYet`, because in both the player paid
+and has nothing, so a retry is the only thing that can still deliver. An unrecognised `ProductId` logs once and returns
+`NotProcessedYet`: silently consuming a sale this server does not understand takes the money and gives nothing, and the
+cost (a retry loop on a misconfigured id) is loud and fixable.
+
+Receipts are **not** rate-limited. `ECONOMY_ACTION_COOLDOWN_MS` exists to stop a player spamming a remote; a receipt is
+money that already changed hands.
+
+**Tests: 31 -> 53, all green.** New coverage: three graded odds rows summing to 100 by `toBe`, ordered, strictly
+descending, derived from the weights, and beating the coin chest tier-for-tier; the pool excluding common with a positive
+ball count per tier; `common` weight 0 and the rest copied; grant success, save-before-report ordering, duplicate
+granting nothing **and not writing**, `save-failed` reverting the ball *and* the purchase id, the entry removed entirely
+when none was owned, an empty pool refusing; the two decision mappings; and 1000 rolls of the Robux weights, none of
+which returned a common.
+
+**Unverified without a published place.** Criterion 3 is proved against the roll function, **not** against a real
+purchase: Studio cannot drive `ProcessReceipt`, and an unpublished place cannot reach `DataStoreService` at all. The real
+sequence is: publish, create the Developer Product, replace `ROBUX_CHEST_PRODUCT_ID`, then either buy it on a live server
+or call `EconomyService.grantRobuxChestPurchase(player, "<synthetic id>")` from the server command bar ? which is exactly
+why that method is public.
+
+**Still owed before any purchase UI ships:** the `PolicyService:IsPaidRandomItemsRestricted` gate, with the note already
+sitting next to the product id in `economy.config.ts`.
+

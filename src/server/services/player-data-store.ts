@@ -90,6 +90,23 @@ export interface Profile {
 	version: number;
 	coins: number;
 	ownedBalls: Map<string, number>;
+
+	/**
+	 * The `PurchaseId`s already granted to this player, newest last, capped at `PURCHASE_HISTORY_CAP`.
+	 *
+	 * ## Why the profile carries this at all
+	 *
+	 * `ProcessReceipt` may deliver the same receipt more than once ? a retry after a timeout, or a rejoin while the first
+	 * grant was in flight. Without a record, the second delivery grants a second ball, which the player did not pay for
+	 * and which cannot be clawed back. The list is the dedupe key.
+	 *
+	 * ## Why it is part of `Profile` and not a separate store
+	 *
+	 * Because the record and the grant must be written by the **same** `UpdateAsync` transform. Two keys would mean two
+	 * writes, and a crash between them either double-grants (record lost) or eats a purchase (grant lost). One profile,
+	 * one write, no window.
+	 */
+	purchases: Array<string>;
 }
 
 /** Who holds a profile and since when, as stored. */
@@ -103,6 +120,15 @@ interface StoredProfile {
 	version: number;
 	coins: number;
 	ownedBalls: Record<string, number>;
+	/**
+	 * Optional **on disk** even though it is required in `Profile`.
+	 *
+	 * That asymmetry is the whole migration: every profile written before this round has no such key, and
+	 * `readStored` fills the gap with an empty list. Adding a *required* field with a default is a default, not a guess
+	 * about what an old value meant, so the "refuse an unknown version, never upgrade" rule (item 51) still holds and
+	 * `SCHEMA_VERSION` stays at 1.
+	 */
+	purchases?: Array<string>;
 	lock?: StoredLock;
 }
 
@@ -178,6 +204,20 @@ export function readStored(value: unknown): Stored | undefined {
 		ownedBalls.set(ballId, count);
 	}
 
+	// **Absent is normal.** Every profile written before the Robux chest existed has no `purchases` key; a missing list
+	// means "nothing granted yet", which is exactly true. A *malformed* list is not a hard failure either ? treating it
+	// as empty costs at most one duplicate grant, while refusing the profile would cost the player their whole account
+	// state over a field they never wrote.
+	const rawPurchases = (value as { purchases?: unknown }).purchases;
+	const purchases = new Array<string>();
+	if (rawPurchases !== undefined && typeIs(rawPurchases, "table")) {
+		for (const entry of rawPurchases as Array<unknown>) {
+			if (typeIs(entry, "string")) {
+				purchases.push(entry);
+			}
+		}
+	}
+
 	const rawLock = (value as { lock?: unknown }).lock;
 	let lock: StoredLock | undefined;
 	if (rawLock !== undefined) {
@@ -194,7 +234,7 @@ export function readStored(value: unknown): Stored | undefined {
 		lock = { session, at };
 	}
 
-	return { profile: { version: SCHEMA_VERSION, coins, ownedBalls }, lock };
+	return { profile: { version: SCHEMA_VERSION, coins, ownedBalls, purchases }, lock };
 }
 
 /**
@@ -208,6 +248,7 @@ export function toStored(profile: Profile, session: string): StoredProfile {
 		version: SCHEMA_VERSION,
 		coins: profile.coins,
 		ownedBalls: flattenOwned(profile.ownedBalls),
+		purchases: profile.purchases,
 		lock: { session, at: os.time() },
 	};
 }
@@ -224,7 +265,7 @@ export function flattenOwned(ownedBalls: Map<string, number>): Record<string, nu
 
 /** A brand-new profile. Coins are granted here and nowhere else, so "a new player" has exactly one definition. */
 function emptyProfile(startingCoins: number): Profile {
-	return { version: SCHEMA_VERSION, coins: startingCoins, ownedBalls: new Map() };
+	return { version: SCHEMA_VERSION, coins: startingCoins, ownedBalls: new Map(), purchases: [] };
 }
 
 /**
@@ -440,6 +481,11 @@ export class PlayerDataStore {
 						version: SCHEMA_VERSION,
 						coins: stored.profile.coins,
 						ownedBalls: flattenOwned(stored.profile.ownedBalls),
+						// **Every field has to be restated here, and this one was nearly lost.** The clear is a *rebuild*
+						// of the stored value, not a patch of one key, so any field this literal omits is silently
+						// erased — releasing the lock would have wiped the purchase history and re-opened the door to a
+						// duplicate grant on the player's next purchase.
+						purchases: stored.profile.purchases,
 						lock: undefined,
 					};
 

@@ -201,3 +201,78 @@ export function decodeOwnedBalls(encoded: string): Map<string, number> {
 
 	return ownedBalls;
 }
+
+// #region Robux chest
+
+/**
+ * **Placeholder.** The Developer Product id for the Robux chest.
+ *
+ * **This is a fake number.** It must be replaced with the real id from the Creator Dashboard before the store can sell
+ * anything; until it is, `ProcessReceipt` will never match a real purchase and the place charges nobody.
+ *
+ * **Debt carried here on purpose:** there is no `PolicyService` gate and no client UI in this round. The moment a
+ * button that calls `PromptProductPurchase` is added, it must check `PolicyService:IsPaidRandomItemsRestricted` for that
+ * player and refuse the prompt when restricted ? a paid random item is not allowed for every account. Putting the note
+ * next to the product id means the file itself carries the debt rather than a prompt somebody has to remember.
+ */
+export const ROBUX_CHEST_PRODUCT_ID = 1234567890;
+
+/**
+ * **Placeholder.** The Robux price, for display only.
+ *
+ * **This constant charges nobody.** The real price is configured on the Developer Product in the Creator Dashboard and
+ * is enforced by Roblox, not by this file. Value is metadata for the store UI to print next to the button, and it will
+ * drift if the dashboard price changes ? so a reader must never treat it as authoritative.
+ */
+export const ROBUX_CHEST_PRICE_ROBUX = 30;
+
+/**
+ * The tiers the Robux chest can grant: everything in `RARITIES` except `common`.
+ *
+ * Derived by filtering rather than typed out, so the two chests cannot drift: if a tier is added to `RARITIES` it
+ * joins the Robux pool automatically, and if `common` were renamed the filter would be a compile error rather than a
+ * silently permissive list.
+ */
+export const ROBUX_CHEST_RARITIES: Array<Rarity> = RARITIES.filter((rarity) => rarity !== "common");
+
+/**
+ * The weight map the Robux chest rolls against: `RARITY_WEIGHTS` with every excluded tier set to **zero**.
+ *
+ * ## Why a full `Record<Rarity, number>` with zeros, not a smaller table
+ *
+ * Because then the roll needs **one** implementation. `rollFromWeights` walks `RARITIES` and subtracts each weight from
+ * a running roll; a tier with weight `0` cannot satisfy `roll < 0` on its own step, so **zero weight is unreachable by
+ * construction** ? the exclusion is arithmetic, not a separate branch that could be forgotten. A second, smaller table
+ * would need a second pick function, and two pick functions are two places for the pools to diverge.
+ *
+ * The weights themselves are copied from `RARITY_WEIGHTS`, so "make legendaries rarer" remains a one-number edit that
+ * moves both chests at once.
+ */
+export function robuxChestWeights(): Record<Rarity, number> {
+	const weights = {} as Record<Rarity, number>;
+
+	for (const rarity of RARITIES) {
+		weights[rarity] = rarity === "common" ? 0 : RARITY_WEIGHTS[rarity];
+	}
+
+	return weights;
+}
+
+// #endregion
+
+// #region purchase receipts
+
+/**
+ * **Placeholder.** How many processed `PurchaseId`s a profile remembers.
+ *
+ * A receipt can be delivered more than once (retries, a rejoin mid-grant), and a second grant of the same purchase is a
+ * duplicate ball the player did not pay for twice. The record is a bounded list rather than an unbounded one because
+ * a DataStore value has a size limit and a profile that grows forever eventually fails to save.
+ *
+ * **The trade-off, stated plainly:** a duplicate arriving after its id has been trimmed out of the list would be granted
+ * again. At fifty ids that means a retry would have to be delayed by fifty chest purchases to be missed, which is why
+ * the cap is generous rather than tight ? Roblox's own receipt retry window is far shorter than that.
+ */
+export const PURCHASE_HISTORY_CAP = 50;
+
+// #endregion

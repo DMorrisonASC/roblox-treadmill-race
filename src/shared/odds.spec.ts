@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@rbxts/jest-globals";
-import { RARITIES } from "./economy.config";
-import { chestOdds, fusionOdds } from "./odds";
+import { ROBUX_CHEST_RARITIES, RARITIES, RARITY_WEIGHTS } from "./economy.config";
+import { chestOdds, fusionOdds, robuxChestOdds } from "./odds";
 
 /**
  * The odds tables.
@@ -79,5 +79,78 @@ describe("fusionOdds", () => {
 		// The empty array is the legendary decision expressed as data: the server refuses the fusion and the client
 		// renders no rows, from the same missing entry. A non-empty table here would mean the two had diverged.
 		expect(fusionOdds("legendary").size()).toBe(0);
+	});
+});
+
+describe("robuxChestOdds", () => {
+	it("returns exactly three rows", () => {
+		// Three, not four: the pool is rare and above. A fourth row would mean the exclusion had been dropped.
+		expect(robuxChestOdds().size()).toBe(3);
+	});
+
+	it("never includes common", () => {
+		for (const row of robuxChestOdds()) {
+			expect(row.rarity === "common").toBe(false);
+		}
+	});
+
+	it("sums to exactly 100", () => {
+		let total = 0;
+		for (const row of robuxChestOdds()) {
+			total += row.percent;
+		}
+
+		// `toBe`, not `toBeCloseTo`: the apportionment is exact by construction, and a table that sums to 99.9 is a lie
+		// told to the player rather than a rounding artefact to tolerate.
+		expect(total).toBe(100);
+	});
+
+	it("is ordered rare, epic, legendary", () => {
+		const rows = robuxChestOdds();
+
+		expect(rows[0].rarity).toBe("rare");
+		expect(rows[1].rarity).toBe("epic");
+		expect(rows[2].rarity).toBe("legendary");
+	});
+
+	it("is strictly descending, so rarer really is rarer", () => {
+		const rows = robuxChestOdds();
+
+		for (let index = 1; index < rows.size(); index++) {
+			expect(rows[index].percent < rows[index - 1].percent).toBe(true);
+		}
+	});
+
+	it("derives 75 / 22.5 / 2.5 from the surviving weights", () => {
+		// Computed here from `RARITY_WEIGHTS` rather than written as literals, so the assertion still means something
+		// after somebody retunes a tier.
+		let total = 0;
+		for (const rarity of ROBUX_CHEST_RARITIES) {
+			total += RARITY_WEIGHTS[rarity];
+		}
+
+		const rows = robuxChestOdds();
+		for (let index = 0; index < rows.size(); index++) {
+			const expected = (RARITY_WEIGHTS[rows[index].rarity] / total) * 100;
+			expect(rows[index].percent).toBe(expected);
+		}
+	});
+
+	it("beats the coin chest for every tier it offers", () => {
+		// The point of the Robux chest: not merely "no commons", but better odds for everything left in it. If a
+		// renormalisation ever made a tier worse, the paid chest would be a downgrade for that tier.
+		const coin = chestOdds();
+		const robux = robuxChestOdds();
+
+		for (const row of robux) {
+			let coinPercent = 0;
+			for (const candidate of coin) {
+				if (candidate.rarity === row.rarity) {
+					coinPercent = candidate.percent;
+				}
+			}
+
+			expect(row.percent > coinPercent).toBe(true);
+		}
 	});
 });

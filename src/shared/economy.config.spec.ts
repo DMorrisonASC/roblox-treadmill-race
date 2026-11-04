@@ -7,6 +7,10 @@ import {
 	RARITIES,
 	rarityOfBall,
 	RARITY_WEIGHTS,
+	ROBUX_CHEST_PRICE_ROBUX,
+	ROBUX_CHEST_PRODUCT_ID,
+	ROBUX_CHEST_RARITIES,
+	robuxChestWeights,
 } from "./economy.config";
 
 /**
@@ -159,5 +163,63 @@ describe("isRarity", () => {
 		expect(isRarity("Common")).toBe(false);
 		expect(isRarity("mythic")).toBe(false);
 		expect(isRarity("")).toBe(false);
+	});
+});
+
+describe("Robux chest pool", () => {
+	it("excludes common and keeps every tier above it", () => {
+		// The whole point of the product: a paid chest that can roll a common is a paid chest that feels like the free
+		// one. This asserts the pool by content rather than by count, so adding a tier keeps the test meaningful.
+		for (const rarity of ROBUX_CHEST_RARITIES) {
+			expect(rarity === "common").toBe(false);
+		}
+
+		expect(ROBUX_CHEST_RARITIES.size()).toBe(RARITIES.size() - 1);
+	});
+
+	it("is non-empty and every entry has balls to give", () => {
+		// An empty pool would make a purchased chest grant nothing ? the worst failure mode in the file, because the
+		// player has already paid by the time it happens.
+		expect(ROBUX_CHEST_RARITIES.size() > 0).toBe(true);
+
+		for (const rarity of ROBUX_CHEST_RARITIES) {
+			expect(BALL_POOL[rarity].size() > 0).toBe(true);
+		}
+	});
+
+	it("gives common a weight of zero and every other tier its coin weight", () => {
+		const weights = robuxChestWeights();
+
+		// Zero is the mechanism: `rollFromWeights` subtracts each weight from a roll that starts non-negative, so a
+		// zero-weight tier can never satisfy `roll < 0`. Asserting the zero is asserting the exclusion.
+		expect(weights.common).toBe(0);
+
+		for (const rarity of ROBUX_CHEST_RARITIES) {
+			expect(weights[rarity]).toBe(RARITY_WEIGHTS[rarity]);
+		}
+	});
+
+	it("leaves the surviving weights summing to less than the full table", () => {
+		// Renormalisation is what makes the paid chest's odds better; if the surviving total ever equalled the whole
+		// table, the renormalisation would be a no-op and the odds would silently match the coin chest.
+		let surviving = 0;
+		let all = 0;
+
+		for (const rarity of RARITIES) {
+			all += RARITY_WEIGHTS[rarity];
+			if (rarity !== "common") {
+				surviving += RARITY_WEIGHTS[rarity];
+			}
+		}
+
+		expect(surviving > 0).toBe(true);
+		expect(surviving < all).toBe(true);
+	});
+
+	it("carries a product id and a display price that are both obvious placeholders", () => {
+		// Cheap guards, but they are the two numbers a reader must replace before this can sell anything. The price is
+		// display metadata only ? Roblox charges what the Developer Product says, not this constant.
+		expect(ROBUX_CHEST_PRODUCT_ID > 0).toBe(true);
+		expect(ROBUX_CHEST_PRICE_ROBUX > 0).toBe(true);
 	});
 });

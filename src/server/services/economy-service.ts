@@ -27,7 +27,7 @@
  * question is answered for free by the chest before a single Robux is at stake.
  */
 
-import { Players, ReplicatedStorage } from "@rbxts/services";
+import { MarketplaceService, Players, ReplicatedStorage } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
 import {
 	PLAYER_COINS_ATTRIBUTE,
@@ -41,10 +41,13 @@ import {
 	encodeOwnedBalls,
 	FUSION_INPUT_COUNT,
 	FUSION_TABLE,
+	PURCHASE_HISTORY_CAP,
 	RARITIES,
 	RARITY_WEIGHTS,
 	Rarity,
 	rarityOfBall,
+	ROBUX_CHEST_PRODUCT_ID,
+	robuxChestWeights,
 	STARTING_COINS,
 } from "shared/economy.config";
 import { FUSE_BALLS_REMOTE_NAME, OPEN_COIN_CHEST_REMOTE_NAME, REMOTES_FOLDER_NAME } from "shared/remotes";
@@ -73,6 +76,9 @@ export class EconomyService implements OnStart {
 
 	public onStart(): void {
 		this.store.start();
+
+		// The single `ProcessReceipt` assignment in the tree. See `handleReceipt` for why there must be exactly one.
+		MarketplaceService.ProcessReceipt = (receiptInfo) => this.handleReceipt(receiptInfo);
 
 		this.createRemotes();
 
@@ -105,7 +111,7 @@ export class EconomyService implements OnStart {
 			return { ok: false, reason: "insufficient-coins" };
 		}
 
-		const rarity = this.rollRarity();
+		const rarity = rollFromWeights(RARITY_WEIGHTS);
 		const pool = BALL_POOL[rarity];
 		if (pool.size() === 0) {
 			// A misconfigured pool is a build bug, not a player's problem — refuse and spend nothing rather than
@@ -202,6 +208,78 @@ export class EconomyService implements OnStart {
 		return succeeded && resultBallId !== undefined
 			? { ok: true, outcome: "success", resultBallId }
 			: { ok: true, outcome: "fail" };
+	}
+
+	/**
+	 * Grants one rare-or-better ball for a validated Robux purchase, once per `purchaseId`.
+	 *
+	 * Public and deliberately callable from the command bar, for the same reason `grantCoins` is: it is the only way to
+	 * exercise the grant path in Studio, because Studio cannot drive `ProcessReceipt`.
+	 */
+	public grantRobuxChestPurchase(player: Player, purchaseId: string): GrantOutcome {
+		const profile = this.store.getProfile(player);
+		if (profile === undefined) {
+			warn(`[Economy] ${player.Name} read-only ? no profile (robux chest purchase ${purchaseId})`);
+			return "no-profile";
+		}
+
+		const outcome = applyRobuxChestGrant(
+			profile,
+			purchaseId,
+			(candidate) => this.store.saveAsync(player, candidate),
+			() => rollFromWeights(robuxChestWeights()),
+			(rarity) => pickBallFrom(rarity),
+		);
+
+		if (outcome === "granted") {
+			this.publish(player, profile);
+		}
+
+		print(`[Economy] ${player.Name} robux chest ${outcome} purchase=${purchaseId}`);
+		return outcome;
+	}
+
+	/**
+	 * The `ProcessReceipt` callback.
+	 *
+	 * ## Why this is a property assignment and not a connection
+	 *
+	 * `MarketplaceService.ProcessReceipt` is a plain callback, not an event: assigning replaces whatever was there, and
+	 * **only one function can hold it**. That is why there is exactly one assignment in `src/` ? a second would silently
+	 * take over from this one and leave the first product unhandled.
+	 *
+	 * ## Why nothing here throws or returns nothing
+	 *
+	 * The callback must always answer with a decision. An error would surface as an unhandled failure and Roblox would
+	 * retry indefinitely; returning nothing is not in the type and would be treated as a failure. Every path returns a
+	 * decision, and the unrecognised-product path is a warning rather than an error.
+	 *
+	 * ## Why receipts are not rate-limited
+	 *
+	 * `ECONOMY_ACTION_COOLDOWN_MS` exists to stop a player spamming a remote. A receipt is Roblox telling this server
+	 * that money changed hands; delaying or dropping it would be dropping a sale.
+	 */
+	private handleReceipt(receiptInfo: ReceiptInfo): Enum.ProductPurchaseDecision {
+		if (receiptInfo.ProductId !== ROBUX_CHEST_PRODUCT_ID) {
+			// **Deliberately `NotProcessedYet`.** Consuming a purchase this server does not understand would take the
+			// player's money and give nothing, with no retry to recover. The cost is that a misconfigured product id
+			// retries forever ? which is loud in the log and fixable, unlike a silently swallowed sale.
+			warn(
+				`[Economy] receipt for unknown product ${receiptInfo.ProductId} (expected ${ROBUX_CHEST_PRODUCT_ID}) ? not processed`,
+			);
+			return Enum.ProductPurchaseDecision.NotProcessedYet;
+		}
+
+		const player = Players.GetPlayerByUserId(receiptInfo.PlayerId);
+		if (player === undefined) {
+			// The buyer is not in this server. Roblox retries when they next join, which is the correct behaviour.
+			warn(
+				`[Economy] receipt ${receiptInfo.PurchaseId} for userId ${receiptInfo.PlayerId} who is not in this server`,
+			);
+			return Enum.ProductPurchaseDecision.NotProcessedYet;
+		}
+
+		return receiptDecision(this.grantRobuxChestPurchase(player, receiptInfo.PurchaseId));
 	}
 
 	/**
@@ -343,25 +421,149 @@ export class EconomyService implements OnStart {
 	 *
 	 * Multiply-then-subtract against a running total, so a weight can be edited without touching any other row.
 	 */
-	private rollRarity(): Rarity {
-		let total = 0;
-		for (const rarity of RARITIES) {
-			total += RARITY_WEIGHTS[rarity];
-		}
+}
 
-		let roll = math.random() * total;
-		for (const rarity of RARITIES) {
-			roll -= RARITY_WEIGHTS[rarity];
-			if (roll < 0) {
-				return rarity;
-			}
-		}
+/**
+ * One weighted pick over a weight map: **the only rarity roll in the tree**.
+ *
+ * ## Why it takes the weights instead of reading `RARITY_WEIGHTS`
+ *
+ * Because there are now two chests with different pools, and a second pick written for the Robux chest would be a second
+ * place for "the filter" to be forgotten. Both chests call this: the coin chest with `RARITY_WEIGHTS`, the Robux chest
+ * with `robuxChestWeights()`.
+ *
+ * ## The invariant that keeps commons out of the Robux chest
+ *
+ * A tier whose weight is `0` **cannot be returned**. The loop subtracts each tier's weight from a roll that starts in
+ * `[0, total)`; for a zero-weight tier the subtraction changes nothing, so `roll < 0` cannot become true on that tier's
+ * turn. The exclusion is therefore arithmetic ? there is no filter branch that a later edit could drop, and no way for
+ * the roll to disagree with the displayed odds, which are computed from the same map by `oddsFrom`.
+ *
+ * Unreachable fallback: a `nil` would propagate into a stored ball id, so a definite tier is returned instead.
+ */
+export function rollFromWeights(weights: Record<Rarity, number>): Rarity {
+	let total = 0;
+	for (const rarity of RARITIES) {
+		total += weights[rarity];
+	}
 
-		// Unreachable while `total` is positive and `math.random()` is `[0, 1)`, and it is still written out:
-		// returning a definite tier is cheaper than a `nil` that would propagate into a stored ball id.
-		return RARITIES[RARITIES.size() - 1];
+	let roll = math.random() * total;
+	for (const rarity of RARITIES) {
+		roll -= weights[rarity];
+		if (roll < 0) {
+			return rarity;
+		}
+	}
+
+	return RARITIES[RARITIES.size() - 1];
+}
+
+/** A uniformly random ball id from a tier's pool, or `undefined` when the pool is empty. */
+export function pickBallFrom(rarity: Rarity): string | undefined {
+	const pool = BALL_POOL[rarity];
+	if (pool.size() === 0) {
+		return undefined;
+	}
+
+	return pool[math.floor(math.random() * pool.size())];
+}
+
+// #region Robux chest
+
+/** What granting a Robux chest purchase did. */
+export type GrantOutcome = "granted" | "duplicate" | "no-profile" | "save-failed";
+
+/**
+ * Trims the purchase history to `PURCHASE_HISTORY_CAP`, oldest first.
+ *
+ * Oldest-first because the entries that matter are the recent ones: a receipt redelivered days later is not a realistic
+ * retry, while one redelivered seconds later is the case this exists for. Trimming from the front keeps the window
+ * around "now", which is where duplicates actually come from.
+ */
+function trimPurchases(profile: Profile): void {
+	while (profile.purchases.size() > PURCHASE_HISTORY_CAP) {
+		profile.purchases.remove(0);
 	}
 }
+
+/**
+ * The grant itself, as a function rather than a method, so it can be tested without a DataStore, a `Player` or a
+ * published place.
+ *
+ * ## Why this is not a method on `EconomyService`
+ *
+ * The service's constructor creates a `PlayerDataStore`, whose first act is `DataStoreService.GetDataStore` ? which
+ * **throws in an unpublished place**, so a spec cannot construct the service at all. That is why the existing suite
+ * asserts tables rather than behaviour. Taking the save as a callback means the whole grant ? ordering, dedupe, revert ?
+ * is exercised by a test with a fake save and no engine services, which is the only way criteria about
+ * "save before grant" can be *proved* rather than inspected.
+ *
+ * ## The ordering, and why it is this way round
+ *
+ * Mutate the cached profile, **save**, and only report success if the save landed. On failure every mutation is undone,
+ * including the purchase id, so a redelivered receipt is still treated as un-granted and can succeed next time. The
+ * alternative ? grant now, persist later ? hands out a ball the player does not own and only reveals it on rejoin.
+ *
+ * The purchase id is recorded **before** the save for the same reason: it has to be in the value that is written, or the
+ * dedupe would only work for a session in which the grant also succeeded in memory.
+ */
+export function applyRobuxChestGrant(
+	profile: Profile,
+	purchaseId: string,
+	save: (profile: Profile) => boolean,
+	roll: () => Rarity,
+	pickBall: (rarity: Rarity) => string | undefined,
+): "granted" | "duplicate" | "save-failed" {
+	if (profile.purchases.includes(purchaseId)) {
+		// Nothing is written and nothing is granted: the ball from the first delivery is already in `ownedBalls`, and
+		// granting again is the exact bug this list exists to prevent.
+		return "duplicate";
+	}
+
+	const ballId = pickBall(roll());
+	if (ballId === undefined) {
+		// A tier with an empty pool is a build bug, not a player's problem. Reporting it as a failure leaves the receipt
+		// unprocessed rather than consuming it for nothing.
+		warn(`[Economy] robux chest: the rolled tier has an empty pool ? purchase ${purchaseId} not granted.`);
+		return "save-failed";
+	}
+
+	const ownedBefore = profile.ownedBalls.get(ballId) ?? 0;
+
+	profile.ownedBalls.set(ballId, ownedBefore + 1);
+	profile.purchases.push(purchaseId);
+	trimPurchases(profile);
+
+	if (!save(profile)) {
+		restoreOwned(profile, ballId, ownedBefore);
+		// Removes only the id just pushed: `trimPurchases` removes from the front, so the new id is still last.
+		profile.purchases.pop();
+
+		return "save-failed";
+	}
+
+	return "granted";
+}
+
+/**
+ * Maps a grant outcome to the decision Roblox is told.
+ *
+ * **`duplicate` must be `PurchaseGranted`.** Returning `NotProcessedYet` for a receipt whose ball was already given
+ * tells Roblox the sale failed, so it retries ? forever, because every retry is also a duplicate. That is an infinite
+ * loop that also blocks the player's next purchase.
+ *
+ * A refused session (`no-profile`) and a failed write (`save-failed`) are genuinely "not yet": the player paid and has
+ * nothing, so a retry is the only outcome that can still deliver the product.
+ */
+export function receiptDecision(outcome: GrantOutcome): Enum.ProductPurchaseDecision {
+	if (outcome === "granted" || outcome === "duplicate") {
+		return Enum.ProductPurchaseDecision.PurchaseGranted;
+	}
+
+	return Enum.ProductPurchaseDecision.NotProcessedYet;
+}
+
+// #endregion
 
 /**
  * Puts a ball count back the way it was, including removing the entry when there was none.

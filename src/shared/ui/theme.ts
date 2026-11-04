@@ -16,6 +16,7 @@
  * slot dies with its component.
  */
 
+import { Rarity } from "shared/economy.config";
 import { pushBigUiTheme } from "./big-ui-theme";
 
 /**
@@ -133,6 +134,30 @@ export interface Colors {
 
 	/** Domain slot: Robux-purchase UI only. See the module comment. */
 	specialRobux: Color3;
+
+	/**
+	 * Domain slot: the coin currency's own colour.
+	 *
+	 * Separate from `warning` and from `rarity.legendary` on purpose. It is tempting to reuse the amber already in the
+	 * palette, but a coin that is the same colour as a legendary border makes the two unreadable as different things —
+	 * and "this is money" is a meaning the UI will need everywhere a price appears, which is exactly what makes it a
+	 * domain slot rather than a one-off literal in the store.
+	 */
+	coin: Color3;
+
+	/**
+	 * Domain slot: the item rarity ladder, one colour per tier.
+	 *
+	 * Here rather than in the store that first needed it, for the reason this file exists: a rarity colour is a
+	 * *semantic* value — "epic" means the same violet wherever it is drawn — and a store-local table would make the
+	 * next element that shows a rarity invent a fifth violet. Keyed by the economic `Rarity` union rather than by
+	 * position, so adding a tier to `economy.config.ts` is a type error here until this table gains the colour,
+	 * which is exactly the prompt a designer needs.
+	 *
+	 * A direction pair: the light direction aims these at paper contrast, the dark direction at contrast against
+	 * brown. The tier *meaning* is shared; the values are not.
+	 */
+	rarity: Record<Rarity, Color3>;
 }
 
 /**
@@ -149,6 +174,10 @@ export interface Colors {
  *   `Shape.radiusLarge`) are the library's business and are not overridden. A slot with no reader is a slot
  *   whose value gets guessed at; the deferral is named here so the next element knows where to add it.
  * - **No `paint.text`/`card` naming by element.** The four surfaces are depth levels, not component slots.
+ *
+ * `rarity` is the second **domain slot** after `specialRobux`, added when the store became the first element to
+ * draw an item tier. It belongs here for the same reason: a tier's colour is a meaning shared by every element that
+ * will ever show a tier, so a store-local table would make the next reader invent its own epic.
  */
 export interface Theme {
 	paint: {
@@ -221,6 +250,16 @@ function hudDarkTheme(): Theme {
 			shadow: BASE.black,
 
 			specialRobux: BASE.robux,
+			coin: BASE.yellow,
+
+			// Brighter than the light direction's by roughly two steps each, because these sit on brown rather than on
+			// paper: a #3B82C4 blue would sink into `brownDarker` and read as a grey line.
+			rarity: {
+				common: TINTS.inkDim,
+				rare: TINTS.tealLight,
+				epic: TINTS.tealLighter,
+				legendary: BASE.yellow,
+			},
 		},
 	};
 }
@@ -291,6 +330,20 @@ export function surfaceOpaqueTheme(): Theme {
 			shadow: Color3.fromHex("#000000"),
 
 			specialRobux: BASE.robux,
+			// **Placeholder.** A brighter gold than `rarity.legendary`'s amber, so a price and a legendary border never
+			// read as the same signal.
+			coin: Color3.fromHex("#E9B949"),
+
+			// **Placeholder.** The rarity ladder on paper. These are the only colours in either direction chosen for a
+			// *domain* rather than a job, and they are chosen for two things at once: legible as a 2 px border against
+			// #F4F1EA, and far enough apart in hue that a player can tell a tier without reading its name. Grey is
+			// deliberately the least interesting of the four — common should not draw the eye.
+			rarity: {
+				common: Color3.fromHex("#9AA0A6"), // grey: the floor of the ladder, deliberately unexciting
+				rare: Color3.fromHex("#3B82C4"), // blue
+				epic: Color3.fromHex("#8B5CF6"), // violet
+				legendary: Color3.fromHex("#D99A1E"), // amber, the only warm colour in the set
+			},
 		},
 	};
 }
