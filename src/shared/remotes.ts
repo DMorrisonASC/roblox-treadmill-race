@@ -71,3 +71,16 @@ export const WINNER_NAME_VALUE_NAME = "WinnerName";
 export const DEBUG_WAITING_REMOTE_NAME = "DebugWaiting";
 export const DEBUG_PLAYING_REMOTE_NAME = "DebugPlaying";
 export const DEBUG_SPAWN_REMOTE_NAME = "DebugSpawn";
+
+/**
+ * The economy remotes. Both are **requests for a state change**, not commands: the client asks, the server
+ * decides, and the answer comes back on the same remote so the caller can render a result.
+ *
+ * `OpenCoinChest` carries no arguments — a client that could name a price or a ball could name a free
+ * legendary. `FuseBalls` carries the **ball id** and nothing else: which ball to consume is the player's
+ * choice, and the id is validated against the profile the server holds before anything is spent.
+ *
+ * `ReplicatedStorage.Remotes` is created by whichever service starts first, so neither owns the folder.
+ */
+export const OPEN_COIN_CHEST_REMOTE_NAME = "OpenCoinChest";
+export const FUSE_BALLS_REMOTE_NAME = "FuseBalls";

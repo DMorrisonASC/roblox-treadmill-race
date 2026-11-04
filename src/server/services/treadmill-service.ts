@@ -651,6 +651,29 @@ export class TreadmillService implements OnStart {
 		return this.getBeltSpeed();
 	}
 
+	/**
+	 * The belt's own frame, or `undefined` before any belt is bound.
+	 *
+	 * Used by `BallSpawnerService.stepBallSpeeds` for one thing: converting a ball's world position into the
+	 * belt's local `Z`, which is the only frame in which "sideways across the belt" means anything. A world
+	 * `Z` would be wrong for a rotated belt, and the lateral drift is defined in the belt's frame.
+	 */
+	public getBeltFrame(): CFrame | undefined {
+		for (const [belt] of this.surfaces) {
+			if (belt.Parent !== undefined) {
+				return belt.CFrame;
+			}
+		}
+
+		for (const instance of CollectionService.GetTagged(TAGS.treadmillBelt)) {
+			if (instance.IsA("BasePart") && instance.Parent !== undefined) {
+				return instance.CFrame;
+			}
+		}
+
+		return undefined;
+	}
+
 	public getBeltRightVector(): Vector3 {
 		for (const [belt] of this.surfaces) {
 			if (belt.Parent !== undefined) {

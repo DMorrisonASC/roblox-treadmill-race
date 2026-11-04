@@ -10,6 +10,8 @@ import {
 	WINNER_NAME_VALUE_NAME,
 } from "shared/remotes";
 import { TAGS } from "shared/tags";
+import { ROUND_TRANSITION_ATTRIBUTE, TRANSITION_NETWORK_STEP } from "shared/constants";
+import { TRANSITION_CONFIG, coverSeconds, holdSeconds, openSeconds } from "shared/config/transition.config";
 import {
 	BELT_RAMP_SECONDS,
 	INTERMISSION_SECONDS,
@@ -119,6 +121,19 @@ export class RoundService implements OnStart {
 
 	/** True once the "no zone" warning has been said for the current round. */
 	private warnedNoZone = false;
+
+	/**
+	 * Seconds a phase's timer is delayed by, because a wipe is covering the screen when the phase begins.
+	 *
+	 * Set by `transitionAround` *before* the phase entry runs, consumed by that entry's timer arming, and reset to
+	 * zero as soon as it is read. It exists because those two things happen in this order and nothing else links
+	 * them: `transitionAround` cannot arm the timer itself (the entry function owns that), and the entry function
+	 * cannot know a wipe is running (it is called from four places, only two of which wipe).
+	 *
+	 * **It delays the clock's start; it does not shorten or lengthen any phase.** `WAITING_SECONDS` of `Waiting`
+	 * is still `WAITING_SECONDS` - it just begins when the screen is clear.
+	 */
+	private pendingTimerHold = 0;
 
 	/**
 	 * Live count when the round entered `Playing`.
@@ -519,6 +534,68 @@ export class RoundService implements OnStart {
 	 * so the phase can be inspected with no bodies in it. The transition out is guarded instead — see
 	 * `enterPlaying`.
 	 */
+	/**
+	 * Runs a phase change behind a screen-covering wipe.
+	 *
+	 * **The phase's timer must not advance while the screen is covered.** The state change happens *inside* the
+	 * cover, and the hold before the timer starts is the difference between "the round begins" and "the round
+	 * began two seconds ago while you were staring at a black screen".
+	 *
+	 * The sequence is the reference project's, and each wait has one job:
+	 *
+	 * 1. Bump `ROUND_TRANSITION_ATTRIBUTE` on every player. That is the *only* cue the client gets; it watches its
+	 *    own attribute and plays the wipe.
+	 * 2. Wait the cover plus a network step. The cover finishes on the client's clock, which the server cannot
+	 *    read, so the step is the tolerance that puts this wait after the last cell has closed rather than one
+	 *    frame before it.
+	 * 3. Apply the state change. The screen is dark; this is the frame the wipe exists to hide.
+	 * 4. Wait the hold plus the open, then clear `pendingTimerHold`. The phase entry armed its timer *with* that
+	 *    hold already set, so the clock starts as this wait ends.
+	 *
+	 * **Scheduled, not awaited.** `task.spawn` so the caller returns immediately and the round's other tick
+	 * handlers keep running; the phase machine is the caller's, not this function's.
+	 *
+	 * **`ENABLED` is read on both sides.** When it is false the change happens synchronously with no bump and no
+	 * hold, which is the pre-transition behaviour exactly - a wipe that plays on one side and not the other is the
+	 * failure mode this flag exists to prevent.
+	 */
+	private transitionAround(from: RoundPhase, label: string, cb: () => void): void {
+		if (!TRANSITION_CONFIG.ENABLED) {
+			cb();
+			return;
+		}
+
+		this.pendingTimerHold = holdSeconds() + openSeconds();
+
+		task.spawn(() => {
+			print(`[Transition] covering (${from} ? ${label})`);
+
+			for (const player of Players.GetPlayers()) {
+				const current = player.GetAttribute(ROUND_TRANSITION_ATTRIBUTE);
+				player.SetAttribute(ROUND_TRANSITION_ATTRIBUTE, typeIs(current, "number") ? current + 1 : 1);
+			}
+
+			task.wait(coverSeconds() + TRANSITION_NETWORK_STEP);
+			cb();
+			task.wait(holdSeconds() + openSeconds());
+
+			print(`[Transition] uncovered (${label})`);
+		});
+	}
+
+	/**
+	 * Reads and clears the hold a wipe asked for, in seconds.
+	 *
+	 * One reader per phase entry, immediately before arming that phase's timer. Consuming rather than peeking is
+	 * what keeps the hold from leaking into the *next* phase - a `Waiting` that was wiped must not delay the
+	 * `Playing` that follows it.
+	 */
+	private consumeTimerHold(): number {
+		const hold = this.pendingTimerHold;
+		this.pendingTimerHold = 0;
+		return hold;
+	}
+
 	private enterWaiting(reason: string, competitors: number): void {
 		const from = this.phase;
 		this.phase = "Waiting";
@@ -548,7 +625,12 @@ export class RoundService implements OnStart {
 	 * advances, which is indistinguishable from a dead server.
 	 */
 	private scheduleWaitingTimeout(generation: number): void {
-		task.delay(WAITING_SECONDS, () => {
+		// **The wipe's hold, read here and added to the first delay only.** A round that began behind a wipe must
+		// not reach `Playing` with `WAITING_SECONDS` already part-spent, so the clock starts when the screen is
+		// clear. The re-arm below deliberately does *not* add it again.
+		const hold = this.consumeTimerHold();
+
+		task.delay(WAITING_SECONDS + hold, () => {
 			if (generation !== this.generation || this.phase !== "Waiting") {
 				return;
 			}
@@ -654,7 +736,9 @@ export class RoundService implements OnStart {
 			if (generation !== this.generation || this.phase !== "PostGame") {
 				return;
 			}
-			this.enterIntermission("post-game hold elapsed");
+
+			// **Wrapped.** `PostGame ? Intermission` is the other covered transition.
+			this.transitionAround("PostGame", "Intermission", () => this.enterIntermission("post-game hold elapsed"));
 		});
 	}
 
@@ -734,11 +818,16 @@ export class RoundService implements OnStart {
 	private startIntermissionTimer(): void {
 		const generation = this.generation;
 
+		// The wipe's hold, read once: `Intermission` entered behind a wipe starts its clock when the screen clears.
+		const hold = this.consumeTimerHold();
+
 		task.spawn(() => {
 			// The first wait is skipped only if a caller wants the transition immediately; here the timer
 			// always runs its full duration before the first check.
+			let first = true;
 			while (this.phase === "Intermission" && generation === this.generation) {
-				task.wait(INTERMISSION_SECONDS);
+				task.wait(INTERMISSION_SECONDS + (first ? hold : 0));
+				first = false;
 
 				if (this.phase !== "Intermission" || generation !== this.generation) {
 					return;
@@ -768,7 +857,11 @@ export class RoundService implements OnStart {
 					continue;
 				}
 
-				this.enterWaiting("intermission elapsed", spawned);
+				// **Wrapped.** `Intermission ? Waiting` is one of the two transitions the wipe covers. The call is
+				// scheduled inside `transitionAround`, so this loop returns and the round keeps ticking.
+				this.transitionAround("Intermission", "Waiting", () =>
+					this.enterWaiting("intermission elapsed", spawned),
+				);
 				return;
 			}
 		});

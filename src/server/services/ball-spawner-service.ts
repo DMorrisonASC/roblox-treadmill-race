@@ -30,12 +30,16 @@ import {
 	BALL_SPEED_DECAY_RATE,
 	BALL_SPEED_MIN,
 	BALL_SPEED_START,
+	BALL_SPEED_START_JITTER,
 	BALL_TEXTURE_ASSET,
 	BALL_TEXTURE_OFFSET_RANGE,
 	BALL_TEXTURE_OFFSET_RANGE_V,
+	LATERAL_BOUND,
+	LATERAL_BOUND_MIN,
 	WALL_ASSIST_ENABLED,
 	WALL_ASSIST_IMPULSE,
 	WALL_ASSIST_TARGET_SPEED,
+	Z_DRIFT_SPEED,
 } from "shared/tuning";
 import { TreadmillService } from "./treadmill-service";
 
@@ -404,6 +408,31 @@ export class BallSpawnerService implements OnStart {
 	private readonly ballKillY = new Map<BasePart, number>();
 
 	/**
+	 * Each live ball's decorative weave state: which way it is currently drifting across the belt, and the
+	 * belt-local `Z` at which it turns around (signed, always the same sign as `direction`).
+	 *
+	 * ## Why a map and not two attributes on the body
+	 *
+	 * The state is a *tick-local* detail with no consumer outside this loop: no client draws it, no other service
+	 * reads it, and it dies with the ball. An attribute would replicate it to every client and cost two writes per
+	 * reversal for nothing. The map is cleaned in `forgetBall` alongside `ballKillY`, so its size tracks the live
+	 * set exactly like every other per-ball map in this file.
+	 *
+	 * `bound` is stored **signed and matched to `direction`** (`bound = direction * magnitude`), which makes the
+	 * reversal test one comparison: `localZ * direction >= math.abs(bound)`. A bound of the opposite sign would
+	 * mean the ball had already passed it on the first tick and would flip immediately.
+	 */
+	private readonly lateral = new Map<BasePart, { direction: number; bound: number }>();
+
+	/**
+	 * Each ball's own starting speed, in studs/second, drawn once at spawn and reused at every `Playing` entry.
+	 *
+	 * A map rather than an attribute for the same reason as `lateral`: nothing outside this file reads it. Cleared
+	 * with `ballKillY` and `lateral` in the destroy path, so its size tracks the live set.
+	 */
+	private readonly startSpeeds = new Map<BasePart, number>();
+
+	/**
 	 * Backspin bookkeeping, one entry per live ball.
 	 *
 	 * `backspinConnections` exists because `Touched` connections on a destroyed part do not need to be
@@ -584,15 +613,47 @@ export class BallSpawnerService implements OnStart {
 	public setRoundActive(active: boolean): void {
 		this.roundActive = active;
 
-		// Leaving `Playing` stops the simulation by clearing the flag, but the attribute is the ball's own
-		// state and would otherwise keep the last value it held ? a ball frozen mid-round with `BALL_SPEED = 4`
-		// reads as "still racing, just not moving" in any log line or future consumer. Zeroing it makes the
-		// stopped state explicit, which is the same reason `Waiting` sets the belt to zero.
-		if (!active) {
+		if (active) {
+			// **The round start is the moment the ride begins, so it is the moment the speed is seeded.**
+			//
+			// Every ball that exists when `Playing` opens is put back to `BALL_SPEED_START`, because a ball
+			// spawned into `Waiting` (which `1` does) was zeroed by the branch below and would otherwise enter
+			// `Playing` at `0` and drift backwards at the full `BELT_SPEED` - `RELATIVE_SPEED = 0 - 10 = -10` -
+			// for the whole round. A round whose pickup happened not to be in that lane then looked like a ball
+			// that never span and never moved.
+			//
+			// In `setRoundActive` rather than in `RoundService` because this is the hook `Playing` entry already
+			// calls (`enterPlaying` is the single choke point for the phase) and the spawner owns the attribute,
+			// so nothing has to be kept in step across two files.
+			//
+			// It runs before the first `stepBallSpeeds` tick - the flag above has only just been set - so the
+			// first `RELATIVE_SPEED` the model computes is `BALL_SPEED_START - BELT_SPEED = 0`, the neutral start
+			// the model is specified to have.
+			// Each ball is restored to **its own** start, not to the shared constant: `startSpeeds` holds the value
+			// it drew at spawn, so a ball zeroed by `Waiting` resumes the curve it was born with rather than being
+			// re-rolled into a different one.
+			let seeded = 0;
 			for (const ball of this.liveBalls) {
 				if (ball.Parent !== undefined) {
-					ball.SetAttribute(BALL_SPEED_ATTRIBUTE, BALL_SPEED_MIN);
+					ball.SetAttribute(BALL_SPEED_ATTRIBUTE, this.startSpeeds.get(ball) ?? BALL_SPEED_START);
+					seeded++;
 				}
+			}
+
+			print(
+				`[Spawner] round start: ${seeded} ball(s) at BALL_SPEED=${formatNumber(BALL_SPEED_START)}+-${formatNumber(BALL_SPEED_START_JITTER)}`,
+			);
+			return;
+		}
+
+		// Leaving `Playing` stops the simulation by clearing the flag, but the attribute is the ball's own state
+		// and would otherwise keep the last value it held - a ball frozen mid-round with `BALL_SPEED = 4` reads
+		// as "still racing, just not moving" in any log line or future consumer. Zeroing it makes the stopped
+		// state explicit, which is the same reason `Waiting` sets the belt to zero. `setRoundActive(true)`
+		// restores it, so this is a pause rather than a one-way reset.
+		for (const ball of this.liveBalls) {
+			if (ball.Parent !== undefined) {
+				ball.SetAttribute(BALL_SPEED_ATTRIBUTE, BALL_SPEED_MIN);
 			}
 		}
 	}
@@ -600,6 +661,26 @@ export class BallSpawnerService implements OnStart {
 	/** How many parts are currently bound as spawners. `RoundService` spawns one body per spawner. */
 	public getBoundSpawnerCount(): number {
 		return this.spawnerLanes.size();
+	}
+
+	/**
+	 * The bound spawner **parts**, in bind order ? the same order lane indices use.
+	 *
+	 * Not a count, and not a copy of their positions: `PickupService` needs to place one pickup in each lane,
+	 * and a lane's `Z` is scene data that can be edited in Studio between rounds. Returning the parts means the
+	 * reader calls `Position` at the moment it spawns, so moving a spawner in Studio moves its lane.
+	 *
+	 * A fresh array on every call, so a caller cannot mutate the service's own lane list by sorting what it was
+	 * given.
+	 */
+	public getBoundSpawners(): Array<BasePart> {
+		const parts = new Array<BasePart>();
+		for (const spawner of this.spawnerLanes) {
+			if (spawner.Parent !== undefined) {
+				parts.push(spawner);
+			}
+		}
+		return parts;
 	}
 
 	/**
@@ -915,11 +996,20 @@ export class BallSpawnerService implements OnStart {
 		// "how many entries are in an array this service happens to remember".
 		CollectionService.AddTag(ball, TAGS.ball);
 
-		// **The ball's own speed, seeded at the reference belt speed.** Written at birth so the first tick that
-		// reads it finds a defined number rather than a missing attribute, and so a ball spawned into a round
-		// that is already running starts neutral (`RELATIVE_SPEED = 0`) rather than inheriting whatever the
-		// previous round's last ball happened to hold.
-		ball.SetAttribute(BALL_SPEED_ATTRIBUTE, BALL_SPEED_START);
+		// **Each ball starts at its own speed.** Without this every ball followed one curve from one constant and
+		// the whole field crossed the exit edge in a single wave, so the round was decided by spawn order rather
+		// than by the ride. See `BALL_SPEED_START_JITTER` for the arithmetic and for the cost: `RELATIVE_SPEED` is
+		// no longer exactly zero at the green light for every ball.
+		//
+		// The value is remembered in `startSpeeds` because `setRoundActive(true)` restores it at `Playing` entry,
+		// and re-drawing there would hand a ball a different start from the one it was born with.
+		const startSpeed = BALL_SPEED_START + (math.random() * 2 - 1) * BALL_SPEED_START_JITTER;
+		this.startSpeeds.set(ball, startSpeed);
+		ball.SetAttribute(BALL_SPEED_ATTRIBUTE, startSpeed);
+
+		// The weave starts here too, for the same reason: seeded at birth so the tick loop needs no fallback
+		// branch, and so the first tick already has a direction and a bound.
+		this.lateral.set(ball, this.newWeave());
 
 		// Visual only, and attached *after* `Parent` — unlike the textures above. The markers are anchored
 		// and carry their local offset as attributes, so they need the body to be in the DataModel before
@@ -998,6 +1088,19 @@ export class BallSpawnerService implements OnStart {
 	 * the `Parent` test catches a body destroyed by `RoundService` between two frames, which would otherwise
 	 * have its velocity written after the engine had already removed it.
 	 */
+	/**
+	 * A fresh weave state: a direction, and a bound of that sign some way out from the centreline.
+	 *
+	 * The magnitude is drawn from `LATERAL_BOUND_MIN .. LATERAL_BOUND` rather than from `-BOUND .. +BOUND`, so a
+	 * reversal can never land within `LATERAL_BOUND_MIN` of the centreline - see that constant for why a near-zero
+	 * bound would vibrate instead of weave.
+	 */
+	private newWeave(): { direction: number; bound: number } {
+		const direction = math.random() < 0.5 ? -1 : 1;
+		const magnitude = LATERAL_BOUND_MIN + math.random() * (LATERAL_BOUND - LATERAL_BOUND_MIN);
+		return { direction, bound: direction * magnitude };
+	}
+
 	private stepBallSpeeds(dt: number): void {
 		if (!this.roundActive) {
 			return;
@@ -1007,6 +1110,8 @@ export class BallSpawnerService implements OnStart {
 		// zero on the first `Playing` tick and only moves when decay or a pickup moves `BALL_SPEED`.
 		const beltSpeed = this.treadmill.getReferenceBeltSpeed();
 		const right = this.treadmill.getBeltRightVector();
+		// Read once for the whole loop: it is the frame every ball's `localZ` is measured in.
+		const beltFrame = this.treadmill.getBeltFrame();
 
 		for (const ball of this.liveBalls) {
 			if (ball.Parent === undefined) {
@@ -1023,6 +1128,31 @@ export class BallSpawnerService implements OnStart {
 			const relative = decayed - beltSpeed;
 			const velocity = ball.AssemblyLinearVelocity;
 			const along = velocity.Dot(right);
+
+			// ## The decorative weave
+			//
+			// Axis, and why it is not `LookVector`: a `CFrame`'s `LookVector` is its **-Z** axis, so the belt's
+			// local **+Z** is `RightVector:Cross(UpVector)`. Using `LookVector` would weave toward local -Z, which
+			// works but disagrees with every `localZ` in the log and with `PointToObjectSpace`, so the two would
+			// need negating against each other forever. `Cross` keeps the term and the measurement in one frame.
+			const lateralState = this.lateral.get(ball);
+			if (lateralState !== undefined && beltFrame !== undefined) {
+				const localZ = beltFrame.PointToObjectSpace(ball.Position).Z;
+
+				// Reversed when the ball has reached its bound on the side it was heading toward. `bound` is signed
+				// and matched to `direction`, so this is one comparison rather than a sign table.
+				if (localZ * lateralState.direction >= math.abs(lateralState.bound)) {
+					const flipped = this.newWeave();
+					// Mutated rather than replaced so the map entry stays the same object for any future reader.
+					lateralState.direction = flipped.direction;
+					lateralState.bound = flipped.bound;
+				}
+
+				const across = beltFrame.RightVector.Cross(beltFrame.UpVector).Unit;
+				const lateral = across.mul(Z_DRIFT_SPEED * lateralState.direction);
+				ball.AssemblyLinearVelocity = velocity.sub(right.mul(along)).add(right.mul(-relative)).add(lateral);
+				continue;
+			}
 
 			// Replace only the along-belt component: `velocity - right*along` is everything else (gravity and
 			// sideways drift), and adding `right*relative` back in swaps the one component this model owns.
@@ -1316,6 +1446,8 @@ export class BallSpawnerService implements OnStart {
 		for (const ball of this.liveBalls) {
 			if (ball.Parent === undefined) {
 				this.ballKillY.delete(ball);
+				this.lateral.delete(ball);
+				this.startSpeeds.delete(ball);
 				this.releaseBackspin(ball);
 				this.releaseWallAssist(ball);
 			} else {
@@ -2104,8 +2236,13 @@ export class BallSpawnerService implements OnStart {
 		const ballSpeed = this.readNumber(ball, BALL_SPEED_ATTRIBUTE, 0);
 		// The model's reference, so `RELATIVE_SPEED` in the line is the number the simulation used.
 		const beltSpeed = this.treadmill.getReferenceBeltSpeed();
+		// The weave, so the lateral motion is readable from the log rather than only from the screen: `localZ` is
+		// where the ball is across the belt, `lateralDir` which way it is heading there.
+		const localPoint = belt.CFrame.PointToObjectSpace(ball.Position);
+		const weave = this.lateral.get(ball);
+		const lateralDir = weave === undefined ? "none" : tostring(weave.direction);
 		print(
-			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(belt.CFrame.PointToObjectSpace(ball.Position))} velocity=${formatVector(velocity)} BALL_SPEED=${formatNumber(ballSpeed)} BELT_SPEED=${formatNumber(beltSpeed)} RELATIVE_SPEED=${formatNumber(ballSpeed - beltSpeed)} ${this.describeOwner(ball)}`,
+			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(localPoint)} localZ=${formatNumber(localPoint.Z)} lateralDir=${lateralDir} velocity=${formatVector(velocity)} BALL_SPEED=${formatNumber(ballSpeed)} BELT_SPEED=${formatNumber(beltSpeed)} RELATIVE_SPEED=${formatNumber(ballSpeed - beltSpeed)} ${this.describeOwner(ball)}`,
 		);
 	}
 

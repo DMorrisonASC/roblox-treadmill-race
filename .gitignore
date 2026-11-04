@@ -4,3 +4,5 @@
 /build
 *.tsbuildinfo
 flamework.build
+/.jest-roblox
+/coverage

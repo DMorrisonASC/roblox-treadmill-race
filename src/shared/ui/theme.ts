@@ -225,6 +225,76 @@ function hudDarkTheme(): Theme {
 	};
 }
 
+/**
+ * The light, opaque direction: paper surfaces and dark ink, for panels a player stops to read.
+ *
+ * ## Why a second direction exists at all
+ *
+ * The dark HUD is for **looking past** - a banner, a phase name, a value you glance at while watching the belt.
+ * The shop and the inventory are for **looking at**: a player stops, reads, chooses. A translucent brown panel
+ * over a moving scene is the wrong surface for that, because the scene keeps moving behind the text and the eye
+ * has to work to separate them. So the panels are opaque paper: four light surfaces, dark ink, one restrained
+ * accent. The same `Theme` interface, a different palette.
+ *
+ * **Nothing about type or spacing changes.** `SPACING` and `TYPOGRAPHY` are separate exports and this function
+ * returns a `Theme` that has neither field - the doc's rule 6, and the reason the interface was shaped that way.
+ * A panel that needed a different type size would be a different design, not a different direction.
+ *
+ * ## Every surface is fully opaque
+ *
+ * `transparency: 0` on all four, not a light colour at the HUD's `0.15`. The whole point of the light direction
+ * is that the scene does not show through; a light panel at 85% opacity would be neither readable nor clearly
+ * paper. That is why this file has two constructors rather than one palette with a tint parameter - the
+ * transparency is part of the decision, not a global setting.
+ *
+ * ## Why this is a sibling of `getTheme()`, not a parameter on it
+ *
+ * `theme("light")` would mean every element could ask for any direction, and the first element that did would be
+ * a panel that renders dark because its controller forgot which mode it was in. **Two functions, two directions,
+ * chosen at the call site by the element that knows what it is** - rule 8's "builders, not a framework" applied
+ * to themes. A third direction is a third function, and a registry would be the framework rule 8 warns against.
+ *
+ * ## Why it is not cached and not pushed
+ *
+ * `getTheme()` caches because it pushes its result into big-ui's global theme table, so every reader must get the
+ * *same* object. This direction pushes nothing - big-ui's table stays dark, since the library's components are
+ * HUD elements - so there is no identity to preserve and a fresh object per call is the safer default. It also
+ * means a consumer that mutates its copy cannot affect the next caller.
+ */
+export function surfaceOpaqueTheme(): Theme {
+	const opaque = (color: Color3): Paint => ({ color, transparency: 0 });
+
+	return {
+		paint: {
+			surface: opaque(Color3.fromHex("#ECE8DF")), // the page behind everything
+			panel: opaque(Color3.fromHex("#F4F1EA")), // the panel a player reads
+			card: opaque(Color3.fromHex("#FFFFFF")), // a tile inside the panel: the brightest thing on screen
+			trough: opaque(Color3.fromHex("#DDD8CE")), // a recessed well, e.g. a text field's interior
+		},
+		colors: {
+			textPrimary: Color3.fromHex("#1C1B18"),
+			textSecondary: Color3.fromHex("#55514A"),
+			textDisabled: Color3.fromHex("#8E8A80"),
+
+			// A muted blue rather than the brand orange: on paper, orange reads as a warning label, and a shop's
+			// call to action has to read as "press me" without looking like an error.
+			accent: Color3.fromHex("#2F5E8C"),
+			onAccent: Color3.fromHex("#FFFFFF"),
+
+			// Semantic slots keep their meaning but are darkened for legibility on a light surface - the brand
+			// yellow in particular is unreadable as text on paper.
+			success: Color3.fromHex("#2E7D32"),
+			warning: Color3.fromHex("#B8781B"),
+			error: Color3.fromHex("#B33A3A"),
+
+			border: Color3.fromHex("#C9C4B8"),
+			shadow: Color3.fromHex("#000000"),
+
+			specialRobux: BASE.robux,
+		},
+	};
+}
+
 let cachedTheme: Theme | undefined;
 
 /**

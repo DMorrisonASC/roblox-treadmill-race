@@ -181,3 +181,23 @@ export const DEFAULT_MAX_LIVE_BALLS = 50;
 export const MARKER_LOCAL_POSITION_ATTRIBUTE = "MarkerLocalPosition";
 export const MARKER_LOCAL_RIGHT_ATTRIBUTE = "MarkerLocalRight";
 export const MARKER_LOCAL_UP_ATTRIBUTE = "MarkerLocalUp";
+
+/**
+ * The player's coin balance, written by `EconomyService` and read by the HUD.
+ *
+ * On `Player` for the reason `RoundTransitionCount` is: a `Player` attribute replicates only to that player,
+ * so "what is in my wallet" does not arrive at every client on the server. The server is the only writer.
+ */
+export const PLAYER_COINS_ATTRIBUTE = "Coins";
+
+/** The player's owned balls as an encoded string; see `encodeOwnedBalls` for the format and the reason. */
+export const PLAYER_OWNED_BALLS_ATTRIBUTE = "OwnedBalls";
+
+/**
+ * Whether the economy can act for this player: `"loading"`, `"ready"`, or `"readonly"`.
+ *
+ * **Explicit rather than inferred.** A missing `Coins` attribute is three different situations at once — still
+ * loading, load failed, locked by another session — and a client that guessed would either show a wallet that
+ * is about to appear or hide a wallet that exists. One attribute names the state, and the controller renders it.
+ */
+export const PLAYER_ECONOMY_STATE_ATTRIBUTE = "EconomyState";

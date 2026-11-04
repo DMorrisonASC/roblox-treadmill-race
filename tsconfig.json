@@ -27,5 +27,8 @@
 		"baseUrl": "src",
 		"incremental": true,
 		"tsBuildInfoFile": "out/tsconfig.tsbuildinfo"
-	}
+	},
+	// Explicit, because the default `**/*` also matches `jest.config.ts` at the repo root — which lives outside
+	// `rootDir: "src"` and is a Node-side file, not Luau. roblox-ts should compile `src` and nothing else.
+	"include": ["src"]
 }

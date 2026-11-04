@@ -483,7 +483,7 @@ export const SPIN_DEADBAND_SPEED = 0.5;
  * `rad/s`, the other is `rad/s` per `(studs/s)/stud`, i.e. dimensionless against a *ratio* of geometry
  * and speed — so a single shared number would tie two unrelated scales together.
  */
-export const APPARENT_SPIN_GAIN = 1.5;
+export const APPARENT_SPIN_GAIN = 3;
 
 /**
  * ## Why 1.5, and why the input is `BALL_SPEED` rather than the world velocity
@@ -532,7 +532,7 @@ export const APPARENT_SPIN_GAIN_OMEGA = 3;
  * a pickup (`BALL_SPEED = 12`) sits above it. That is intended — the ceiling is the legibility limit, and beyond
  * ~4.8 rev/s three markers on a 60 Hz display alias into a backwards read.
  */
-export const APPARENT_SPIN_MAX_RAD_PER_SEC = 30;
+export const APPARENT_SPIN_MAX_RAD_PER_SEC = 90;
 
 /**
  * **Placeholder.** Physical angular speed above which the drawn axis is taken from the body's own spin.
@@ -622,47 +622,6 @@ export const APPARENT_SPIN_SIGN = -1;
 // #region pickups (boost triangles)
 
 /**
- * **Placeholder.** How many triangles one cluster holds — and therefore how many are spawned at `Playing`
- * entry.
- *
- * **Three, not five.** At five across a 10-stud span the centres were 2.5 studs apart and the parts 1.5 wide, so
- * a 1-stud ball could straddle two adjacent triangles and collect both in the same millisecond - the 13:14 log
- * shows it: `BALL_SPEED 3.276 -> 8` immediately followed by `6.559 -> 8`. Three centres 5 studs apart cannot be
- * spanned by one ball, so one pass takes one boost.
- */
-export const PICKUP_COUNT = 3;
-
-/**
- * **Placeholder.** How many triangles may exist at once.
- *
- * Equal to `PICKUP_COUNT` today, and separate from it on purpose: `PICKUP_COUNT` is "how many a cluster is
- * laid out as", this is "how many the world may hold". They are the same number while the cluster is the only
- * source, and they stop being the same number the moment a second cluster or a random spawner is added.
- */
-export const MAX_CONCURRENT_PICKUPS = 3;
-
-/**
- * **Placeholder.** Cluster position along the belt, in the belt's **local X**, in studs.
- *
- * The belt is 56 studs long, so its local X spans `-28 … +28`. `-15` is inside the first third (which ends at
- * about `-9.3`), which is the point: the boost has to apply for most of the ride to be worth taking. A cluster
- * near the leading edge would boost a ball for a couple of studs and then drop it off the end.
- *
- * Local X rather than world X because the belt is user-placed and can be moved: a world constant would leave
- * the cluster floating beside the belt the first time the belt moves in Studio. The world X is
- * `belt.CFrame` applied to this offset, and it is logged at cluster spawn so the two are comparable.
- */
-export const PICKUP_CLUSTER_LOCAL_X = -15;
-
-/**
- * **Placeholder.** How far inside each `Z` edge of the belt the outermost triangle's **centre** sits, in studs.
- *
- * The belt is 12 wide, so the usable span is 10 with this inset, and three centres sit 5 studs apart — wide
- * enough that a 1.5-stud triangle never overhangs the edge and a 1-stud ball cannot span two of them.
- */
-export const PICKUP_Z_EDGE_INSET = 1;
-
-/**
  * **Placeholder.** A triangle's size.
  *
  * **It was `(1.5, 0.1, 1.5)` and that was invisible in Studio.** A 0.1-stud-thick part on a brown belt, a few
@@ -673,13 +632,35 @@ export const PICKUP_Z_EDGE_INSET = 1;
  */
 export const PICKUP_SIZE = new Vector3(2, 1, 2);
 
+/**
+ * **Placeholder.** The random band a pickup's `X` is chosen from, in the belt's **local** `X`, in studs.
+ *
+ * ## Why each bound exists
+ *
+ * `-18` is the far side, and it sits **5 studs in front of where a ball spawns** (local `-23`). Balls drift
+ * toward `+X`, so a pickup behind the spawn line would be behind every ball for its whole life ? a marker that
+ * can never be touched is worse than no marker, because it looks like content.
+ *
+ * `+23` is the near side, chosen to stop well short of the exit at local `+28`. A ball's drift accelerates as
+ * `BALL_SPEED` decays, so a pickup in the last few studs would only be collected after the ball had already
+ * committed to leaving the belt.
+ *
+ * Both ends are inside the belt's own `-28 .. +28`, so a triangle is always on the surface rather than floating
+ * past an end. The lane (`Z`) is not random: it is read from the bound spawner parts, so every round covers
+ * every lane a ball can spawn in.
+ */
+export const PICKUP_X_MIN = -18;
+
+/** **Placeholder.** The near end of the random `X` band. See `PICKUP_X_MIN` for why both bounds exist. */
+export const PICKUP_X_MAX = 23;
+
 /** **Placeholder.** Triangle colour — red, because nothing else on the belt is red. */
 export const PICKUP_COLOR = Color3.fromRGB(200, 30, 30);
 
 /**
  * **Placeholder.** Seconds between top-up attempts while `Playing`.
  *
- * A top-up never exceeds `MAX_CONCURRENT_PICKUPS`, so this is a *replacement* cadence, not a spawn rate: a
+ * A top-up never exceeds the bound-spawner count, so this is a *replacement* cadence, not a spawn rate: a
  * round that runs forever holds at most five triangles, and a triangle taken at `t = 3 s` is replaced at the
  * next multiple of 15. Longer than a ball takes to cross the belt, so a replacement never appears in front of
  * the ball that just took the last one.
@@ -723,6 +704,28 @@ export const BALL_SPEED_START = DEFAULT_BELT_SPEED;
  */
 export const BALL_SPEED_DECAY_RATE = 0.3;
 
+/**
+ * **Placeholder.** How far a ball's own starting speed may vary from `BALL_SPEED_START`, in studs/second.
+ *
+ * ## Why the start needs to differ at all
+ *
+ * Every ball shared one curve: `BALL_SPEED` decayed from the same `BALL_SPEED_START` at the same
+ * `BALL_SPEED_DECAY_RATE`, and the only per-ball randomness was the lateral weave - which does not change *when*
+ * a ball reaches the exit edge. A round therefore resolved as a stampede: sixteen balls spawned together crossed
+ * the edge inside two seconds of each other and the round ended on the first wave, so the winner was decided by
+ * spawn order rather than by anything that happened during the ride.
+ *
+ * `1` against `BALL_SPEED_START = 10` gives each ball a start in `9 .. 11`, i.e. an initial `RELATIVE_SPEED` in
+ * `-1 .. +1` against a belt at `10`. That is a ~2 stud/s spread across the field, which at
+ * `BALL_SPEED_DECAY_RATE = 0.3` is roughly a 7 s spread in exit time - enough for the field to string out and for
+ * a pickup to matter.
+ *
+ * **The cost, stated:** `RELATIVE_SPEED` is no longer exactly `0` on the first `Playing` tick for every ball;
+ * only the ball that drew `10` gets a neutral start. That was a requirement of an earlier round, and it is
+ * deliberately traded here for a race that is not a tie.
+ */
+export const BALL_SPEED_START_JITTER = 1;
+
 /** **Placeholder.** The floor `BALL_SPEED` decays to. Zero, because a negative ball speed is meaningless. */
 export const BALL_SPEED_MIN = 0;
 
@@ -743,6 +746,48 @@ export const BALL_SPEED_MIN = 0;
  * resumes losing ground.
  */
 export const BOOST_TARGET_BALL_SPEED = 12;
+
+/**
+ * **Placeholder.** Lateral speed of the decorative weave, in studs/second.
+ *
+ * ## Why this exists at all, and why it is decorative
+ *
+ * Under the reference-speed model a ball's motion is a straight line along the belt's `RightVector`: the
+ * along-belt component is written from `BALL_SPEED` and nothing else acts on it. Correct, and visually dull -
+ * a row of balls slides like beads on a rail. This adds a sideways weave so a ball "has some momentum of its
+ * own", which is the impression the game wants and which nothing in the model provides.
+ *
+ * **It is a decoration, not physics.** There is no lateral force, no contact, no friction and no cause: the
+ * term is written straight into the velocity every tick, exactly like the along-belt one. That has to be said
+ * plainly because the belt is a reference number rather than a surface (item 18) - there is nothing here for a
+ * sideways force to come from.
+ *
+ * `0.5` studs/s across a ride of ~18 s is roughly 9 studs of lateral travel on a 12-stud belt, so a ball crosses
+ * the middle several times per ride: visible, but slow enough not to look thrown.
+ */
+export const Z_DRIFT_SPEED = 0.5;
+
+/**
+ * **Placeholder.** The furthest a ball's centre may wander from the belt's centreline, in the belt's local `Z`,
+ * in studs.
+ *
+ * The belt is 12 wide, so local `Z` runs `-6 .. +6` and a ball of radius 0.5 is fully on the surface within
+ * `+-5.5`. `4` leaves 1.5 studs of margin on each side - far more than one tick of overshoot at 0.5 studs/s.
+ * The reversal is a logic test, not a physical wall, so the bound has to sit far enough inside the geometry that
+ * the ball never looks like it should have fallen off.
+ */
+export const LATERAL_BOUND = 4;
+
+/**
+ * **Placeholder.** The smallest distance from the centreline the weave can reverse at, in studs.
+ *
+ * **Without this the weave degenerates.** A bound sampled uniformly from `-4 .. +4` lands near zero often enough
+ * to matter, and a ball reversing at `0.02` studs flips direction almost every tick - it vibrates in place
+ * instead of weaving. Sampling the *magnitude* from `LATERAL_BOUND_MIN .. LATERAL_BOUND` and giving it the sign
+ * of the current direction removes that case entirely, and an asymmetric weave (crossing from `+3.2` to `-1.6`)
+ * reads as more natural than a symmetric one anyway.
+ */
+export const LATERAL_BOUND_MIN = 1.5;
 
 /** **Placeholder.** The folder `PickupService` parents its triangles into, created on demand. */
 export const PICKUPS_FOLDER_NAME = "SpawnedPickups";

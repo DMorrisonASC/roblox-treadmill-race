@@ -32,6 +32,8 @@ export const HUD_TOPBAR_GUI_NAME = "HudTopbarGui";
 export const HUD_CORE_GUI_NAME = "HudCoreGui";
 /** **Placeholder.** The `ScreenGui` name for the full-screen layer. */
 export const FULL_SCREEN_GUI_NAME = "FullScreenGui";
+/** **Placeholder.** The `ScreenGui` name for the round-transition layer. */
+export const TRANSITION_GUI_NAME = "TransitionGui";
 
 /**
  * **Placeholder.** Draw order for the full-screen layer: **below both HUD layers**.
@@ -60,8 +62,18 @@ export const HUD_CORE_DISPLAY_ORDER = 20;
  */
 export const HUD_TOPBAR_DISPLAY_ORDER = 30;
 
-/** Which layer an element wants. The three names map one-to-one to the three constructors below. */
-export type UiLayer = "hudTopbar" | "hudCore" | "fullScreen";
+/**
+ * **Placeholder.** Draw order for the round-transition layer: **above every other layer**.
+ *
+ * The only layer whose job is to hide the others, so it is the only one that outranks the HUD. A wipe drawn under
+ * a HUD element leaves the banner floating on top of an otherwise black screen, which reads as a bug rather than a
+ * cut. `ScreenInsets.None` because the cover has to reach the physical screen edges - an inset wipe would show a
+ * lit border of whatever it was meant to hide.
+ */
+export const TRANSITION_DISPLAY_ORDER = 40;
+
+/** Which layer an element wants. The four names map one-to-one to the four constructors below. */
+export type UiLayer = "hudTopbar" | "hudCore" | "fullScreen" | "transition";
 
 /**
  * The only public entry point. Returns the layer's `ScreenGui`, creating it if this client does not have
@@ -80,6 +92,8 @@ export function getScreenGui(layer: UiLayer): ScreenGui {
 		return coreHudGui();
 	} else if (layer === "fullScreen") {
 		return fullScreenGui();
+	} else if (layer === "transition") {
+		return transitionGui();
 	}
 
 	return topbarHudGui();
@@ -95,6 +109,10 @@ function coreHudGui(): ScreenGui {
 
 function fullScreenGui(): ScreenGui {
 	return configureGui("fullScreen", FULL_SCREEN_GUI_NAME, Enum.ScreenInsets.None, FULL_SCREEN_DISPLAY_ORDER);
+}
+
+function transitionGui(): ScreenGui {
+	return configureGui("transition", TRANSITION_GUI_NAME, Enum.ScreenInsets.None, TRANSITION_DISPLAY_ORDER);
 }
 
 /**

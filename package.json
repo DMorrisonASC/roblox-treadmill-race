@@ -4,10 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build": "node node_modules/roblox-ts/out/CLI/cli.js",
+    "build": "node node_modules/roblox-ts/out/CLI/cli.js && node -e \"require('fs').copyFileSync('node_modules/@isentinel/roblox-ts/include/RuntimeLib.lua','include/RuntimeLib.lua')\"",
     "watch": "node node_modules/roblox-ts/out/CLI/cli.js -w",
     "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
     "lint": "cross-env ESLINT_USE_FLAT_CONFIG=false eslint src",
+		"test": "jest-roblox",
+		"pretest": "npm run build && npm run build:place",
     "serve": "rojo serve default.project.json",
     "build:place": "node -e \"require('fs').mkdirSync('build',{recursive:true})\" && rojo build default.project.json -o build/game.rbxlx"
   },
@@ -26,6 +28,7 @@
   "devDependencies": {
     "@rbxts/compiler-types": "^3.0.0-types.0",
     "@rbxts/jest": "^3.16.0-ts.2",
+    "@rbxts/jest-globals": "^3.16.0-ts.2",
     "@rbxts/types": "^1.0.960",
     "@typescript-eslint/eslint-plugin": "^8.72.1",
     "@typescript-eslint/parser": "^8.72.1",

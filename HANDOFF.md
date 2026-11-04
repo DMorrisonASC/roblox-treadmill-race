@@ -54,7 +54,7 @@ nothing until five values were typed by hand, which is indistinguishable from br
 hand-set values are never overwritten. `Enabled` defaults to **true** for the same reason. `KillY` is
 derived as `Workspace.FallenPartsDestroyHeight + 2 * Radius` instead of a picked `-50`.
 
-## 8. Open: the duplicate-spawner report is not yet confirmed at runtime
+## 8. The duplicate-spawner report, confirmed at runtime (see item 50)
 
 Items 5 and 7 both plausibly explain "zero balls from the stream, manual fine" — a dead loop (5), and
 `Enabled` being absent and read as `false` (7). The current bind log distinguishes them: it prints
@@ -63,6 +63,11 @@ A third possibility remains untested and is _not_ addressed by code: two spawner
 with the same `Rate` emit balls at identical positions on the same tick, and overlapping collision
 bodies get ejected — which looks like "no balls" with no error at all. If the tick log says
 `spawned 1` while `live` climbs and nothing rests on the belt, separate the spawners in Studio.
+
+**→ Confirmed at runtime — item 50.** The bind log now shows four ids resolving to the same
+`GetFullName()`, and `bindSpawner` returns early on an instance it already holds, so the scene carries four
+*distinct* spawner parts wearing one name (which is what `spawnerIds` exists for). The separation this item
+asks for is a Studio edit, not a code change.
 
 ## 9. Not done, by design
 
@@ -600,3 +605,438 @@ The **travel axis is also gone**. It was derived from `state.velocity`, which is
 - **Axis:** `beltSpinAxis()` always - a constant for a given belt. `axisSource` is `belt`, nothing else.
 
 `omegaPhysical` is still printed as a diagnostic and decides nothing. `APPARENT_SPIN_GAIN_OMEGA` and `SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC` are no longer imported by the controller (both constants remain in `tuning.ts`). The requirement this satisfies is the user's: **the ball never renders a backwards spin** - one direction for its whole life, rate set by the attribute, axis set by the belt.
+
+## 45. Pickups: random X, lane Z from the bound spawner parts, count = spawner count
+
+**The fixed cluster is gone.** `PICKUP_CLUSTER_LOCAL_X`, `PICKUP_Z_EDGE_INSET`, `PICKUP_COUNT` and `MAX_CONCURRENT_PICKUPS` are deleted; `spawnCluster`/`slotPositions`/`slotOccupied` are replaced by `spawnPickups` + `positionFor`. New `PICKUP_X_MIN = -18`, `PICKUP_X_MAX = 23` (both `**Placeholder.**`).
+
+**Count is the scene's, not a constant.** `maxPickups()` is `BallSpawnerService.getBoundSpawners().size()` ? a **new accessor returning the parts**, not just a count, because the pickup needs their positions. The old fixed `3` meant a scene with four spawners placed three pickups and one lane could never hold anything; a fifth spawner added in Studio would have changed nothing. `getBoundSpawners()` returns a fresh array filtered to parts still parented, so the reader calls `Position` at spawn time and a spawner moved in Studio moves its lane.
+
+**`Z` comes from the spawner part; `X` is random.** `localZ = belt.CFrame.PointToObjectSpace(spawner.Position).Z`, and `localX = PICKUP_X_MIN + math.random() * (PICKUP_X_MAX - PICKUP_X_MIN)` (float). `-18` sits 5 studs in front of the ball's spawn at local `-23`, so a pickup can never be behind every ball for its whole life; `+23` stops well short of the exit at `+28` so a pickup is reached before the ball has committed to leaving. Both are inside `-28 .. +28`, so a triangle is always on the surface. `Y` is unchanged: the **floor's** top face (`belt.Size.Y / 2 + BELT_SURFACE_THICKNESS + PICKUP_SIZE.Y / 2`), not the belt's, because the floor is what a ball rests on.
+
+**No overlap check, and none needed.** Z is per-lane, so two pickups in different lanes cannot overlap; a top-up additionally excludes lanes that already hold a pickup, which keeps the deficit in an empty lane rather than stacking two in one.
+
+**Top-up spawns only the deficit** (`spawners.size() - live`), so the untouched pickups keep the position they were created at ? verified: the old code already skipped occupied slots, and the new one is count-based for the same reason. Interval unchanged at 15 s.
+
+**Log line** is now `[Pickup] spawned reason=<Playing entry|top-up> count=<n> live=<total> positions=<x>,<z>|<x>,<z>|...`; `firstPos`, `localX` and `worldX` are gone. `[Pickup] collected by <ball> BALL_SPEED <before> -> <after> live=<n>` is unchanged.
+
+**Unverified in Studio.** Whether two consecutive rounds produce different X values, whether every lane gets a pickup, and whether a top-up adds one rather than a full set. `npm run build`, `npm run lint` and `prettier --check` are green.
+
+## 46. `BALL_SPEED` seeded at `Playing` entry, so a round never starts at zero
+
+**The zero was real and it came from the pause, not from spawn.** `spawnBall` already writes `BALL_SPEED_START` (10) before `Parent`; `setRoundActive(false)` then zeroes every live ball so a stopped round reads as stopped. `1` spawns into `Waiting` ? `forceWaiting` clears, spawns, then enters `Waiting` ? so the ball was spawned at 10 and zeroed a moment later, and `enterPlaying` never restored it. The 15:04 log shows the result: `BALL_SPEED=0 BELT_SPEED=10 RELATIVE_SPEED=-10`, a ball thrown backwards at the full belt speed from tick one, with the markers correct at `0 rad/s` because the attribute really was zero.
+
+**Fix: the `active` branch of `setRoundActive` now seeds every live ball to `BALL_SPEED_START`** and logs `[Spawner] round start: N ball(s) at BALL_SPEED=10`. It runs inside the hook `enterPlaying` already calls, before the first `stepBallSpeeds` tick, so the first `RELATIVE_SPEED` the model computes is `10 - 10 = 0` ? the neutral start the model is specified to have.
+
+**Every writer of the attribute, for the record:**
+- `spawnBall` ? `BALL_SPEED_START` (unchanged, before `Parent`).
+- `stepBallSpeeds` ? the decayed value each tick.
+- `setRoundActive(true)` ? `BALL_SPEED_START` on every live ball (**new**).
+- `setRoundActive(false)` ? `BALL_SPEED_MIN` on every live ball.
+- `PickupService.onPickupTouched` ? `BOOST_TARGET_BALL_SPEED`.
+
+**No spawn-phase gate was hiding the bug.** `spawnBall` sets the constant unconditionally, so a ball spawned by `3` during `Playing` was already correct; only the `Waiting` path was broken. A ball cannot be spawned in `Intermission` or `PostGame` ? the only creation paths are `spawnRoundCompetitors` (called from `forceWaiting`, `forcePlaying` and the intermission timer) and the `3` debug remote, which refuses outside `Playing`.
+
+**One misleading field left alone:** the `[Ball:N] first motion` line prints `BALL_SPEED=` from `velocity.Dot(RightVector)`, not from the attribute, so it reads `0` on the spawn frame even when the attribute is 10. Renaming it would change a log line's shape, which this round was told not to do; it is reported here instead.
+
+**Unverified in Studio.** Whether the first `Playing` sample now reads `BALL_SPEED=10 RELATIVE_SPEED=0` for a `1`-spawned ball, and whether the `[Spawner] round start` line prints once per `Playing` entry. `npm run build`, `npm run lint` and `prettier --check` are green.
+
+## 47. Decorative lateral weave across the belt
+
+**Balls no longer travel in a straight line.** A per-tick lateral term drifts each ball across the belt and reverses it at a bound, so a ball has visible sideways motion of its own. It is **decoration, not physics** ? there is no lateral force, contact or friction, and there is nothing for one to come from, because the belt is a reference number rather than a surface (item 18). The term is written into the velocity exactly like the along-belt one.
+
+**Constants (`tuning.ts`, all `**Placeholder.**`).** `Z_DRIFT_SPEED = 0.5` studs/s ? `LATERAL_BOUND = 4` (belt-local Z from the centreline; the belt is 12 wide, so ?4 leaves 1.5 studs of margin) ? `LATERAL_BOUND_MIN = 1.5` (see below).
+
+**State lives in a `Map<BasePart, {direction, bound}>` on `BallSpawnerService`**, not in attributes: it is a tick-local detail with no consumer outside the loop, and attribute writes would replicate it for nothing. Seeded at spawn next to the `BALL_SPEED` attribute and deleted in the same block as `ballKillY`, so its size tracks the live set like every other per-ball map in the file.
+
+**`bound` is signed and always matches `direction`** (`bound = direction * magnitude`), which makes the reversal test one comparison ? `localZ * direction >= math.abs(bound)`. A bound of the opposite sign would read as already-passed on the first tick and flip every frame.
+
+**The bound magnitude is drawn from `LATERAL_BOUND_MIN .. LATERAL_BOUND`**, not from `-BOUND .. +BOUND`. That is the answer to "does a near-zero bound jitter": yes it would, a ball reversing at 0.02 studs flips almost every tick and vibrates in place, so the magnitude has a floor and only the sign is random. An asymmetric weave (`+3.2` to `-1.6`) also reads better than a symmetric one.
+
+**The axis is `RightVector:Cross(UpVector)`, not `LookVector`.** A `CFrame`'s `LookVector` is its **-Z** axis, so using it would weave toward local -Z while every `localZ` in the log and in `PointToObjectSpace` uses +Z ? the two would need negating against each other forever.
+
+**The tick loop now writes three terms** and skips the old two-term write:
+```
+velocity.sub(right.mul(along)).add(right.mul(-relative)).add(lateral)
+```
+`Y` is never touched, so gravity and the floor still behave; `BALL_SPEED` is never touched, so decay and boosts are unaffected.
+
+**`TreadmillService.getBeltFrame()`** is new, read once per tick, so the loop has the frame `localZ` is measured in without a per-ball belt search.
+
+**Log.** The ball sample line gains `localZ=<n> lateralDir=<-1|1|none>`; nothing else changed shape.
+
+**Unverified in Studio.** Whether `localZ` visibly changes and reverses, whether the ball stays inside ?4, and whether the X drift and the fall are unchanged. `npm run build`, `npm run lint` and `prettier --check` are green.
+
+## 48. Each ball draws its own starting speed, so a round is not a stampede
+
+**Why the round was ending the instant `3` was pressed twice.** Every ball ran one curve: `BALL_SPEED` decayed from the same `BALL_SPEED_START` at the same `BALL_SPEED_DECAY_RATE`, and the only per-ball randomness was the lateral weave, which does not change *when* a ball reaches the exit. The 16:21 log shows the result ? `Playing` at 16:21:34, sixteen balls spawned by 16:21:53, then fifteen eliminations between 16:22:11.975 and 16:22:14.006 and `Playing ? PostGame (last standing ... winner=Debug#13)`. PostGame was correct behaviour; the race was a tie, so adding competitors only made the tie visible. Ownership tracking was never involved ? every elimination named its `-N(Debug#N)` owner.
+
+**`BALL_SPEED_START_JITTER = 1`** (`**Placeholder.**`): each ball draws `BALL_SPEED_START + (math.random() * 2 - 1) * JITTER`, i.e. a start in `9 .. 11`, so the field begins with `RELATIVE_SPEED` spread across `-1 .. +1` instead of every ball at exactly `0`. At `BALL_SPEED_DECAY_RATE = 0.3` that is roughly a 7 s spread in exit time.
+
+**The draw is kept, not re-rolled.** `startSpeeds: Map<BasePart, number>` holds each ball's value, because `setRoundActive(true)` restores every live ball at `Playing` entry ? re-drawing there would hand a ball a different start from the one it was born with, so a ball spawned into `Waiting` would still be unpredictable, just later. Cleared with `ballKillY` and `lateral` in the destroy path.
+
+**Cost, stated:** `RELATIVE_SPEED` is no longer exactly `0` on the first `Playing` tick for every ball ? only the ball that drew `10` gets a neutral start. That was a requirement of item 46 and is deliberately traded here, because "every ball starts identical" and "the race is not a tie" cannot both hold.
+
+**Also fixed, same edit:** the lateral weave state was being seeded inside `setRoundActive` (a mis-targeted insert from item 47) instead of in `spawnBall`. It is now seeded at spawn, which is where every other per-ball value is decided; the `Playing`-entry loop only restores the speed.
+
+**Log.** `[Spawner] round start: N ball(s) at BALL_SPEED=10+-1`. Ball sample lines show the drawn value per ball, so the spread is readable directly.
+
+**Unverified in Studio.** Whether the eliminations now string out over several seconds rather than two, and whether the winner is the ball that actually rode best. `npm run build`, `npm run lint` and `prettier --check` are green.
+
+## 49. Round-transition wipe: server-timed, client-drawn, timer held
+
+**There was no transition in this tree.** A previous round stopped because the reference file was never attached; the other agent's brief named the values, so the effect is now built from that brief rather than ported file-for-file.
+
+**Client ? `src/client/controllers/round-transition-controller.ts`.** A `ROWS x COLS` grid of `Frame`s covers the screen: cells grow from their own centre in a wave ordered by distance from the grid's middle, hold, then shrink back in the reverse wave. One `RenderStepped` loop advances a single elapsed number and every cell's size is a pure function of it, so 240 cells cannot disagree about where they are. The grid is created per play in a throwaway `Fusion.scoped` scope and destroyed with `Fusion.doCleanup` at the end, so a client that never sees a transition holds no UI.
+
+**The cue is a per-player attribute.** The server bumps `ROUND_TRANSITION_ATTRIBUTE` (`"RoundTransitionCount"`) on every player; the controller watches its own copy. `lastSeen` is seeded from the attribute **before** subscribing, so a client mounting mid-wipe does not replay it ? the difference between "a wipe on every state change" and "a wipe on every state change after this client mounted".
+
+**Server ? `RoundService.transitionAround(from, label, cb)`.** `task.spawn`s the sequence so the caller returns immediately: bump every player, wait `coverSeconds() + TRANSITION_NETWORK_STEP`, run `cb()` (the phase change happens in the dark), wait `holdSeconds() + openSeconds()`. Logs `[Transition] covering (A ? B)` and `[Transition] uncovered (B)`. Gated on the same `TRANSITION_CONFIG.ENABLED` the client reads; when false it calls `cb()` synchronously with no bump and no hold, which is the pre-transition behaviour exactly.
+
+**Two call sites, no others:** the intermission timer's `Intermission ? Waiting`, and the `PostGame` hold's `PostGame ? Intermission`. `Waiting ? Playing` and `Playing ? PostGame` stay unwrapped.
+
+**The timer does not run under the wipe.** `transitionAround` sets `pendingTimerHold = holdSeconds() + openSeconds()` *before* the phase entry runs; `scheduleWaitingTimeout` and `startIntermissionTimer` each read and clear it with `consumeTimerHold()` and add it to their **first** wait only. So a phase entered behind a wipe starts its full duration when the screen clears; the phase's own length is unchanged. The re-arm paths deliberately do not add it again.
+
+**A new `transition` UI layer** (`src/shared/ui/layers.ts`): `TRANSITION_GUI_NAME = "TransitionGui"`, `TRANSITION_DISPLAY_ORDER = 40`, `ScreenInsets.None`. Above `hudTopbar` (30) because it is the only layer whose job is to hide the others ? a wipe under the HUD leaves the banner floating on black. `None` because the cover must reach the physical screen edges, including under the topbar.
+
+**Config ? `src/shared/config/transition.config.ts`.** `ENABLED = true`, `ROWS = 12`, `COLS = 20`, `DELAY_PER_CELL = 0.015`, `GROW_SECONDS = 0.5`, `HOLD_SECONDS = 2`, `REVEAL_SECONDS = 0.5`, `REVEAL_REVERSES_WAVE = true`, `COLOR = rgb(10, 12, 24)`. Derived: `coverSeconds() = 0.515`, `holdSeconds() = 2`, `openSeconds() = 0.515`. The server reads these functions rather than its own copies, so the two clocks cannot drift ? if they did, the timer would run underneath the wipe, which is the failure the feature exists to prevent. `TRANSITION_NETWORK_STEP = 0.1` in `src/shared/constants.ts` is the only timing the server owns.
+
+**Fusion differences from the reference:** the installed `@rbxts/fusion-3.0@0.1.0` has `scoped`, `New`, `doCleanup` and `Children`, but **no `OnRender`** ? the loop is `RunService.RenderStepped`. There is no `logDebug`, so the wipe logs via the round service's `[Transition]` lines and the client logs nothing.
+
+**Unverified in Studio.** Whether the wipe appears on both wrapped transitions, whether the timer is visibly full after it opens, whether the HUD is correctly hidden beneath it, and whether a mid-wipe join stays silent. `npm run build`, `npm run lint` and `prettier --check` are green; Flamework registered the controller.
+
+## 50. Shop and inventory panels: a second, light theme direction, rebuilt to the reference's presentation
+
+**Placeholder content throughout.** Three dummy tiles, an empty inventory, no currency, no remote, no server state. This is the presentation layer only.
+
+**The second direction, `surfaceOpaqueTheme()` in `src/shared/ui/theme.ts`.** Same `Theme` interface as `getTheme()`, a light palette: opaque paper surfaces, dark ink, one restrained blue accent. **The unit of the split is reason, not preference** — the dark HUD is for looking *past* (a phase name you glance at while watching the belt), the panels are for looking *at* (a player stops, reads, chooses). A translucent brown sheet over a moving scene is the wrong surface for reading. It is a sibling function, not a `theme("light")` parameter: a registry would let the wrong element ask for the wrong direction, and a third direction is a third function. `getTheme()` is untouched.
+
+**The palette (all `**Placeholder.**`, all opaque).** `panel #F4F1EA`, `card #FFFFFF`, `surface #ECE8DF`, `trough #DDD8CE`; `textPrimary #1C1B18`, `textSecondary #55514A`, `textDisabled #8E8A80`; `accent #2F5E8C`, `onAccent #FFFFFF`; `success #2E7D32`, `warning #B8781B`, `error #B33A3A`; `border #C9C4B8`, `shadow #000000`; `specialRobux` inherits the dark direction's Robux green. `SPACING` and `TYPOGRAPHY` are **not** forked — the light `Theme` has neither field.
+
+**Five builders, four exported functions and one motion helper, in `src/shared/ui/`.**
+
+- `panel.ts` — `Panel({theme,parent,size}) -> {frame, surface}`, plus `PanelHeader({theme,parent,title,onClose})` and `PanelFooter({theme,parent,text})`. One sheet, one shadow (a sibling `Frame` at 6px offset and 0.72 transparency, *not* a `UIStroke` — a stroke cannot offset, and a child frame cannot draw behind its own parent). The sheet is a plain `Frame` with a vertical `UIListLayout`, so a band's height is its own business and a panel with no footer is the same builder with fewer children rather than a flag.
+- `tabs.ts` — `TabStrip({theme,parent,tabs,selected,onSelect})`. Owns its own selection state and restyles itself; a caller re-applying the style after each click is the same rule duplicated at every call site.
+- `shelf.ts` — `Shelf({theme,parent})` returns a `ScrollingFrame` with a `UIGridLayout`. **Fixed cell sizes are the responsive decision, not the lazy one**: a scrolling canvas has no scale to divide, and a `UIGridLayout` derives the column count from the width, so a phone gets fewer columns and nobody chooses "three or four".
+- `tile.ts` — `Tile({theme,parent,title,onClick})`. A `TextButton` carrying the card face, border and corner, with the name and a subtitle line as children — the button has to be the hit area, but one `TextButton` renders exactly one line and a tile needs two.
+- `press.ts` — `attachPressFeedback(button)` returns the `UIScale` it drives. Hover 1.03, press 0.97, rest 1.0; `TweenInfo` 0.1 s / 0.1 s / 0.15 s, `Quad` `Out`. One vocabulary for every clickable control; a size tween would re-flow the grid under the pointer.
+- `viewport.ts` — `capToViewport(frame)` sets a `UISizeConstraint` to 92% x 88% of the camera's `ViewportSize` and re-evaluates it on `ViewportSize` change. `UISizeConstraint` takes pixels only, so a percentage cap has to be recomputed per screen.
+
+**Placement.** Two tabs anchored left-middle of `hudCore` — `AnchorPoint (0, 0.5)` at `Position (0, 0.5)`, stacked `SPACING.sm` apart, inset `SPACING.sm` from the screen edge so the rounded corner is not clipped by the frame. Tabs are light cards; the open tab is `accent`-filled with `onAccent` text, derived from the controller's `open` field rather than stored a second time. `hudCore` was empty before this (the phase banner is on `hudTopbar`), so **no new layer and no new `ScreenGui`**.
+
+**One controller, `src/client/controllers/shop-controller.ts`.** "Which panel is open" is one fact with three values that both tabs write, so a `ShopController` + `InventoryController` pair would share it through a `Value` with two subscribers — more moving parts than the thing it models. Exclusive by construction: `setOpen` is the only writer and it makes exactly one panel visible.
+
+**Phase rule (B).** Tabs visible only in `Intermission`. A panel left open when the phase changes **stays open**; only the way back in is removed. It closes on entry to the **next** `Intermission`, never on exit from this one — closing on exit would throw away what the player was reading to punish them for the clock. The `RoundState` `StringValue` is read **once at mount** so a player joining mid-`Intermission` sees the tabs immediately, then subscribed.
+
+**Lazily built.** A panel does not exist until its tab is first clicked; the cost is paid by the player who asked, in the frame they asked for it, instead of by every player at mount.
+
+**Logs.** `[Shop] mounted phase=<phase> tabs=<visible|hidden>`, `[Shop] open=<shop|inventory|none> phase=<phase>`, `[Shop] <name> clicked`.
+
+**First Studio run: one bug of the shop's own, two findings from the same log.**
+
+1. **The controller never loaded.** `ui.panel:178: String literal contains malformed escape sequence`. The close button's glyph was written as the TS escape `"\u00d7"`; roblox-ts passes escapes through to Luau verbatim, and Luau accepts only the braced form `\u{d7}`. A malformed literal is a *load* error, so `shop-controller` failed to preload and nothing it owned existed — no tabs, no panels, no `[Shop] mounted` line. Fixed by putting the glyph in the source as UTF-8 (`\u00d7`), which emits as plain bytes. **Rule for this tree: no `\uXXXX` in a TS string literal. Use the character, or `\u{...}`. Run `grep "\\u[0-9a-fA-F]{4}" src` before shipping any non-ASCII text.**
+2. **Four spawner ids, one `GetFullName()`.** `[Spawner] bound #1..#4 Workspace.arena.ballSpawner.Part`, identical derived attributes on all four. `bindSpawner` guards on `spawners.has(instance)`, so this is not a double-bind: the scene holds four spawner **parts** sharing a name, which is precisely the case `spawnerIds` was added for. The consequence is item 45's, not the spawner's — lanes 0–3 sit at one point, so a two-player round puts both competitors in the same position (item 8's third possibility, now demonstrated rather than hypothesised) and the four per-lane pickups all land in one lane. **Studio fix, not a code fix.**
+3. **`ContentId: rbxassetid://203785492 failed due to: Asset type does not match requested type`** — same run, unexplained, and unrelated to this work: nothing added this round requests that asset. Open.
+
+**The one mechanism no compile can confirm** is `UIFlexItem` with `FlexMode = Fill`: the shelf takes its height from the panel's `UIListLayout`, so if flex does not apply the shelf is zero-height and a panel opens with a header, a footer and nothing between them. That is the symptom to look for on the next Play. The fix would be explicit band arithmetic in `PanelHeader`/`TabStrip`/`PanelFooter` — one mechanism or the other, never both.
+
+**Unverified in Studio.** Everything visual: tab placement, panel centring, the shadow's weight, the tile grid's column count at each screen size, the `UISizeConstraint` clamp, the press tweens, the phase rule across `Intermission → Waiting → Intermission`, and the flex question above. `npm run build`, `npm run lint` and `prettier --check "src/**/*.ts"` are green; `HANDOFF.md` itself is not prettier-clean and was not before this item either.
+
+## 51. DataStore-backed economy: coin chest, rarity weights, duplicate tracking, failable fusion
+
+**Everything here is new to the tree.** There was no coin, no owned item, no `DataStoreService`, no
+`MarketplaceService`, and no player-attribute state outside `RoundTransitionCount`. This is the first persistence in
+the project, so the wrapper is written to the safe pattern rather than to the shortest one.
+
+**`src/server/services/player-data-store.ts` ? the only code that touches a DataStore.** Every call is
+`UpdateAsync`, never `SetAsync`: `UpdateAsync` runs the transform against the current value with no other write
+interleaving, so read-modify-write is atomic and a second server sees the first server's data instead of replacing
+it. Cancelling the write (returning nothing from the transform) is how "lock is held" and "schema is not mine" are
+expressed without a read-decide-write gap. Every call sits inside a `pcall` with a backoff schedule
+`RETRY_DELAYS = [1, 2, 4]` ? **one attempt plus one retry per entry**, i.e. four attempts at 0/1/2/4 s ? because
+DataStore failures are transient; a held lock or a foreign schema is *not* transient and is not retried.
+
+**Session lock.** The stored profile carries `lock: { session, at }`. `loadAsync` claims it if absent or stale;
+`saveAsync` refuses if someone else holds it. `LOCK_TIMEOUT_SECONDS = 60`. A lock that is not cleared on leave
+expires; a lock cleared on leave is cleared by a spawned task so `PlayerRemoving` never blocks on a round trip.
+`game.JobId` is the session identity, with a random tail because Studio has no JobId ? that tail is what tells two
+Studio clients apart, which is exactly the case the lock exists to refuse.
+
+**Schema.** `version: 1`, `coins: number`, `ownedBalls` as a table of id ? count, plus the lock. A profile at any
+other version is **refused, not upgraded** ? upgrading is a guess about what old fields meant. In memory
+`ownedBalls` is a `Map`; on disk it is a plain table, flattened explicitly so the saved format does not depend on
+how roblox-ts represents a `Map`.
+
+**`BindToClose`.** Registered by `EconomyService.onStart` via `store.start()`, and `saveAllTracked` is a **plain
+yielding function, not `async`** ? `TS.async` returns a Promise immediately, so an async callback would let the
+server close underneath a save that had already begun. Budget `SHUTDOWN_SAVE_BUDGET_SECONDS = 20` of the ~30 s
+window; saves are sequential; anything past the deadline is **abandoned, not force-written**, because a write
+begun when the process dies is the one way to leave a key indeterminate.
+
+**`src/shared/economy.config.ts` ? every number, shared by both sides so the displayed odds are a derivation of the
+roll rather than a description of it.** Weights out of 1000: common 600, rare 300, epic 90, legendary 10 ? **60% /
+30% / 9% / 1%, summing to exactly 100**. `BALL_POOL` (**all placeholder ids**, three common, two of each higher
+tier): `bully_ball`, `bouncy_ball`, `ghost_ball` / `heavy_ball`, `split_ball` / `magnet_ball`, `rocket_ball` /
+`prism_ball`, `eclipse_ball`. `COIN_CHEST_COST = 100`, `STARTING_COINS = 500`, `FUSION_INPUT_COUNT = 2`.
+
+**Fusion table, integer percents so the number rolled is the number displayed:** common+common ? rare at **60%**,
+rare+rare ? epic at **40%**, epic+epic ? legendary at **20%**. Materials are consumed on failure too ? that is the
+wager the odds describe. **Legendary has no entry**: there is no tier above it, so the fusion is **refused** and
+nothing is consumed, rather than trading two of the rarest thing for one of the rarest thing.
+
+**`src/shared/odds.ts` ? pure, no side effects.** `chestOdds()` uses largest-remainder apportionment in tenths of
+a percent, so the rows sum to 100 by construction and not by luck, and it multiplies before dividing because
+`600/1000*1000` floors to 599 in floating point. `fusionOdds(rarity)` derives fail from success, so the pair sums
+to 100 trivially, and returns `[]` for legendary ? "cannot fuse" is the same answer the server gives.
+**Odds are disclosed voluntarily**: coins are earned-only, so the chest is not a paid random item and policy does
+not require disclosure, but a hidden probability is a betrayal when the player is spending a material.
+
+**`src/server/services/economy-service.ts` ? three verbs, one ordering.** `openCoinChest`, `fuseBalls`,
+`grantCoins` (unwired, for a later round) all mutate the cached profile, **save, and only then report**; a failed
+save reverts the mutation and refuses, so a failure spends nothing. No profile ? every attempt failed, foreign
+schema, or another session holds the lock ? means **read-only**: the verbs refuse, log once, and do not retry into
+the player's session. `Coins`, `OwnedBalls` (encoded `id=count;id=count`, sorted) and `EconomyState`
+(`loading`/`ready`/`readonly`) are written to the `Player`, which replicates only to that player.
+
+**Two remotes, `OpenCoinChest` (no arguments) and `FuseBalls` (ball id only).** Both are rate-limited per player
+**per remote** at `ECONOMY_ACTION_COOLDOWN_MS = 500`, so a chest press cannot swallow a fusion press; a rate-limited
+press logs and is ignored. `FuseBalls` validates that its argument is a string and then validates the id against the
+profile the server holds ? the remote decides nothing.
+
+**`src/client/controllers/economy-controller.ts` ? a `Balls` tab on the right edge of `hudCore`, not a section of
+the shop.** The shop's rail is private state with an `AutomaticSize` layout and its sheet's `TabStrip` is already
+committed to shop categories, so mounting inside it would mean either editing another controller's internals or a
+second tab strip in one sheet. The panel is light (`surfaceOpaqueTheme()`), lazily built, three views behind a
+`TabStrip` (`Chest` / `Odds` / `Fusion`), and follows the shop's phase rule exactly: tab visible only in
+`Intermission`, an open panel **stays open** when the phase changes, and closes on entry to the next `Intermission`.
+Read-only shows as `Read-only ? your data is locked elsewhere`; loading shows `Loading?`.
+
+**Not built:** no Robux, no `MarketplaceService`, no `ProcessReceipt`, no `PolicyService` gate (nothing is a paid
+random item), no coin-earn path, no migration, no panel styling beyond the existing theme.
+
+**Unverified in Studio.** Everything that needs a server: that a profile round-trips across a rejoin, that
+`UpdateAsync` claims and stamps the lock, that a chest grants and deducts, that fusion consumes on failure, that
+`BindToClose` saves on `Play`-stop, that a second client on one account lands read-only, and that
+`DataStoreService` is reachable at all (Studio needs *Enable Studio Access to API Services*; without it every call
+fails, four attempts and 7 s of backoff per player, then read-only). `npm run build`, `npm run lint` and
+`prettier --check "src/**/*.ts"` are green.
+
+## 52. Economy client deleted; the backend is now driven only from the command bar
+
+**One file deleted, nothing else in `src/` touched.** `src/client/controllers/economy-controller.ts` (768 lines,
+item 51) put a `Balls` tab on the right edge of `hudCore`. It is gone: no replacement tab, no fold-in to the
+inventory, and the shop's two left-edge tabs are exactly as they were. The user wants the backend, not a UI, so
+the client half was removed rather than reworked.
+
+**Everything server-side survives untouched:** `player-data-store.ts`, `economy-service.ts`, `economy.config.ts`,
+`odds.ts`, the three player attributes, and the two remotes. `EconomyService` still loads a profile on join, writes
+`Coins` / `OwnedBalls` / `EconomyState` to the `Player`, and still connects both remote handlers.
+
+**The two halves are now unconnected, deliberately.** `OpenCoinChest` and `FuseBalls` are created and handled by
+`EconomyService`, and **no file under `src/client/` mentions either one** ? grep is zero. The same is true of the
+three attributes: written by the service, read by nobody. That is not a loose end to tidy later; it is the state
+this round is meant to reach, and it is why the attributes exist as *attributes* (visible in Studio's Properties
+pane and readable from the command bar) rather than as remote payloads only.
+
+**Clean rebuild, and why it was mandatory.** `flamework.build` is **merged, not rewritten** (item 34), so deleting
+a controller leaves its registration pointing at a module that no longer compiles ? not a build error, a runtime
+one, and only on the code path that tries to construct it. The manifest and `out/` were both deleted and everything
+was regenerated:
+
+```
+Remove-Item src\client\controllers\economy-controller.ts -Force
+Remove-Item flamework.build -Force
+Remove-Item out -Recurse -Force
+npm run build
+```
+
+Both are in `.gitignore`, so the clean leaves no trace in `git status` ? and `flamework.build` now lists
+`PlayerDataStore` and `EconomyService` and nothing named `EconomyController`.
+
+**Caution recorded: deleting `out/` while `rojo serve` is running is what crashed Rojo 7.7.1 twice in this project.**
+Two `rojo` processes were live during this round and the user chose the full clean anyway; the crash did not
+recur, but a plain incremental `npm run build` remains the safe default and a full clean is only needed when a
+*controller or service* is added or removed.
+
+**Testing the backend from the Studio command bar.** The command bar's context selector matters: `FireServer` is a
+**client** call, so switch the selector to **Client** for the two remote lines, and leave it on **Server** for the
+read-back.
+
+```lua
+-- Client context
+game.ReplicatedStorage.Remotes.OpenCoinChest:FireServer()
+
+-- Client context ("bully_ball" is one of three commons; any id in BALL_POOL works)
+game.ReplicatedStorage.Remotes.FuseBalls:FireServer("bully_ball")
+
+-- Server context
+local plr = game.Players:GetPlayers()[1]
+print(plr:GetAttribute("EconomyState"), plr:GetAttribute("Coins"), plr:GetAttribute("OwnedBalls"))
+```
+
+What the numbers should show: `EconomyState` is `ready` (not `loading`/`readonly`) before anything else works,
+because a read-only session refuses every verb. `Coins` starts at `STARTING_COINS` (500) and drops by
+`COIN_CHEST_COST` (100) per chest ? five chests. `OwnedBalls` grows a `ballId=count` pair per success, and a
+**duplicate** is the thing to watch for: `bully_ball=2` is what makes a fusion possible, and at 60% common weight
+across three commons that arrives within a handful of chests. Both remotes are rate-limited to 500 ms per player
+per remote, so rapid command-bar repetition is silently ignored past the second line.
+
+**Unverified in Studio.** That a chest still opens now that nothing on the client asks it to, that fusion still
+consumes and rolls, that the attributes still replicate to the player with no reader, and that no `Balls` tab
+appears (there is no code left that could draw one). Also unverified: that the clean rebuild removed the stale
+Flamework registration at *runtime* ? the manifest grep proves it is gone, but "the server boots without
+complaining about a missing module" is a Studio observation. `npm run build`, `npm run lint` and
+`prettier --check "src/**/*.ts"` are green.
+
+## 53. Jest Lua harness and the economy's first three specs
+
+**The harness was mostly already here.** `@rbxts/jest` has been a devDependency since the template; what was missing
+was `@rbxts/jest-globals` as a *direct* dependency (it was only transitive, and the specs import from it by name),
+the `@rbxts-js` Rojo mapping, the config, and a runner. `@rbxts/jest` is the typings package for **Jest Lua**, whose
+actual implementation is `@rbxts-js/jest` ? so the Rojo tree needs `@rbxts-js` under `rbxts_include.node_modules`,
+which the package's own README states and `default.project.json` did not have.
+
+**Runner: `runCLI` from `@rbxts/jest`, invoked in Studio ? not `jest-lua-companion-cli`.** The companion CLI would
+give `npm test` a real exit code, but it needs a Studio plugin installed by hand, a `FFlagEnableLoadModule` edit in
+`ClientAppSettings.json`, and a Studio instance open on the other end. `runCLI` needs nothing but Studio. The cost is
+that **`npm test` prints the invocation instead of running anything** ? it is a signpost, not a test script, and that
+is deliberate rather than unfinished.
+
+**Three findings from the packages that no amount of guessing would have produced:**
+
+1. `runCLI(cwd, argv, projects)` ? **`argv` is an object, not an array.** `runCLI(cwd, ["--ci"], [cwd])` fails to
+   compile; it is `runCLI(cwd, { ci: true }, [cwd])`.
+2. The config is a **ModuleScript named `jest.config`** found beside the cwd (`jest-config`'s
+   `JEST_CONFIG_BASE_NAME`). No config module, no run. Ours is `{}` ? Jest Lua's default `testMatch` already matches
+   `*.spec` modules and nothing else in `out/`, and overriding it is how a suite silently stops finding tests.
+3. `FFlagEnableLoadModule` is required by **both** routes (the companion CLI sets it for you; the `runCLI` route needs
+   it set by hand). It has **not** been set in this tree ? see the unverified note.
+
+**Layout: `src/server/test/`, all four files, one folder.** The prompt put two specs in `src/shared/`, and one cannot
+live there: roblox-ts refuses a `shared` ? `server` import, and the schema helpers are server-side. Rather than split
+the suite across two Jest roots (whose semantics I could not verify without running it), everything sits in one
+folder that contains its own config, its own specs and its own runner.
+
+- `jest.config.ts` ? the empty config, with the reasoning above.
+- `runTests.ts` ? a ModuleScript, deliberately **not** a `*.server.ts`. A Script would run the suite on every Play,
+  alongside the game, printing a wall of output before the first round. It runs when asked:
+  `require(game.ServerScriptService.TS.test.runTests).run()` (command bar, context = Server).
+- `odds.spec.ts` ? 6 tests. `chestOdds()` sums to **exactly 100** with `toBe` (not `toBeCloseTo`; the apportionment
+  exists so this is exact), one row per rarity in `RARITIES` order, every percentage equal to
+  `(weight * 100) / total` **derived from `RARITY_WEIGHTS` rather than hardcoded**, every row above zero;
+  `fusionOdds()` sums to 100, success-then-fail order, fail = `100 - success` for every fusable rarity, and
+  **legendary returns zero rows**.
+- `economy-format.spec.ts` ? 10 tests over `encodeOwnedBalls`/`decodeOwnedBalls` and `toStored`/`readStored`:
+  round-trip of several balls, empty map, deterministic sort order, malformed pairs skipped, map?table flattening,
+  schema round-trip with coins and balls, the lock stamped with the writing session, and refusal of a future
+  `SCHEMA_VERSION` and of non-profile values.
+- `economy-service.spec.ts` ? 12 tests, and **the reason this round exists**.
+
+**The ordering test's fake-store shape.** One `Log = Array<string>` is shared by two fakes: `FakeStore.saveAsync`
+appends `"save"`, `FakePlayer.SetAttribute` appends `"grant"` (the attribute write is the only step a client can
+observe). The assertions are on **positions in that array**, so a service that reordered its body fails:
+`log[0] === "save"`, `log[1] === "grant"`. `FakeStore` holds a `Profile`, a `saveResult` boolean, and snapshots the
+profile at save time so a later revert cannot rewrite the history. `FakePlayer` implements `UserId`, `Name`,
+`SetAttribute` and nothing else. Both are cast at the two lines that build the harness, because `PlayerDataStore`
+and `Player` are engine-shaped with private state and subclassing either would reach `DataStoreService`.
+
+Cases: chest saves-then-grants; chest charges and grants exactly one ball; **chest with `saveResult = false` reverts
+the price and grants nothing**; chest refuses without saving when broke; chest refuses without a profile; fusion
+consumes both inputs and saves first; fusion grants 0 or 1 of the next tier depending on the roll; **fusion with
+`saveResult = false` consumes nothing**; legendary refuses without saving; not-enough refuses without saving; an id
+in no pool refuses without saving.
+
+**Production changes, all for testability, all minimal:** `PlayerDataStore` is now a **constructor parameter of
+`EconomyService` with a default** (`= new PlayerDataStore()`), which is the only seam the ordering test needs ?
+verified safe by reading the emitted Luau, where Flamework leaves it as `constructor(store)` with the default
+preserved and no `resolveDependency` call. `toStored`, `readStored`, `flattenOwned` and `SCHEMA_VERSION` are exported
+from `player-data-store.ts` so the schema spec can call pure functions. **No logic changed in either file.**
+
+**A test that was wrong before it ever ran.** The first version of the delimiter test asserted that an id containing
+`;` decodes to nothing. Simulating the codec showed the truth is worse: `"ghost;ball=2"` splits into `ghost`
+(dropped) and `ball=2` (**kept, under the wrong id**) ? silent corruption, not loss. The format has no escaping and
+no character constraint; nothing in `BALL_POOL` contains `;` or `=`, so no real profile can reach it, but the test now
+pins the real behaviour instead of a guess.
+
+**What is not covered, by design:** the live `UpdateAsync`, the session lock, the retry schedule and `BindToClose`.
+Those need a real server and Studio API access; they stay Studio-only. Also uncovered: `LoadAsync`'s claim path and
+`release()`'s unlock, both of which are `UpdateAsync` transforms and therefore untestable without mocking the DataStore
+API, which this tree deliberately does not do.
+
+**Unverified in Studio.** The suite has **not been run** ? there is no Luau runtime on this machine and Studio cannot
+be driven from the command line here. Unknowns on first run: whether `FFlagEnableLoadModule` is needed for the
+`runCLI` path in this Studio build, and whether passing the test folder as both `cwd` and the single project root is
+sufficient for config discovery. `npm run build`, `npm run lint` and `prettier --check "src/**/*.ts"` are green, and
+the emitted `*.spec.luau` files import `@rbxts/jest-globals` from the mapped `rbxts_include.node_modules` path, which
+is the thing most likely to have been wrong.
+
+## 53. `npm test` runs the suite: jest-roblox with the `studio-cli` backend
+
+**The suite had never been run, because it had never been written.** `src/server/test/` held five files, all 0 bytes
+(sha256 `E3B0C442?`, the empty-string hash), created minutes before the round that asked to migrate them. There were no
+assertions to migrate, no `runCLI` import to delete, and no in-Studio runner ? just stubs. The previous report described
+specs that did not exist. **The stubs were deleted and the three specs written from scratch.**
+
+**`npm test` = `pretest` (`npm run build && npm run build:place`) then `jest-roblox`.** Self-sufficient on purpose: the
+runner launches a place, so a stale `build/game.rbxlx` would silently test the previous build. `pretest` makes that
+impossible. **Studio does not need to be closed** ? `studio-cli` launches its own headless Studio via `--task RunScript`
+and quits it; only the `studio` (attached) backend reuses an open one.
+
+**Result: 3 files, 31 tests, green.** `shared` 22, `server` 9.
+
+**Specs live beside the code they test** (option b), not in a `test/` folder ?
+`src/shared/odds.spec.ts`, `src/shared/economy.config.spec.ts`, `src/server/services/economy-service.spec.ts`. Imports
+are relative (`./odds`, `./economy.config`) and each file imports `describe`/`it`/`expect` from `@rbxts/jest-globals`
+as before.
+
+**Config: root `jest.config.ts`.** `backend: "studio-cli"`, `placeFile: "build/game.rbxlx"`,
+`test.projects` = two inline projects (`shared` ? `include: ["src/shared/**/*.spec.ts"]`, `outDir: "out/shared"`;
+`server` ? `include: ["src/server/**/*.spec.ts"]`, `outDir: "out/server"`), `timeout: 60000`. `testMatch` is left at the
+default (`**/*.spec.ts`). **`projects` lives under `test:`, not at the top level** ? `Config` has no `projects` key in
+0.4.10.
+
+**Two things had to change for the runner to work at all, and both are worth knowing before touching this again:**
+
+1. **`@rbxts-js` had to be mounted in `default.project.json`.** `@rbxts/jest/src/init.lua` is a one-liner:
+   `return require(script.Parent.Parent.Parent:WaitForChild("@rbxts-js").Jest)`. Without the mount the place has no Jest
+   runtime and every suite fails at boot with "Failed to find Jest instance in ReplicatedStorage". `jestPath` is set
+   explicitly to `ReplicatedStorage/rbxts_include/node_modules/@rbxts-js/Jest` because discovery looks for an instance
+   *named* `Jest` ? Rojo pascal-cases the package folder, so the default recursive search finds nothing.
+2. **The runtime had to be the `@isentinel/roblox-ts` one.** Vanilla roblox-ts 3.0.0's `RuntimeLib` errors with
+   "Invalid module access! Do you have multiple TS runtimes trying to import this?" whenever **two spec files import the
+   same module**, because it records every loaded module in `_G` while keeping its own registration per runtime ? and
+   `jest-roblox` gives each spec file its own module registry. The fork's `RuntimeLib` adds a `__runtimeScript` identity
+   check and tolerates it. Swapping the *compiler* to the fork (`node_modules/@isentinel/roblox-ts/bin/index.js`) breaks
+   Flamework ("Failed to load! TS version mismatch detected"), so the **build script keeps vanilla roblox-ts and copies
+   the fork's `RuntimeLib.lua` into `include/` afterwards** ? `build` is now
+   `roblox-ts/out/CLI/cli.js && node -e "copyFileSync(...)"`. `include/` is gitignored, which is why the copy has to be
+   part of the build rather than a committed file.
+
+**`tsconfig.json` gained `"include": ["src"]`** ? the default `**/*` also matched the new root `jest.config.ts`, which is
+outside `rootDir: "src"` and is a Node file, not Luau.
+
+**The name `jest.config.ts` is slightly wrong for this package and it warns.** With `"type": "commonjs"` in package.json,
+Node logs "Failed to load the ES module: jest.config.ts ? set type: module". The config still loads (c12 falls back), the
+run is unaffected, and the warning is cosmetic ? recorded here so nobody spends an hour chasing it. `jest.config.mjs`
+would silence it but loses strict TypeScript.
+
+**The Studio plugin is `studio-cli`'s own.** It stamps a Managed Plugin per run and sweeps it afterwards, so a manual
+`JestRobloxRunner.rbxm` in `%LOCALAPPDATA%\Roblox\Plugins` is not used and can conflict. A stale
+`JestRobloxRunner.cli-0.4.5-*.rbxm` (against npm 0.4.10) was present and was **deleted**. Only `Rojo.rbxm` remains there.
+
+**What the specs actually assert.** `odds`: chest rows in `RARITIES` order summing to exactly 100, the shipped 60/30/9/1,
+fusion rows success-then-fail summing to 100, the shipped 60/40/20, and `fusionOdds("legendary") === []`.
+`economy.config`: encode/decode round-trip, sorted output, malformed-input tolerance, `rarityOfBall`, `isRarity`, pool
+non-empty and duplicate-free, weights summing to 1000 and strictly descending. `economy-service`: fusion table covers
+exactly the non-legendary tiers, `nextRarity` is exactly one step up, chances are whole and strictly inside 0?100,
+difficulty increases with rarity, `FUSION_INPUT_COUNT === 2`, `STARTING_COINS >= COIN_CHEST_COST`.
+
+**Not tested, and cannot be in this runtime:** the service's own construction. `new EconomyService()` constructs
+`PlayerDataStore`, whose first act is `DataStoreService.GetDataStore`, and **an unpublished place throws "You must
+publish this place to the web to access DataStore"**. So the read-only refusal, save-before-grant ordering, session lock
+and `BindToClose` stay Studio observations against a published place ? a test for the read-only path was written, failed
+on exactly that error, and was removed rather than guarded into vacuity.
+
+**Unverified in Studio.** That a published place round-trips a profile, that the lock refuses a second session, and that
+`BindToClose` saves on stop ? unchanged from items 51 and 52. The suite itself is verified: it ran headless, 31 tests,
+exit 0.

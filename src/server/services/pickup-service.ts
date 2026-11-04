@@ -6,15 +6,14 @@ import { TAGS } from "shared/tags";
 import {
 	BELT_SURFACE_THICKNESS,
 	BOOST_TARGET_BALL_SPEED,
-	MAX_CONCURRENT_PICKUPS,
-	PICKUP_CLUSTER_LOCAL_X,
 	PICKUP_COLOR,
-	PICKUP_COUNT,
 	PICKUP_SIZE,
 	PICKUP_SPAWN_INTERVAL_SECONDS,
-	PICKUP_Z_EDGE_INSET,
+	PICKUP_X_MAX,
+	PICKUP_X_MIN,
 	PICKUPS_FOLDER_NAME,
 } from "shared/tuning";
+import { BallSpawnerService } from "./ball-spawner-service";
 
 /**
  * Three-decimal rounding, matching the formatter the other services use so two log lines are comparable.
@@ -54,10 +53,16 @@ const ROUND_STATE_WAIT_SECONDS = 10;
  *
  * `PLAYING_CAP_SECONDS` was deleted, so a round can run forever and a timed spawner would accumulate
  * triangles without bound — hundreds of parts on a 56-stud belt, and a ball hitting five at once. The cap is
- * `MAX_CONCURRENT_PICKUPS`; the 15 s tick only ever *replaces* what was taken.
+ * the bound-spawner count; the 15 s tick only ever *replaces* what was taken.
  */
 @Service()
 export class PickupService implements OnStart {
+	/**
+	 * Injected for one thing: the bound spawner **parts**, so the lane list is the scene's rather than a
+	 * constant's. `BallSpawnerService` does not import this file, so there is no cycle.
+	 */
+	constructor(private readonly spawner: BallSpawnerService) {}
+
 	/** Live triangles, so the cap is counted rather than inferred from the folder. */
 	private readonly live = new Array<BasePart>();
 
@@ -105,7 +110,7 @@ export class PickupService implements OnStart {
 	 */
 	private onPhaseChanged(phase: string): void {
 		if (phase === "Playing") {
-			this.spawnCluster("Playing entry", PICKUP_COUNT);
+			this.spawnPickups("Playing entry");
 			this.startTopUpLoop();
 			return;
 		}
@@ -127,7 +132,7 @@ export class PickupService implements OnStart {
 					return;
 				}
 
-				this.spawnCluster("top-up", MAX_CONCURRENT_PICKUPS);
+				this.spawnPickups("top-up");
 			}
 		});
 	}
@@ -137,92 +142,109 @@ export class PickupService implements OnStart {
 	}
 
 	/**
-	 * Fills the empty slots of the cluster, up to `limit`.
+	 * Places one pickup in each lane that does not already hold one, up to the bound-spawner count.
 	 *
-	 * ## Slots, not a count
+	 * ## The count is the scene's, not a constant
 	 *
-	 * The five `Z` positions are computed for `MAX_CONCURRENT_PICKUPS` slots regardless of how many are alive,
-	 * and each spawn fills the lowest empty slot. A top-up therefore puts a replacement exactly where the
-	 * taken triangle was, which is what makes the cluster look stable across a long round instead of drifting
-	 * to one side as triangles are consumed in a random order.
+	 * **A fixed `3` was wrong because a scene does not scale to a number in code.** Four
+	 * spawners were bound and three pickups were placed, so one lane could never hold anything; a fifth spawner
+	 * added in Studio would have changed nothing at all. `maxPickups()` is the bound-spawner count, read at the
+	 * moment of spawning, so adding a lane in Studio adds a pickup with no code change.
+	 *
+	 * ## Only the missing ones
+	 *
+	 * A top-up spawns `maxPickups() - live` pickups, not a fresh set: the untouched ones keep the position they
+	 * were created at, which is what "a collected pickup is replaced" has to mean for the round to stay
+	 * readable. Lanes that already hold a pickup are excluded, so the deficit always lands in an empty lane and
+	 * two pickups can never share one at the same X.
 	 */
-	private spawnCluster(reason: string, limit: number): void {
+	private spawnPickups(reason: string): void {
 		const belt = this.findBelt();
 		if (belt === undefined) {
 			return;
 		}
 
-		const folder = this.pickupsFolder();
-		const slots = this.slotPositions(belt);
-
-		let spawned = 0;
-		for (let slot = 0; slot < slots.size(); slot++) {
-			if (this.live.size() >= limit) {
-				break;
-			}
-
-			if (this.slotOccupied(slots[slot])) {
-				continue;
-			}
-
-			const pickup = this.createPickup(belt, folder, slots[slot], slot);
-			if (pickup !== undefined) {
-				spawned++;
-			}
-		}
-
-		if (spawned === 0) {
+		const spawners = this.spawner.getBoundSpawners();
+		if (spawners.size() === 0) {
 			return;
 		}
 
-		const first = this.live[0];
-		const firstPos = first === undefined ? "none" : tostring(first.Position);
+		const folder = this.pickupsFolder();
+		const deficit = spawners.size() - this.live.size();
+		if (deficit <= 0) {
+			return;
+		}
+
+		// Lanes already occupied by a live pickup, by their belt-local Z. A pickup's lane is a *position*, so
+		// "occupied" is a Z match rather than a slot index - there are no fixed slots any more.
+		const lanesTaken = new Set<number>();
+		for (const pickup of this.live) {
+			if (pickup.Parent !== undefined) {
+				lanesTaken.add(math.round(belt.CFrame.PointToObjectSpace(pickup.Position).Z * 100) / 100);
+			}
+		}
+
+		const placed = new Array<BasePart>();
+		for (const spawner of spawners) {
+			if (placed.size() >= deficit) {
+				break;
+			}
+
+			// **The lane's `Z` comes from the part, in the belt's own frame.** A spawner's `Z` is scene data, so
+			// this is the only way a fifth spawner added in Studio produces a fifth lane with no code change; a
+			// constant here would put every pickup on top of whichever lane the constant described.
+			const localZ = belt.CFrame.PointToObjectSpace(spawner.Position).Z;
+			if (lanesTaken.has(math.round(localZ * 100) / 100)) {
+				continue;
+			}
+
+			const pickup = this.createPickup(belt, folder, this.positionFor(belt, localZ), placed.size());
+			if (pickup !== undefined) {
+				placed.push(pickup);
+				lanesTaken.add(math.round(localZ * 100) / 100);
+			}
+		}
+
+		if (placed.size() === 0) {
+			return;
+		}
+
+		const summary = new Array<string>();
+		for (const pickup of placed) {
+			const localPoint = belt.CFrame.PointToObjectSpace(pickup.Position);
+			summary.push(`${formatNumber(pickup.Position.X)},${formatNumber(localPoint.Z)}`);
+		}
+
 		print(
-			`[Pickup] cluster reason=${reason} spawned=${spawned} live=${this.live.size()} localX=${formatNumber(PICKUP_CLUSTER_LOCAL_X)} worldX=${formatNumber(belt.CFrame.mul(new CFrame(PICKUP_CLUSTER_LOCAL_X, 0, 0)).X)} firstPos=${firstPos} beltY=${formatNumber(belt.Position.Y)} beltSize=${tostring(belt.Size)}`,
+			`[Pickup] spawned reason=${reason} count=${placed.size()} live=${this.live.size()} positions=${summary.join("|")}`,
 		);
 	}
 
 	/**
-	 * The world positions of every slot, left-to-right across the belt.
+	 * A world position for a pickup: random along the belt, snapped to a lane across it.
 	 *
-	 * Derived from the belt's `CFrame` and `Size`, never from world constants: the belt is user-placed, and a
-	 * hardcoded `Z` would leave the cluster beside the belt the moment it is moved. `Y` is the **slab's** top
-	 * face — `belt.Size.Y / 2 + BELT_SURFACE_THICKNESS` above the belt's centre — because the slab is the
-	 * surface a ball actually rests on; placing on the belt's own top face would bury the triangle inside the
-	 * slab and, worse, put it below the ball's contact point so `Touched` might never fire.
+	 * ## Why `X` is random and bounded
+	 *
+	 * **`PICKUP_X_MIN` bounds the far side at the ball's spawn.** Balls spawn at belt-local `X = -23` and drift
+	 * toward `+X`, so a pickup behind `-18` would be behind every ball for its whole life and could never be
+	 * touched - the fixed `-15` cluster had exactly that problem in the other direction, sitting at one spot
+	 * every round.
+	 *
+	 * **`PICKUP_X_MAX` bounds the near side so a pickup is reachable well before the exit.** A ball's drift
+	 * accelerates as `BALL_SPEED` decays, and a pickup in the last few studs before local `+28` would be
+	 * collected after the ball had already committed to leaving.
+	 *
+	 * Both ends are inside the belt's own local `X` range of `-28 .. +28`, so the triangle is always on the
+	 * surface rather than floating past an end.
+	 *
+	 * `Y` is the **floor's** top face, not the belt's: the floor is what a ball rests on, so a pickup placed on
+	 * the belt's face would sit inside the floor and below the ball's contact point, where `Touched` may never
+	 * fire.
 	 */
-	private slotPositions(belt: BasePart): Array<Vector3> {
-		const halfZ = belt.Size.Z / 2 - PICKUP_Z_EDGE_INSET;
-		const surfaceY = belt.Size.Y / 2 + BELT_SURFACE_THICKNESS;
-		const lift = surfaceY + PICKUP_SIZE.Y / 2;
-
-		const positions = new Array<Vector3>();
-		const slots = MAX_CONCURRENT_PICKUPS;
-		for (let i = 0; i < slots; i++) {
-			// `slots - 1` would be zero in a one-slot configuration, and dividing by it would produce NaN,
-			// which places the triangle at the world origin. `math.max` floors the divisor instead of
-			// special-casing the count.
-			const t = i / math.max(slots - 1, 1);
-			const localZ = -halfZ + t * (2 * halfZ);
-			positions.push(belt.CFrame.mul(new CFrame(PICKUP_CLUSTER_LOCAL_X, lift, localZ)).Position);
-		}
-
-		return positions;
-	}
-
-	/** Whether a slot already holds a live triangle, so a top-up fills gaps rather than stacking. */
-	private slotOccupied(position: Vector3): boolean {
-		for (const pickup of this.live) {
-			if (pickup.Parent === undefined) {
-				continue;
-			}
-
-			if (pickup.Position.sub(position).Magnitude < PICKUP_SIZE.X / 2) {
-				return true;
-			}
-		}
-
-		return false;
+	private positionFor(belt: BasePart, localZ: number): Vector3 {
+		const localX = PICKUP_X_MIN + math.random() * (PICKUP_X_MAX - PICKUP_X_MIN);
+		const lift = belt.Size.Y / 2 + BELT_SURFACE_THICKNESS + PICKUP_SIZE.Y / 2;
+		return belt.CFrame.mul(new CFrame(localX, lift, localZ)).Position;
 	}
 
 	/**
