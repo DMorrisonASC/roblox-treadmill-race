@@ -60,6 +60,89 @@ export const BALL_POOL: Record<Rarity, Array<string>> = {
 export const COIN_CHEST_COST = 100;
 
 /**
+ * **Placeholder.** The most chests one bulk call may buy.
+ *
+ * ## Why this is shared and not a server constant
+ *
+ * The store's `Open 10` button is *built* from this number: its label, its price line and whether it is enabled all
+ * derive from it. A cap the server enforces while the client guesses would be a button that can ask for something the
+ * server always refuses — which is the shape of the bug this round exists to remove. One number means the client cannot
+ * be wrong about the limit, because it is not permitted to have an opinion.
+ *
+ * ## Why a cap at all
+ *
+ * The count arrives from a client. Without an upper bound, `count = 1e9` is a request to roll a billion rarities and
+ * write one profile — a denial of service with a friendly name. The bound is also the largest batch a single save can
+ * describe, so the store sees one write rather than a queue of them.
+ */
+export const MAX_BULK_OPEN = 10;
+
+/** What `count` chests cost. One definition, so the button's price and the server's debit cannot disagree. */
+export function chestBatchCost(count: number): number {
+	return count * COIN_CHEST_COST;
+}
+
+/**
+ * Whether a balance covers `count` chests.
+ *
+ * Shared for the same reason as `MAX_BULK_OPEN`: the button's enabled state and the server's up-front affordability
+ * check are the same question, and two implementations of it would be one place for an off-by-one to hide. `NaN` in
+ * either argument makes every comparison false, which correctly reports "cannot afford" — the safe direction.
+ */
+export function canAffordChests(coins: number, count: number): boolean {
+	return coins >= chestBatchCost(count);
+}
+
+/** The verdict on one bulk `count`. `reason` is a log token, not a sentence, so refusals can be counted by cause. */
+export type BulkCountCheck = { ok: true; count: number } | { ok: false; reason: string };
+
+/**
+ * Validates a bulk open count.
+ *
+ * ## Why the order of these checks is the same as `checkCoinAmount`'s
+ *
+ * Because it is the same problem: a number arrives from outside and four of its shapes defeat naive tests. `NaN` makes
+ * every comparison false, so it passes a range check and reaches the loop as "not above the cap and not below one".
+ * `math.huge % 1` is `NaN`, so infinity is reported as fractional by an integer test that runs first. Checking
+ * `not-a-number`, then `nan`, then `infinite`, then `not-an-integer`, then `not-positive`, then `above-cap` means each
+ * refusal names the cause a person would actually fix.
+ *
+ * ## Why zero is refused rather than treated as a no-op
+ *
+ * `count = 0` is not "buy nothing", it is a malformed request: the client has exactly two buttons, one and ten, and
+ * neither can produce a zero. A zero that reached the batch would take a snapshot, roll nothing, save nothing new and
+ * report success — a write per press that changes nothing, which is worse than a refusal because it costs a DataStore
+ * request and logs a purchase that did not happen.
+ */
+export function checkBulkOpenCount(value: unknown): BulkCountCheck {
+	if (!typeIs(value, "number")) {
+		return { ok: false, reason: "not-a-number" };
+	}
+
+	if (value !== value) {
+		return { ok: false, reason: "nan" };
+	}
+
+	if (value === math.huge || value === -math.huge) {
+		return { ok: false, reason: "infinite" };
+	}
+
+	if (value % 1 !== 0) {
+		return { ok: false, reason: "not-an-integer" };
+	}
+
+	if (value < 1) {
+		return { ok: false, reason: "not-positive" };
+	}
+
+	if (value > MAX_BULK_OPEN) {
+		return { ok: false, reason: "above-cap" };
+	}
+
+	return { ok: true, count: value };
+}
+
+/**
  * **Placeholder.** Coins a brand-new profile starts with.
  *
  * Non-zero on purpose: the chest costs coins and there is no coin-earn path in this round, so a player who
@@ -274,5 +357,29 @@ export function robuxChestWeights(): Record<Rarity, number> {
  * the cap is generous rather than tight ? Roblox's own receipt retry window is far shorter than that.
  */
 export const PURCHASE_HISTORY_CAP = 50;
+
+// #endregion
+
+// #region Robux bundle
+
+/**
+ * **Placeholder.** The Developer Product id for the ten-ball bundle.
+ *
+ * A **second** product on the Creator Dashboard, not a quantity on the first: Roblox charges per product, so "ten for the
+ * price of eight" has to exist as its own product with its own price. Also fake ? replace both ids together.
+ */
+export const ROBUX_CHEST_BUNDLE_PRODUCT_ID = 1234567891;
+
+/** **Placeholder.** Balls granted per bundle purchase. One charge, one receipt, `count` grants. */
+export const ROBUX_CHEST_BUNDLE_COUNT = 10;
+
+/**
+ * **Placeholder.** The bundle's Robux price, **for display only**.
+ *
+ * Exactly as with `ROBUX_CHEST_PRICE_ROBUX`: the dashboard charges; this constant only labels a button. If the two
+ * disagree the player sees the dashboard's number at the prompt, so a stale value here is a cosmetic lie rather than a
+ * billing error.
+ */
+export const ROBUX_CHEST_BUNDLE_PRICE_ROBUX = 250;
 
 // #endregion

@@ -146,6 +146,16 @@ export interface Colors {
 	coin: Color3;
 
 	/**
+	 * Domain slot: the paid-chest accent.
+	 *
+	 * A third domain slot, and the same argument as `coin` and `rarity`: the Premium chest needs to be visually distinct
+	 * from the Coin chest, and "this is the paid one" is a meaning that every future paid surface will want. A literal in
+	 * the controller would be the first colour literal in the store since item 57 removed them all, and the second
+	 * element that needed the same tint would invent its own.
+	 */
+	premium: Color3;
+
+	/**
 	 * Domain slot: the item rarity ladder, one colour per tier.
 	 *
 	 * Here rather than in the store that first needed it, for the reason this file exists: a rarity colour is a
@@ -251,6 +261,9 @@ function hudDarkTheme(): Theme {
 
 			specialRobux: BASE.robux,
 			coin: BASE.yellow,
+			// Robux green, deliberately the same hue as `specialRobux`: on the dark HUD the paid chest should read as
+			// "this costs Robux" at a glance, and that association already exists.
+			premium: BASE.robux,
 
 			// Brighter than the light direction's by roughly two steps each, because these sit on brown rather than on
 			// paper: a #3B82C4 blue would sink into `brownDarker` and read as a grey line.
@@ -333,6 +346,9 @@ export function surfaceOpaqueTheme(): Theme {
 			// **Placeholder.** A brighter gold than `rarity.legendary`'s amber, so a price and a legendary border never
 			// read as the same signal.
 			coin: Color3.fromHex("#E9B949"),
+			// **Placeholder.** A deeper green than the coin gold, so the two chest headers never read as the same offer.
+			// Dark enough to pass as a 2 px border on paper, saturated enough to read as "different from the coin chest".
+			premium: Color3.fromHex("#2E7D5B"),
 
 			// **Placeholder.** The rarity ladder on paper. These are the only colours in either direction chosen for a
 			// *domain* rather than a job, and they are chosen for two things at once: legible as a 2 px border against

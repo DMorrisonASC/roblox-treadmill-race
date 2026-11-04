@@ -27,8 +27,9 @@
  * question is answered for free by the chest before a single Robux is at stake.
  */
 
-import { MarketplaceService, Players, ReplicatedStorage } from "@rbxts/services";
+import { MarketplaceService, Players, ReplicatedStorage, TextChatService } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
+import { checkCoinAmount, findPlayerByName, isAdmin, parseDevCommand } from "../admin";
 import {
 	PLAYER_COINS_ATTRIBUTE,
 	PLAYER_ECONOMY_STATE_ATTRIBUTE,
@@ -36,6 +37,9 @@ import {
 } from "shared/attributes";
 import {
 	BALL_POOL,
+	canAffordChests,
+	checkBulkOpenCount,
+	chestBatchCost,
 	COIN_CHEST_COST,
 	ECONOMY_ACTION_COOLDOWN_MS,
 	encodeOwnedBalls,
@@ -46,6 +50,8 @@ import {
 	RARITY_WEIGHTS,
 	Rarity,
 	rarityOfBall,
+	ROBUX_CHEST_BUNDLE_COUNT,
+	ROBUX_CHEST_BUNDLE_PRODUCT_ID,
 	ROBUX_CHEST_PRODUCT_ID,
 	robuxChestWeights,
 	STARTING_COINS,
@@ -54,11 +60,41 @@ import { FUSE_BALLS_REMOTE_NAME, OPEN_COIN_CHEST_REMOTE_NAME, REMOTES_FOLDER_NAM
 import { PlayerDataStore, Profile } from "./player-data-store";
 
 /** What a chest press produced. */
-export type ChestResult = { ok: true; ballId: string } | { ok: false; reason: string };
+export type ChestResult = { ok: true; balls: Array<string>; coins: number } | { ok: false; reason: string };
 
 /** What a fusion press produced. */
 export type FusionResult =
 	{ ok: true; outcome: "success" | "fail"; resultBallId?: string } | { ok: false; reason: string };
+
+/**
+ * What an admin verb produced.
+ *
+ * A union of tokens rather than a boolean because the three failures have three different remedies: `no-profile` means
+ * the store refused this session and rejoining is the only fix, `save-failed` means try again in a moment, and
+ * `bad-amount` means the argument was wrong and nothing was attempted. A single `false` would collapse them into one
+ * message that is wrong two times out of three.
+ */
+export type AdminOutcome = "ok" | "no-profile" | "save-failed" | "bad-amount";
+
+/**
+ * The folder the engine keeps chat commands in.
+ *
+ * A name, not a path: `TextChatService` has no typed `TextChatCommands` property in the installed typings, so the folder
+ * is found by name and created if absent — the engine only makes it when it has default commands to put there.
+ */
+const ADMIN_COMMANDS_FOLDER_NAME = "TextChatCommands";
+
+/** The command instance's name, which is what shows up in the Explorer and in error reports. */
+const ADMIN_COMMAND_NAME = "DevCommand";
+
+/**
+ * The alias, **one word on purpose**.
+ *
+ * `PrimaryAlias` is typed `string`, so `"/dev setCoins"` would compile. Whether the matcher treats the space as part of
+ * the alias or as the end of it is engine behaviour with no typing to check, and a wrong guess fails silently — the
+ * command never fires and nothing reports it. One word plus a subcommand in the text cannot fail that way.
+ */
+const ADMIN_COMMAND_ALIAS = "/dev";
 
 @Service()
 export class EconomyService implements OnStart {
@@ -81,6 +117,7 @@ export class EconomyService implements OnStart {
 		MarketplaceService.ProcessReceipt = (receiptInfo) => this.handleReceipt(receiptInfo);
 
 		this.createRemotes();
+		this.createAdminCommand();
 
 		Players.PlayerAdded.Connect((player) => this.spawnLoad(player));
 		Players.PlayerRemoving.Connect((player) => this.unload(player));
@@ -127,6 +164,12 @@ export class EconomyService implements OnStart {
 		profile.coins = coinsBefore - COIN_CHEST_COST;
 		profile.ownedBalls.set(ballId, ownedBefore + 1);
 
+		// **Captured here, not read after the save.** `saveAsync` yields, so `profile.coins` at the far side of it is a
+		// shared field that a second in-flight chest may already have changed. Reading it there produced log lines whose
+		// balance appeared not to move — `chest ok ball=split_ball coins=74100` twice in a row in the 14:47 run — which
+		// reads as a free chest and is really a delayed print of somebody else's debit.
+		const coinsAfter = profile.coins;
+
 		if (!this.store.saveAsync(player, profile)) {
 			profile.coins = coinsBefore;
 			restoreOwned(profile, ballId, ownedBefore);
@@ -135,9 +178,84 @@ export class EconomyService implements OnStart {
 		}
 
 		this.publish(player, profile);
-		print(`[Economy] ${player.Name} chest ok ball=${ballId} coins=${profile.coins}`);
+		print(`[Economy] ${player.Name} chest ok ball=${ballId} coins=${coinsBefore}->${coinsAfter}`);
 
-		return { ok: true, ballId };
+		return { ok: true, balls: [ballId], coins: coinsAfter };
+	}
+
+	/**
+	 * Opens `count` chests as **one** purchase: one roll loop, one save, one reply.
+	 *
+	 * ## Why this exists instead of `count` calls to `openCoinChest`
+	 *
+	 * The ten-press loop lived in the client, and it failed in three ways that a single call cannot:
+	 *
+	 * 1. **The rate limiter ate presses.** Ten presses 500 ms apart meant the fourth landed 200 ms after the third and
+	 *    was answered `chest ignored — within 500ms cooldown`. The client counted presses it *fired*, not presses the
+	 *    server *accepted*, so a refused press was silently spent and ten presses bought nine chests.
+	 * 2. **The debits raced.** Every call mutates one shared `Profile` and then yields inside `saveAsync`, so a failing
+	 *    call restored a `coinsBefore` captured before a later call had decremented — a revert that clobbers a debit it
+	 *    never saw. One call has no concurrent sibling to clobber.
+	 * 3. **Ten writes, not one.** The 14:47 run drew `DataStore request was added to queue` — eight writes a second is
+	 *    above budget for one player pressing a button.
+	 *
+	 * ## The ordering, and why the affordability check is before the first roll
+	 *
+	 * Cost, then rolls, then one save, then one publish — the same shape as `openCoinChest`, widened. Checking the
+	 * balance up front means a call that cannot be paid for rolls **nothing**, so a refusal cannot leak the outcome of a
+	 * roll the player did not buy. That is also what makes the whole batch atomic at the boundary: after the check there
+	 * is no branch that grants a partial batch, because every failure path restores the snapshot instead.
+	 *
+	 * ## Why the single verb is not this verb with `count = 1`
+	 *
+	 * It is a near-identical shape, and the duplication is deliberate and bounded: a one-chest purchase should not take
+	 * a snapshot of `ownedBalls` it cannot need, and `openCoinChest` is the path whose failure modes have actually been
+	 * observed. The single would become `openChestsBulk(player, 1)` the day a second verb needs the batch's roll-order
+	 * reporting or its per-call log line — not before, because the change would then be justified by a second caller
+	 * rather than by tidiness.
+	 */
+	public openChestsBulk(player: Player, count: unknown): ChestResult {
+		const check = checkBulkOpenCount(count);
+		if (!check.ok) {
+			warn(`[Economy] ${player.Name} bulk open refused: ${check.reason}`);
+			return { ok: false, reason: check.reason };
+		}
+
+		const profile = this.store.getProfile(player);
+		if (profile === undefined) {
+			warn(`[Economy] ${player.Name} read-only — no profile (bulk open count=${check.count})`);
+			return { ok: false, reason: "no-profile" };
+		}
+
+		if (!canAffordChests(profile.coins, check.count)) {
+			warn(
+				`[Economy] ${player.Name} cannot afford ${check.count} chests: coins=${profile.coins} cost=${chestBatchCost(check.count)}`,
+			);
+			return { ok: false, reason: "insufficient-coins" };
+		}
+
+		const coinsBefore = profile.coins;
+		const result = applyChestBatch(
+			profile,
+			check.count,
+			(candidate) => this.store.saveAsync(player, candidate),
+			() => rollFromWeights(RARITY_WEIGHTS),
+			(rarity) => pickBallFrom(rarity),
+		);
+
+		if (result.outcome !== "ok") {
+			warn(
+				`[Economy] ${player.Name} bulk open count=${check.count} refused: ${result.outcome} — nothing granted`,
+			);
+			return { ok: false, reason: result.outcome };
+		}
+
+		this.publish(player, profile);
+		print(
+			`[Economy] ${player.Name} bulk open count=${check.count} coins=${coinsBefore}->${result.coins} balls=${result.balls.join(",")}`,
+		);
+
+		return { ok: true, balls: result.balls, coins: result.coins };
 	}
 
 	/**
@@ -240,46 +358,154 @@ export class EconomyService implements OnStart {
 	}
 
 	/**
-	 * The `ProcessReceipt` callback.
+	 * Grants the bundle: ten balls for one purchase id.
+	 *
+	 * Public for the same reason the single is ? a `save-failed` receipt has to be recoverable from the command bar
+	 * against the `PurchaseId` the log printed.
+	 */
+	public grantRobuxBundlePurchase(player: Player, purchaseId: string): GrantOutcome {
+		const profile = this.store.getProfile(player);
+		if (profile === undefined) {
+			warn(`[Economy] ${player.Name} read-only ? no profile (robux bundle purchase ${purchaseId})`);
+			return "no-profile";
+		}
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			purchaseId,
+			ROBUX_CHEST_BUNDLE_COUNT,
+			(candidate) => this.store.saveAsync(player, candidate),
+			() => rollFromWeights(robuxChestWeights()),
+			(rarity) => pickBallFrom(rarity),
+		);
+
+		if (result.outcome === "granted") {
+			this.publish(player, profile);
+			print(
+				`[Economy] ${player.Name} robux bundle granted purchase=${purchaseId} count=${result.granted.size()} balls=${result.granted.join(",")}`,
+			);
+		} else {
+			print(`[Economy] ${player.Name} robux bundle ${result.outcome} purchase=${purchaseId}`);
+		}
+
+		return result.outcome;
+	}
+
+	/**
+	 * The `ProcessReceipt` callback: the only place a Robux purchase turns into balls.
+	 *
+	 * ## Read this before changing anything here
+	 *
+	 * **Robux is deducted before this callback runs.** By the time any line below decides anything, the money has already
+	 * left the player's account. Granting is not a step that happens after payment ? it is the only thing left to do with
+	 * a payment that has already happened. There is therefore no branch here that can "decline" a purchase, and none that
+	 * should try: the only question is whether the product was delivered.
+	 *
+	 * **`NotProcessedYet` is a retry request, not a refund.** It does not return the Robux, it does not put the product
+	 * back on sale, and it does not notify the player. It asks Roblox to deliver this same receipt again later, and that
+	 * is all it does. Anybody reading it as "cancel the purchase" will write a path that charges the player and delivers
+	 * nothing while believing it refunded them.
+	 *
+	 * **The retry is not guaranteed.** Roblox delivers the receipt again when the player rejoins this experience or
+	 * purchases something else in this server. A player who buys, sees nothing, and never comes back is never retried ?
+	 * so a save that fails on every attempt ends with the player charged and unserved, and no code here can prevent that.
+	 * This is why the save path is worth so much care and why the failure is logged so heavily.
+	 *
+	 * **The log line is the only recovery path.** A `save-failed` for a real purchase prints the `PlayerId`, the
+	 * `PurchaseId`, the `ProductId` and the reason, because the remedy is a human reading that line and calling
+	 * `grantRobuxBundlePurchase(player, purchaseId)` or `grantRobuxChestPurchase(player, purchaseId)` from the server
+	 * command bar once the store is healthy again ? against the exact id printed. The game cannot issue a refund, so a
+	 * server that loses this line loses the only record that the player is owed something.
+	 *
+	 * **This server cannot gate on region.** `ArePaidRandomItemsRestricted` is read through `PolicyService` for a
+	 * *player*, and `ProcessReceipt` arrives without a region to consult ? the buyer may not even be in this server by the
+	 * time it is handled. The client-side gate before `PromptProductPurchase` is therefore the only gate there is. Its
+	 * absence here is deliberate rather than an oversight, and it is the reason the client must never fail open.
 	 *
 	 * ## Why this is a property assignment and not a connection
 	 *
 	 * `MarketplaceService.ProcessReceipt` is a plain callback, not an event: assigning replaces whatever was there, and
 	 * **only one function can hold it**. That is why there is exactly one assignment in `src/` ? a second would silently
-	 * take over from this one and leave the first product unhandled.
+	 * take over from this one and leave the other product unhandled.
 	 *
-	 * ## Why nothing here throws or returns nothing
+	 * ## Why nothing here throws
 	 *
-	 * The callback must always answer with a decision. An error would surface as an unhandled failure and Roblox would
-	 * retry indefinitely; returning nothing is not in the type and would be treated as a failure. Every path returns a
-	 * decision, and the unrecognised-product path is a warning rather than an error.
+	 * The callback must always answer with a decision. An error surfaces as a failure and Roblox retries; returning
+	 * nothing is not in the type and is treated the same way. Every path returns a decision.
 	 *
 	 * ## Why receipts are not rate-limited
 	 *
-	 * `ECONOMY_ACTION_COOLDOWN_MS` exists to stop a player spamming a remote. A receipt is Roblox telling this server
-	 * that money changed hands; delaying or dropping it would be dropping a sale.
+	 * `ECONOMY_ACTION_COOLDOWN_MS` exists to stop a player spamming a remote. A receipt is money that already changed
+	 * hands; delaying or dropping it would be dropping a sale.
+	 *
+	 * ## Why one bundle receipt is one duplicate, not ten
+	 *
+	 * A bundle is a single Developer Product, so Roblox issues a single `PurchaseId` for it (`ReceiptInfo` carries one id
+	 * per receipt, not per item). The ten balls are this server's dissection of one purchase, which is why the id is
+	 * recorded once in `applyRobuxChestBundleGrant` and why a redelivery matches that one id and stops.
 	 */
 	private handleReceipt(receiptInfo: ReceiptInfo): Enum.ProductPurchaseDecision {
-		if (receiptInfo.ProductId !== ROBUX_CHEST_PRODUCT_ID) {
-			// **Deliberately `NotProcessedYet`.** Consuming a purchase this server does not understand would take the
-			// player's money and give nothing, with no retry to recover. The cost is that a misconfigured product id
-			// retries forever ? which is loud in the log and fixable, unlike a silently swallowed sale.
-			warn(
-				`[Economy] receipt for unknown product ${receiptInfo.ProductId} (expected ${ROBUX_CHEST_PRODUCT_ID}) ? not processed`,
-			);
-			return Enum.ProductPurchaseDecision.NotProcessedYet;
+		if (receiptInfo.ProductId === ROBUX_CHEST_PRODUCT_ID) {
+			const player = this.findBuyer(receiptInfo, "single");
+			if (player === undefined) {
+				return Enum.ProductPurchaseDecision.NotProcessedYet;
+			}
+
+			const outcome = this.grantRobuxChestPurchase(player, receiptInfo.PurchaseId);
+			if (outcome === "save-failed" || outcome === "no-profile") {
+				this.logUnservedReceipt(receiptInfo, outcome);
+			}
+
+			return receiptDecision(outcome);
 		}
 
+		if (receiptInfo.ProductId === ROBUX_CHEST_BUNDLE_PRODUCT_ID) {
+			const player = this.findBuyer(receiptInfo, "bundle");
+			if (player === undefined) {
+				return Enum.ProductPurchaseDecision.NotProcessedYet;
+			}
+
+			const outcome = this.grantRobuxBundlePurchase(player, receiptInfo.PurchaseId);
+			if (outcome === "save-failed" || outcome === "no-profile") {
+				this.logUnservedReceipt(receiptInfo, outcome);
+			}
+
+			return receiptDecision(outcome);
+		}
+
+		// **Deliberately `NotProcessedYet`.** Consuming a purchase this server does not understand would take the
+		// player's money and give nothing, with no retry to recover. The cost is that a misconfigured product id
+		// retries forever ? which is loud in the log and fixable, unlike a silently swallowed sale.
+		warn(
+			`[Economy] receipt for unknown product=${receiptInfo.ProductId} purchase=${receiptInfo.PurchaseId} user=${receiptInfo.PlayerId} ? not processed`,
+		);
+		return Enum.ProductPurchaseDecision.NotProcessedYet;
+	}
+
+	/** The buyer, or `undefined` after logging why. The buyer is frequently absent: receipts outlive sessions. */
+	private findBuyer(receiptInfo: ReceiptInfo, kind: string): Player | undefined {
 		const player = Players.GetPlayerByUserId(receiptInfo.PlayerId);
 		if (player === undefined) {
-			// The buyer is not in this server. Roblox retries when they next join, which is the correct behaviour.
 			warn(
-				`[Economy] receipt ${receiptInfo.PurchaseId} for userId ${receiptInfo.PlayerId} who is not in this server`,
+				`[Economy] ${kind} receipt not processed yet: player=${receiptInfo.PlayerId} purchase=${receiptInfo.PurchaseId} product=${receiptInfo.ProductId} reason=buyer-not-in-server`,
 			);
-			return Enum.ProductPurchaseDecision.NotProcessedYet;
 		}
 
-		return receiptDecision(this.grantRobuxChestPurchase(player, receiptInfo.PurchaseId));
+		return player;
+	}
+
+	/**
+	 * The line that makes a failed receipt recoverable.
+	 *
+	 * Every field needed to act later is here on purpose: `PlayerId` identifies who is owed the product, `PurchaseId` is
+	 * the id to pass to the command-bar grant, `ProductId` says which grant to call, and the outcome says whether the
+	 * profile was missing or the write failed. Nothing else in the game records that this player paid and received
+	 * nothing, so this line is the whole recovery trail.
+	 */
+	private logUnservedReceipt(receiptInfo: ReceiptInfo, outcome: GrantOutcome): void {
+		warn(
+			`[Economy] UNSERVED receipt: player=${receiptInfo.PlayerId} purchase=${receiptInfo.PurchaseId} product=${receiptInfo.ProductId} outcome=${outcome} ? grant manually from the command bar once the store is healthy`,
+		);
 	}
 
 	/**
@@ -309,6 +535,99 @@ export class EconomyService implements OnStart {
 		print(`[Economy] ${player.Name} grant ok amount=${amount} coins=${profile.coins}`);
 
 		return true;
+	}
+
+	/**
+	 * Sets a player's balance to exactly `amount`.
+	 *
+	 * ## Absolute, not a delta
+	 *
+	 * This sets `profile.coins = amount`; it does **not** add. `grantCoins` above is the delta, and the two exist side by
+	 * side because they answer different questions: "this player should have 500" and "this player earned 50". Confusing
+	 * them is the classic admin mistake — typing `setCoins prospeed1 500` against a delta would leave the target with
+	 * their old balance plus 500, which looks correct in a log and is wrong by exactly the amount they already had.
+	 *
+	 * ## Why the validation is here as well as in the caller
+	 *
+	 * The method is `public` precisely so it can be called from the command bar when the chat command is unavailable, and
+	 * that call site has no parser in front of it. Re-checking the amount in the only place that writes means a bad value
+	 * cannot reach `profile.coins` by any route — the same argument `openCoinChest` makes about being the only roller.
+	 *
+	 * ## The ordering
+	 *
+	 * Mutate, save, and only then publish — identical to every other verb in this file. The revert is a plain assignment
+	 * because coins are a scalar: there is nothing to snapshot, and no other field is touched.
+	 *
+	 * ## What it deliberately does not log
+	 *
+	 * Success prints nothing. The audit line naming the admin, the target and the value is written by the command layer,
+	 * which is the only place that knows who the admin is; printing here as well would make every action two lines, and
+	 * the second one would not say who did it.
+	 */
+	public setCoins(player: Player, amount: number): AdminOutcome {
+		const check = checkCoinAmount(amount);
+		if (!check.ok) {
+			warn(`[Economy] ${player.Name} setCoins refused: ${check.reason}`);
+			return "bad-amount";
+		}
+
+		const profile = this.store.getProfile(player);
+		if (profile === undefined) {
+			warn(`[Economy] ${player.Name} setCoins refused: read-only, no profile`);
+			return "no-profile";
+		}
+
+		const outcome = applyCoinSet(profile, check.amount, (candidate) => this.store.saveAsync(player, candidate));
+		if (outcome === "ok") {
+			this.publish(player, profile);
+			return outcome;
+		}
+
+		warn(`[Economy] ${player.Name} setCoins=${check.amount} failed: ${outcome} — balance restored`);
+		return outcome;
+	}
+
+	/**
+	 * Resets a player's profile to a brand-new player's: `STARTING_COINS`, no balls, no purchase history.
+	 *
+	 * ## It writes a profile; it does not delete a key
+	 *
+	 * Deleting the key is undone by the next write, and this server makes one on `PlayerRemoving` — so the delete that
+	 * "worked" is silently reversed seconds later, by the session that had the profile in memory all along. Item 64 hit
+	 * exactly that and reached for a key-prefix bump instead. A reset is a **write**: it goes through `saveAsync`, so the
+	 * session lock, the retry schedule and the save-before-report ordering all apply as they do everywhere else, and
+	 * there is no second writer to lose a race to.
+	 *
+	 * ## Why the session lock is left alone
+	 *
+	 * The lock records which session owns this profile, not what the profile contains. Releasing it after a reset would
+	 * let a second server load the same player *during* this session — two servers, two copies, last save wins — which is
+	 * the exact failure the lock exists to prevent. The reset changes the data; it does not change who is holding it.
+	 *
+	 * ## Why nothing is reported before the save
+	 *
+	 * On failure the profile is restored from snapshots taken before the mutation, so a failed wipe leaves the player's
+	 * balls and purchases exactly as they were. The alternative — clear in memory, then save — leaves a half-reset
+	 * profile that the *next* unrelated save persists, which is a wipe nobody asked for and nobody can undo.
+	 */
+	public wipeData(player: Player): AdminOutcome {
+		const profile = this.store.getProfile(player);
+		if (profile === undefined) {
+			warn(`[Economy] ${player.Name} wipeData refused: read-only, no profile`);
+			return "no-profile";
+		}
+
+		const outcome = applyProfileReset(profile, (candidate) => this.store.saveAsync(player, candidate));
+		if (outcome === "ok") {
+			// Republished so the client sees 500 coins and an empty inventory without rejoining: the reset is a write to
+			// the same attributes the HUD and the store read, and a stale attribute would show the pre-wipe profile until
+			// the next unrelated change.
+			this.publish(player, profile);
+			return outcome;
+		}
+
+		warn(`[Economy] ${player.Name} wipeData failed: ${outcome} — profile untouched`);
+		return outcome;
 	}
 
 	/** Whether this player may act on `remote` now, and records the accept if so. */
@@ -349,12 +668,19 @@ export class EconomyService implements OnStart {
 		const chest = new Instance("RemoteEvent");
 		chest.Name = OPEN_COIN_CHEST_REMOTE_NAME;
 		chest.Parent = folder;
-		chest.OnServerEvent.Connect((player) => {
+		chest.OnServerEvent.Connect((player, count: unknown) => {
 			if (!this.isAllowed(this.chestCooldowns, player, "chest")) {
 				return;
 			}
 
-			chest.FireClient(player, this.openCoinChest(player));
+			// **The cooldown is charged once for the whole request**, not once per chest. A bulk call is one action by one
+			// player; gating it ten times is the bug this round removes, and the gate cannot see how many chests a call
+			// buys because it only records "when" — which is the point.
+			//
+			// `count` is untrusted and may be absent, a string, a table, NaN or negative. The single verb is chosen only
+			// for the literal number `1`; everything else goes to the bulk verb, whose validator produces the refusal.
+			const reply = count === 1 ? this.openCoinChest(player) : this.openChestsBulk(player, count);
+			chest.FireClient(player, reply);
 		});
 
 		const fuse = new Instance("RemoteEvent");
@@ -373,6 +699,130 @@ export class EconomyService implements OnStart {
 
 			fuse.FireClient(player, this.fuseBalls(player, ballId));
 		});
+	}
+
+	/**
+	 * Creates the `/dev` chat command, once, on the server.
+	 *
+	 * ## Why this is a chat command and not a `RemoteEvent`
+	 *
+	 * Verified in `@rbxts/types` 1.0.960: `TextChatCommand` exists, is creatable, exposes `PrimaryAlias` /
+	 * `SecondaryAlias` as `string`, and fires `Triggered: (originTextSource: TextSource, unfilteredText: string)`. That
+	 * is enough to handle the whole command **on the server**, so this round adds no client code at all — and no remote
+	 * means no new attack surface: a remote whose only job is to write coins is a remote a client can try to call, and
+	 * the "is this an admin" check inside it would be the only thing between a stranger and the economy.
+	 *
+	 * ## What the typing does *not* give us
+	 *
+	 * Two things, both handled by being tolerant rather than by assuming:
+	 *
+	 * 1. `Triggered` hands over a **`TextSource`, not a `Player`.** `TextSource.UserId` is typed `number`, so the player
+	 *    is resolved with `Players.GetPlayerByUserId` — and an unresolvable source is a logged refusal rather than a
+	 *    nil index.
+	 * 2. Whether `unfilteredText` still contains the alias, and whether an alias may contain a space, are engine
+	 *    behaviours the typings say nothing about. So the alias is one word (`/dev`) and the subcommand is read out of
+	 *    the text, which `parseDevCommand` is written to tolerate with or without a leading alias token.
+	 *
+	 * ## Why `AutocompleteVisible` is false
+	 *
+	 * Autocomplete suggestions are shown to every player in the server. An admin command that advertises itself invites
+	 * strangers to try it, and the refusals then fill the log with noise that hides a real attempt. The command still
+	 * fires when typed — the flag only hides the suggestion.
+	 */
+	private createAdminCommand(): void {
+		const chat = TextChatService;
+
+		// Find-or-create, because the engine only creates this folder when it has default commands to put in it and
+		// `TextChatService.CreateDefaultCommands` is a build setting rather than a guarantee.
+		let folder = chat.FindFirstChild(ADMIN_COMMANDS_FOLDER_NAME);
+		if (folder === undefined) {
+			const created = new Instance("Folder");
+			created.Name = ADMIN_COMMANDS_FOLDER_NAME;
+			created.Parent = chat;
+			folder = created;
+		}
+
+		const command = new Instance("TextChatCommand");
+		command.Name = ADMIN_COMMAND_NAME;
+		command.PrimaryAlias = ADMIN_COMMAND_ALIAS;
+		command.AutocompleteVisible = false;
+		command.Enabled = true;
+		command.Parent = folder;
+
+		command.Triggered.Connect((source, unfilteredText) => this.onDevCommand(source, unfilteredText));
+
+		print(`[Admin] ${ADMIN_COMMAND_ALIAS} registered; autocomplete hidden, authorised UserIds are server-only`);
+	}
+
+	/**
+	 * The `/dev` command's whole surface: authorise, then parse, then resolve, then dispatch.
+	 *
+	 * ## Why authorisation is the first statement and reads nothing but the UserId
+	 *
+	 * A non-admin's chat text is **never parsed**. That is not only about permission — it is about information: if a
+	 * stranger's malformed argument produced "setCoins needs a player name and an amount", the reply would confirm the
+	 * command exists, name its subcommands and teach its syntax. Refusing on the UserId alone means every non-admin gets
+	 * the same one line whatever they typed.
+	 *
+	 * ## Why every branch returns after logging
+	 *
+	 * There is no fall-through and no partial action: each refusal is one line and zero writes, so a half-executed
+	 * command is not a state this function can reach.
+	 *
+	 * ## The audit line
+	 *
+	 * One `print` per action, naming the admin, the target (username **and** display name, because the log is read by a
+	 * human who saw one of them) and the value or outcome. It is written here rather than inside `setCoins`/`wipeData`
+	 * because this is the only place that knows who the admin is, and a second line from the service would be a line
+	 * that cannot say who did it.
+	 */
+	private onDevCommand(source: TextSource, unfilteredText: string): void {
+		const admin = Players.GetPlayerByUserId(source.UserId);
+
+		// **The authorisation check, before anything else.** `isAdmin` reads a hard-coded server-only list; nothing a
+		// client can send, set or replicate takes part in it.
+		if (!isAdmin(source.UserId)) {
+			warn(
+				`[Admin] refused: userId=${source.UserId}${admin !== undefined ? ` name=${admin.Name}` : ""} is not an admin`,
+			);
+			return;
+		}
+
+		if (admin === undefined) {
+			warn(`[Admin] refused: admin userId=${source.UserId} is not a player in this server`);
+			return;
+		}
+
+		const who = `${admin.Name}/${admin.DisplayName}`;
+		const command = parseDevCommand(unfilteredText);
+
+		if (!command.ok) {
+			warn(`[Admin] ${who} refused: ${command.reason}`);
+			return;
+		}
+
+		const target = findPlayerByName(Players.GetPlayers(), command.target);
+		if (target === undefined) {
+			// Not a silent no-op: "nothing happened" is indistinguishable from a broken command, and the admin has no
+			// other way to learn that the target has to be in this server for their profile to exist here.
+			warn(`[Admin] ${who} ${command.kind} refused: no player named "${command.target}" in this server`);
+			return;
+		}
+
+		if (command.kind === "setCoins") {
+			const amount = tonumber(command.amount);
+			if (amount === undefined) {
+				warn(`[Admin] ${who} setCoins refused: "${command.amount}" is not a number`);
+				return;
+			}
+
+			const outcome = this.setCoins(target, amount);
+			print(`[Admin] ${who} setCoins target=${target.Name}/${target.DisplayName} value=${amount} -> ${outcome}`);
+			return;
+		}
+
+		const outcome = this.wipeData(target);
+		print(`[Admin] ${who} wipeData target=${target.Name}/${target.DisplayName} value=reset -> ${outcome}`);
 	}
 
 	/** Loads in a separate coroutine so a slow store does not hold up the join of the next player. */
@@ -543,6 +993,284 @@ export function applyRobuxChestGrant(
 	}
 
 	return "granted";
+}
+
+/**
+ * Restores `ownedBalls` and `purchases` to copies taken before a grant.
+ *
+ * ## Why the arrays are refilled in place rather than reassigned
+ *
+ * `Profile` is shared by reference with whatever holds the cache, so `profile.purchases = saved` would replace the array
+ * for this caller only and leave every other holder pointing at the mutated one. Clearing and refilling keeps the
+ * identity, which is the difference between a revert and an illusion of one.
+ *
+ * The purchases array is restored **in full**, not merely stripped of the id that was pushed: a bundle trims the array to
+ * `PURCHASE_HISTORY_CAP` before saving, so a trim that is not undone would silently discard an older receipt id and make
+ * that older purchase re-grantable.
+ */
+function restoreProfile(profile: Profile, balls: Map<string, number>, purchases: Array<string>): void {
+	profile.ownedBalls.clear();
+	for (const [ballId, count] of balls) {
+		profile.ownedBalls.set(ballId, count);
+	}
+
+	while (profile.purchases.size() > 0) {
+		profile.purchases.pop();
+	}
+
+	for (const purchaseId of purchases) {
+		profile.purchases.push(purchaseId);
+	}
+}
+
+/** A defensive copy of a map, so a later mutation of the original cannot reach the snapshot. */
+function copyOwnedBalls(source: Map<string, number>): Map<string, number> {
+	const copy = new Map<string, number>();
+	for (const [ballId, count] of source) {
+		copy.set(ballId, count);
+	}
+
+	return copy;
+}
+
+/** A defensive copy of an array, for the same reason. */
+function copyPurchases(source: Array<string>): Array<string> {
+	const copy = new Array<string>();
+	for (const purchaseId of source) {
+		copy.push(purchaseId);
+	}
+
+	return copy;
+}
+
+/**
+ * What a batch open produced. `balls` is in roll order, so the reply and the log can name them in the order they were
+ * rolled rather than in pool order.
+ */
+export type ChestBatchOutcome =
+	| { outcome: "ok"; balls: Array<string>; coins: number }
+	| { outcome: "bad-count" }
+	| { outcome: "empty-pool" }
+	| { outcome: "save-failed" };
+
+/**
+ * Rolls `count` chests, debits them, and saves **once** — as a function, so it can be tested without a `Player`.
+ *
+ * ## Why this is not `count` calls to the single grant
+ *
+ * The same argument `applyRobuxChestBundleGrant` makes, and it is worth stating again because the failure is silent: a
+ * per-chest loop reverts only the chest that failed, so a save failure on the seventh leaves six balls granted in memory
+ * for a purchase that was never recorded — and the next unrelated save persists that state, with nothing in the log
+ * pointing at it. One snapshot, one save, one outcome.
+ *
+ * ## Why the snapshot is restored rather than unwound
+ *
+ * Undoing forward is where the arithmetic mistakes live. `ownedBalls` is cleared and refilled from a copy of itself, and
+ * `coins` is restored from one captured integer, so "nothing happened" is a restore and not a subtraction.
+ *
+ * ## Why `coins` is captured before the save
+ *
+ * `save` yields. Reading `profile.coins` on the far side of it would read a field another in-flight call could have
+ * changed, which is exactly how the 14:47 log printed the same balance twice for two accepted chests. The returned
+ * balance is the batch's own, taken while the batch still had the only reference.
+ *
+ * ## The empty-pool abort
+ *
+ * A tier with no entries is a misconfigured build, not a player's problem. A partial batch would charge for chests that
+ * granted nothing, so the whole batch is abandoned and the snapshot restored — the player is told to try again and has
+ * lost nothing.
+ *
+ * `count` is assumed to have passed `checkBulkOpenCount`; `bad-count` exists so the function is total rather than
+ * trusting its caller, and it takes no snapshot and writes nothing.
+ */
+export function applyChestBatch(
+	profile: Profile,
+	count: number,
+	save: (profile: Profile) => boolean,
+	roll: () => Rarity,
+	pickBall: (rarity: Rarity) => string | undefined,
+): ChestBatchOutcome {
+	if (count < 1) {
+		return { outcome: "bad-count" };
+	}
+
+	const coinsBefore = profile.coins;
+	const ballsBefore = copyOwnedBalls(profile.ownedBalls);
+	// The batch does not touch purchases. The copy is taken only so `restoreProfile` can be handed an honest "before"
+	// for every field it covers — passing the live array would make the restore a no-op that looks like a snapshot.
+	const purchasesBefore = copyPurchases(profile.purchases);
+
+	const granted = new Array<string>();
+
+	for (let index = 0; index < count; index++) {
+		const ballId = pickBall(roll());
+		if (ballId === undefined) {
+			profile.coins = coinsBefore;
+			restoreProfile(profile, ballsBefore, purchasesBefore);
+			return { outcome: "empty-pool" };
+		}
+
+		granted.push(ballId);
+		profile.ownedBalls.set(ballId, (profile.ownedBalls.get(ballId) ?? 0) + 1);
+		profile.coins -= COIN_CHEST_COST;
+	}
+
+	const coinsAfter = profile.coins;
+
+	if (!save(profile)) {
+		profile.coins = coinsBefore;
+		restoreProfile(profile, ballsBefore, purchasesBefore);
+		return { outcome: "save-failed" };
+	}
+
+	return { outcome: "ok", balls: granted, coins: coinsAfter };
+}
+
+// #region admin verbs
+/**
+ * Sets a balance to exactly `amount`, as a function so it can be tested without a `Player` or a `DataStore`.
+ *
+ * ## Why the pieces are here and not all in `EconomyService`
+ *
+ * The service's constructor creates a `PlayerDataStore`, whose first DataStore call throws in an unpublished place, so
+ * no spec can construct the service — the same wall `applyRobuxChestGrant` was factored out to get around. Taking the
+ * save as a callback puts the ordering and the revert under test with a fake save, which is what makes "a refused save
+ * leaves the balance untouched" provable rather than inspectable.
+ *
+ * ## Why a scalar needs a snapshot at all
+ *
+ * It does not need a copy — `coinsBefore` is the whole story, because coins are one number and nothing else is touched.
+ * The revert is only here because a caller that reported success and then failed to persist would leave the HUD showing
+ * a balance the profile does not have, and the player would discover it on rejoin.
+ *
+ * `0` is a legal value and is not special-cased: an admin zeroing a balance is a normal thing to want, and refusing it
+ * would be refusing the most useful value in the list.
+ */
+export function applyCoinSet(profile: Profile, amount: number, save: (profile: Profile) => boolean): AdminOutcome {
+	const coinsBefore = profile.coins;
+	profile.coins = amount;
+
+	if (!save(profile)) {
+		profile.coins = coinsBefore;
+		return "save-failed";
+	}
+
+	return "ok";
+}
+
+/**
+ * Resets a profile to a brand-new player's, all of it or none of it.
+ *
+ * ## Why the snapshot covers balls and purchases but not coins
+ *
+ * `ownedBalls` and `purchases` are containers that get *cleared*, and a clear cannot be undone by remembering one value.
+ * Both are copied before the mutation and restored in place on failure — in place, because `Profile` is shared by
+ * reference with whatever holds the cache, so reassigning the field would fix this caller and leave every other holder
+ * pointing at the emptied container.
+ *
+ * ## Why the in-memory profile is mutated before the save
+ *
+ * Because the value that is written **is** the profile. `saveAsync` serialises whatever is in the map when it runs, so a
+ * reset that saved first and cleared afterwards would persist the old data. The ordering is mutate, save, revert on
+ * failure — the same as every other verb, and the reason the revert is a full restore rather than a best effort.
+ *
+ * ## What is deliberately not reset
+ *
+ * `version` and the session lock. The schema is this build's, and the lock answers "which session owns this profile",
+ * which a content change does not affect — releasing it would let a second server load the same player mid-session.
+ */
+export function applyProfileReset(profile: Profile, save: (profile: Profile) => boolean): AdminOutcome {
+	const coinsBefore = profile.coins;
+	const ballsBefore = copyOwnedBalls(profile.ownedBalls);
+	const purchasesBefore = copyPurchases(profile.purchases);
+
+	profile.coins = STARTING_COINS;
+	profile.ownedBalls.clear();
+	while (profile.purchases.size() > 0) {
+		profile.purchases.pop();
+	}
+
+	if (!save(profile)) {
+		profile.coins = coinsBefore;
+		restoreProfile(profile, ballsBefore, purchasesBefore);
+		return "save-failed";
+	}
+
+	return "ok";
+}
+
+// #endregion
+
+/**
+ * Grants `count` rare-or-better balls for **one** purchase id, all of it or none of it.
+ *
+ * Returns the balls actually granted, in roll order, so the log and the reply can say what the player received rather
+ * than only that something happened.
+ *
+ * ## Why this cannot be `count` calls to `applyRobuxChestGrant`
+ *
+ * Because the money is charged once. A bundle is one Developer Product, one receipt and one `PurchaseId`, and the only
+ * correct outcomes are "ten balls" and "nothing". Ten independent grants give neither: each reverts only itself, so a
+ * save failure on the eighth leaves seven balls granted in memory for a purchase that was never recorded ? and that
+ * profile state can be written by the *next* unrelated save, which is the worst kind of corruption because nothing in
+ * the log points at it.
+ *
+ * Hence the snapshot. Everything the loop touches is copied first, and every failure path restores those copies rather
+ * than trying to undo the loop step by step. Undoing forward is where the arithmetic mistakes live; restoring a copy
+ * cannot be wrong.
+ *
+ * ## Why the purchase id is pushed once, after the loop
+ *
+ * It identifies the *purchase*, not the balls. Pushing it per ball would record ten ids for one receipt, fill the
+ * history cap ten times faster, and make a redelivered receipt match only the first of them.
+ *
+ * ## Why a failed save must remove the id as well as the balls
+ *
+ * This is the sentence that matters. A failure returns `NotProcessedYet`, which asks Roblox to deliver the same receipt
+ * again. If the id survived the rollback, the retry would hit the duplicate guard, report `"duplicate"`, and be answered
+ * `PurchaseGranted` ? the player charged, the receipt consumed, and no balls. Restoring the array is what makes the
+ * retry a fresh attempt instead of a false duplicate.
+ */
+export function applyRobuxChestBundleGrant(
+	profile: Profile,
+	purchaseId: string,
+	count: number,
+	save: (profile: Profile) => boolean,
+	roll: () => Rarity,
+	pickBall: (rarity: Rarity) => string | undefined,
+): { outcome: "granted" | "duplicate" | "save-failed"; granted: Array<string> } {
+	if (profile.purchases.includes(purchaseId)) {
+		return { outcome: "duplicate", granted: [] };
+	}
+
+	const ballsBefore = copyOwnedBalls(profile.ownedBalls);
+	const purchasesBefore = copyPurchases(profile.purchases);
+
+	const granted = new Array<string>();
+
+	for (let index = 0; index < count; index++) {
+		const ballId = pickBall(roll());
+		if (ballId === undefined) {
+			// An empty pool is a build bug, and the money has already been taken. Nothing is granted, nothing is
+			// recorded, and the receipt stays unprocessed so a fixed build can still deliver it.
+			restoreProfile(profile, ballsBefore, purchasesBefore);
+			warn(`[Economy] robux bundle: the rolled tier has an empty pool ? purchase ${purchaseId} not granted.`);
+			return { outcome: "save-failed", granted: [] };
+		}
+
+		profile.ownedBalls.set(ballId, (profile.ownedBalls.get(ballId) ?? 0) + 1);
+		granted.push(ballId);
+	}
+
+	profile.purchases.push(purchaseId);
+	trimPurchases(profile);
+
+	if (!save(profile)) {
+		restoreProfile(profile, ballsBefore, purchasesBefore);
+		return { outcome: "save-failed", granted: [] };
+	}
+
+	return { outcome: "granted", granted };
 }
 
 /**

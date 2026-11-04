@@ -41,9 +41,9 @@
  * shutdown genuinely waits. It also matches the rest of this tree, which has no promise anywhere.
  */
 
-import { DataStoreService } from "@rbxts/services";
+import { DataStoreService, RunService } from "@rbxts/services";
 
-/** The DataStore every profile lives in. Changing this orphances every existing profile — it is a version bump. */
+/** The DataStore every profile lives in. Changing this orphans every existing profile — it is a version bump. */
 const DATASTORE_NAME = "PlayerEconomy";
 
 /**
@@ -52,8 +52,98 @@ const DATASTORE_NAME = "PlayerEconomy";
  * A prefix rather than the bare id so the store is browsable: in the DataStore editor, `Player_1234` reads as
  * player data and `1234` reads as a typo. The prefix also leaves room for future non-player keys in the same
  * store without a second DataStore.
+ *
+ * ## This is the shipped key, and changing it is a silent wipe
+ *
+ * Every profile the game has ever written lives under this prefix, and every key is built by `profileKeyFor` below from
+ * this one constant. Changing the string does not rename anything: it points the
+ * store at keys that do not exist, so every load misses and every player is handed `emptyProfile`. Their real data is
+ * still there, orphaned under the old prefix, and no code will ever look at it again. That is a wipe with no deletion,
+ * no error and no log line, which is exactly why it is dangerous.
+ *
+ * **This was done once, deliberately, and had to be undone.** Item 64 appended a `v2` marker to this prefix to get a
+ * fresh profile for a reproduction — a dev wipe with no engine access, since a key cannot be deleted from outside the
+ * engine. It
+ * worked, and it was left in place long enough that every session was loading a blank profile and writing to a second
+ * key while the real data sat untouched. Item 66's task was to put it back. The lesson is not "never bump this": it is
+ * that a bump is indistinguishable from a bad commit, so it must not be the mechanism.
+ *
+ * ## What to do instead when a fresh profile is needed
+ *
+ * Use `/dev wipeData <player>` (item 65). It resets the profile **through the store** — `STARTING_COINS`, no balls, no
+ * purchase history — so the result is a real write under the real key, visible in the attribute the client reads, and
+ * reversible in the sense that the old contents are gone only because somebody asked for them to be. It also costs one
+ * command instead of an edit, a rebuild and a playtest restart.
+ *
+ * **`SCHEMA_VERSION` is a different tool and not a substitute.** A version bump makes `readStored` refuse the old data
+ * and the session goes read-only; it does not hand out a fresh profile, which is the only thing a wipe is for.
  */
 const KEY_PREFIX = "Player_";
+
+/**
+ * **Placeholder.** Appended to the key when the server is running inside Studio: `Player_41354175_Dev`.
+ *
+ * ## Why Studio and live do not share a namespace
+ *
+ * They share one DataStore, and a playtest is not a rehearsal — it grants coins, opens chests and writes purchases with
+ * the same verbs the live game uses. Under one namespace, testing changes what ships: a `/dev setCoins` in a playtest
+ * edits the profile a live player will load, and there is no undo for it. Separate keys make "this was a test" a
+ * property of the storage location rather than a thing somebody has to remember.
+ *
+ * The **lock contention disappears as a side effect**, and that is worth naming because it was the more visible symptom:
+ * the lock is one `session` field inside the stored value, so a playtest holding `Player_41354175` made a live server
+ * refuse that player with `[Store] … locked by another session`, and a live lock refused the playtest the same way. Two
+ * namespaces cannot contest a lock they do not share. This is a consequence of the design, not the reason for it — a
+ * namespace that only existed to dodge locks would still let a playtest edit live data whenever no lock was held.
+ *
+ * ## The cost, stated plainly
+ *
+ * **A playtest's profile is invisible to a live server and vice versa.** A player who tested in Studio and then joins
+ * the live game sees their live profile, not the one they were just editing, and neither copy updates the other. That is
+ * the intended behaviour and it will still surprise somebody, so it is written down here.
+ *
+ * **Studio keys are never cleaned up.** They accumulate, they cost storage, and deleting one is a manual operation in
+ * the DataStore editor — no key-deletion call exists in this tree, by item 65's rule. Nothing reads them except another
+ * Studio session, so the only consequence of leaving them is clutter.
+ *
+ * ## Why a suffix and not a second DataStore
+ *
+ * A separate `DataStore` per environment would be the same idea with a bigger blast radius: the store name is baked into
+ * every call site that mentions it, while the key is built in exactly one function. A suffix also keeps the Studio and
+ * live values visible side by side in the editor, which is what makes "am I looking at test data" answerable at a
+ * glance — the question this whole mechanism exists to make answerable.
+ */
+export const STUDIO_KEY_SUFFIX = "_Dev";
+
+/**
+ * The key for one player in one namespace. **The only place a key is built.**
+ *
+ * Pure, and `studio` is a parameter rather than a call to `RunService`, so the mapping from environment to key can be
+ * tested without an environment — which matters because the alternative is asserting it in a playtest by hand.
+ *
+ * `tostring` rather than template interpolation for the id: the live key must stay **byte-identical** to what earlier
+ * builds wrote, and `tostring` on an integer user id is the one form that was already proven against real stored data.
+ * A key that formats differently is a key that misses, and a miss is a fresh profile.
+ */
+export function profileKeyFor(userId: number, studio: boolean): string {
+	return KEY_PREFIX + tostring(userId) + (studio ? STUDIO_KEY_SUFFIX : "");
+}
+
+/**
+ * The key this server should use for `player`.
+ *
+ * **`RunService.IsStudio()` is read here and nowhere else in the tree.** One read means the namespace cannot be half a
+ * namespace — a `loadAsync` that agreed with `release` but not with `saveAsync` would strand a lock on a key nobody
+ * reads again. It also means there is exactly one thing to audit when the question is "could anything choose the
+ * namespace": the answer is this function, and nothing else in `src/` calls `profileKeyFor` with a computed flag.
+ *
+ * Note what the predicate does and does not mean: `IsStudio()` reports the *environment*, not the *place's publication
+ * state*, so a playtest of a published place is Studio too and gets the `_Dev` key. That is the case this exists for.
+ * A live server is the one place it returns false.
+ */
+function profileKey(player: Player): string {
+	return profileKeyFor(player.UserId, RunService.IsStudio());
+}
 
 /** The schema this build reads and writes. A profile at any other version is refused, never upgraded. */
 export const SCHEMA_VERSION = 1;
@@ -312,7 +402,7 @@ export class PlayerDataStore {
 	 * grant or spend — which is why they share a return type and differ only by their log line.
 	 */
 	public loadAsync(player: Player, startingCoins: number): Profile | undefined {
-		const key = KEY_PREFIX + tostring(player.UserId);
+		const key = profileKey(player);
 
 		let outcome: ClaimOutcome | "failed" = "failed";
 		let loaded: Profile | undefined;
@@ -395,7 +485,7 @@ export class PlayerDataStore {
 	 * the second kind of bug is invisible until somebody rejoins.
 	 */
 	public saveAsync(player: Player, profile: Profile): boolean {
-		const key = KEY_PREFIX + tostring(player.UserId);
+		const key = profileKey(player);
 
 		let outcome: SaveOutcome = "failed";
 
@@ -464,7 +554,7 @@ export class PlayerDataStore {
 		this.tracked.delete(player);
 
 		task.spawn(() => {
-			const key = KEY_PREFIX + tostring(player.UserId);
+			const key = profileKey(player);
 
 			const [ok] = pcall(() => {
 				this.store.UpdateAsync<StoredProfile, StoredProfile>(key, (current) => {

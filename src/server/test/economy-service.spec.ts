@@ -10,7 +10,12 @@ import {
 	ROBUX_CHEST_RARITIES,
 	robuxChestWeights,
 } from "shared/economy.config";
-import { applyRobuxChestGrant, receiptDecision, rollFromWeights } from "../services/economy-service";
+import {
+	applyRobuxChestBundleGrant,
+	applyRobuxChestGrant,
+	receiptDecision,
+	rollFromWeights,
+} from "../services/economy-service";
 import { Profile } from "../services/player-data-store";
 
 /**
@@ -315,5 +320,213 @@ describe("rollFromWeights with the Robux weights", () => {
 
 			expect(found).toBe(true);
 		}
+	});
+});
+
+/**
+ * The bundle: ten balls, one purchase, all-or-nothing.
+ *
+ * ## What these tests are actually protecting
+ *
+ * Not "ten balls arrive" ? that is the easy half. The failure this design exists to prevent is a **partial** grant: some
+ * balls applied in memory for a purchase whose record never landed, which the next unrelated save would then persist.
+ * Every assertion below is therefore about what is left behind after a failure, not only about the success path.
+ */
+describe("applyRobuxChestBundleGrant", () => {
+	function profileWith(balls: Record<string, number>, purchases: Array<string> = []): Profile {
+		const ownedBalls = new Map<string, number>();
+		for (const [ballId, count] of pairs(balls)) {
+			ownedBalls.set(ballId, count);
+		}
+
+		return { version: 1, coins: 0, ownedBalls, purchases };
+	}
+
+	it("grants count balls and one purchase id, saving once", () => {
+		const profile = profileWith({});
+		let saves = 0;
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-1",
+			10,
+			() => {
+				saves++;
+				return true;
+			},
+			() => "rare",
+			() => "heavy_ball",
+		);
+
+		expect(result.outcome).toBe("granted");
+		expect(result.granted.size()).toBe(10);
+		expect(profile.ownedBalls.get("heavy_ball")).toBe(10);
+		// One id for the purchase, not ten for the balls.
+		expect(profile.purchases.size()).toBe(1);
+		expect(saves).toBe(1);
+	});
+
+	it("reports every granted ball id, in roll order", () => {
+		const profile = profileWith({});
+		const picks = ["heavy_ball", "split_ball", "magnet_ball"];
+		let picked = 0;
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-2",
+			3,
+			() => true,
+			() => "rare",
+			() => {
+				// Indexed on the pick, not on the roll: `roll` runs before `pickBall`, so a counter incremented there
+				// would be one ahead and the assertion would silently test the wrong sequence.
+				const ballId = picks[picked] ?? picks[0];
+				picked++;
+				return ballId;
+			},
+		);
+
+		expect(result.outcome).toBe("granted");
+		expect(result.granted.size()).toBe(3);
+		expect(result.granted[0]).toBe("heavy_ball");
+		expect(result.granted[1]).toBe("split_ball");
+		expect(result.granted[2]).toBe("magnet_ball");
+	});
+
+	it("grants nothing and saves nothing for a redelivered purchase id", () => {
+		const profile = profileWith({ heavy_ball: 1 }, ["bundle-3"]);
+		let saves = 0;
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-3",
+			10,
+			() => {
+				saves++;
+				return true;
+			},
+			() => "legendary",
+			() => "prism_ball",
+		);
+
+		expect(result.outcome).toBe("duplicate");
+		expect(result.granted.size()).toBe(0);
+		expect(saves).toBe(0);
+		expect(profile.ownedBalls.get("prism_ball")).toBe(undefined);
+	});
+
+	it("restores ownedBalls and purchases exactly when the save fails", () => {
+		// A profile that already owns something, so the restore has a real prior state to reproduce rather than an empty
+		// one where "correct" and "wiped" would look the same.
+		const profile = profileWith({ split_ball: 2, ghost_ball: 1 }, ["older-purchase"]);
+		const ballsBefore = profile.ownedBalls.size();
+		const purchasesBefore = profile.purchases.size();
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-4",
+			10,
+			() => false,
+			() => "epic",
+			() => "rocket_ball",
+		);
+
+		expect(result.outcome).toBe("save-failed");
+		expect(result.granted.size()).toBe(0);
+		expect(profile.ownedBalls.size()).toBe(ballsBefore);
+		expect(profile.ownedBalls.get("rocket_ball")).toBe(undefined);
+		expect(profile.ownedBalls.get("split_ball")).toBe(2);
+		expect(profile.ownedBalls.get("ghost_ball")).toBe(1);
+		expect(profile.purchases.size()).toBe(purchasesBefore);
+		expect(profile.purchases[0]).toBe("older-purchase");
+	});
+
+	it("undoes the history trim as well as the balls", () => {
+		// The trim runs before the save, so a rollback that only removed the pushed id would still have discarded the
+		// oldest receipts ? quietly making those purchases re-grantable.
+		const purchases = new Array<string>();
+		for (let index = 0; index < 50; index++) {
+			purchases.push(`old-${index}`);
+		}
+
+		const profile = profileWith({}, purchases);
+
+		applyRobuxChestBundleGrant(
+			profile,
+			"bundle-5",
+			10,
+			() => false,
+			() => "rare",
+			() => "heavy_ball",
+		);
+
+		expect(profile.purchases.size()).toBe(50);
+		expect(profile.purchases[0]).toBe("old-0");
+	});
+
+	it("aborts and reverts when a roll lands on an empty pool mid-loop", () => {
+		const profile = profileWith({});
+		let rolls = 0;
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-6",
+			10,
+			() => true,
+			() => {
+				rolls++;
+				return "rare";
+			},
+			() => {
+				// Grant the first three, then fail ? proving the balls already added are removed.
+				return rolls <= 3 ? "heavy_ball" : undefined;
+			},
+		);
+
+		expect(result.outcome).toBe("save-failed");
+		expect(result.granted.size()).toBe(0);
+		expect(profile.ownedBalls.size()).toBe(0);
+		expect(profile.purchases.size()).toBe(0);
+	});
+
+	it("lets the retry after a failed save succeed with the same purchase id", () => {
+		// Criterion 7, and the reason the purchases array is restored rather than left with the id pushed: if the id had
+		// survived the rollback, this second call would report "duplicate" and be answered PurchaseGranted ? the player
+		// charged, the receipt consumed, and nothing granted.
+		const profile = profileWith({});
+		let saves = 0;
+
+		const first = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-7",
+			10,
+			() => {
+				saves++;
+				return false;
+			},
+			() => "rare",
+			() => "heavy_ball",
+		);
+
+		expect(first.outcome).toBe("save-failed");
+		expect(profile.purchases.size()).toBe(0);
+
+		const second = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-7",
+			10,
+			() => {
+				saves++;
+				return true;
+			},
+			() => "rare",
+			() => "heavy_ball",
+		);
+
+		expect(second.outcome).toBe("granted");
+		expect(second.granted.size()).toBe(10);
+		expect(profile.ownedBalls.get("heavy_ball")).toBe(10);
+		expect(profile.purchases.size()).toBe(1);
+		expect(saves).toBe(2);
 	});
 });

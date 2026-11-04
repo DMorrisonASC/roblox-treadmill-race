@@ -765,7 +765,7 @@ export const BOOST_TARGET_BALL_SPEED = 12;
  * `0.5` studs/s across a ride of ~18 s is roughly 9 studs of lateral travel on a 12-stud belt, so a ball crosses
  * the middle several times per ride: visible, but slow enough not to look thrown.
  */
-export const Z_DRIFT_SPEED = 0.5;
+export const Z_DRIFT_SPEED = 0.05;
 
 /**
  * **Placeholder.** The furthest a ball's centre may wander from the belt's centreline, in the belt's local `Z`,
@@ -776,7 +776,7 @@ export const Z_DRIFT_SPEED = 0.5;
  * The reversal is a logic test, not a physical wall, so the bound has to sit far enough inside the geometry that
  * the ball never looks like it should have fallen off.
  */
-export const LATERAL_BOUND = 4;
+export const LATERAL_BOUND = 2;
 
 /**
  * **Placeholder.** The smallest distance from the centreline the weave can reverse at, in studs.
@@ -787,7 +787,7 @@ export const LATERAL_BOUND = 4;
  * of the current direction removes that case entirely, and an asymmetric weave (crossing from `+3.2` to `-1.6`)
  * reads as more natural than a symmetric one anyway.
  */
-export const LATERAL_BOUND_MIN = 1.5;
+export const LATERAL_BOUND_MIN = 1;
 
 /** **Placeholder.** The folder `PickupService` parents its triangles into, created on demand. */
 export const PICKUPS_FOLDER_NAME = "SpawnedPickups";

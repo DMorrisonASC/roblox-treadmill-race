@@ -1386,3 +1386,417 @@ why that method is public.
 **Still owed before any purchase UI ships:** the `PolicyService:IsPaidRandomItemsRestricted` gate, with the note already
 sitting next to the product id in `economy.config.ts`.
 
+## 61. Premium chest in the store: policy gate, bundle product, transactional ten-ball grant
+
+**Two premise errors in the brief, both found by reading rather than trusting.**
+
+1. **`STORE_NARROW_WIDTH` does not exist.** Item 59 replaced the two-column store with a single vertical column on
+   explicit instruction ("Do not redesign the layout structure or reinterpret it as two large side-by-side panels"), so
+   Part D's "matching the existing two-column pattern" had no pattern to match. A breakpoint was introduced, and it is
+   now the only responsive rule in the file.
+2. Everything else checked out: big-ui is **not** imported by the store (the six mentions are comments explaining why it
+   was dropped), `fillPrizeShelf` did read `BALL_POOL` directly and now takes its tier list, and `handleReceipt` branched
+   on one product id.
+
+**Backend.** `ROBUX_CHEST_BUNDLE_PRODUCT_ID` / `_COUNT` (10) / `_PRICE_ROBUX` are new placeholders;
+`applyRobuxChestBundleGrant` grants `count` balls for **one** `PurchaseId`, snapshotting `ownedBalls` and `purchases`
+before the loop and restoring both copies on any failure. **The restoring of the purchases array is the load-bearing
+part:** a failed save returns `NotProcessedYet`, so the retry must not be read as a duplicate of a grant that never
+landed ? if the id survived, the retry would answer `PurchaseGranted` and the player would be charged for nothing. The
+snapshot also undoes the history trim, which a "remove the last id" rollback would leave applied, silently making old
+purchases re-grantable. `handleReceipt` branches on the two products; a bundle receipt carries one `PurchaseId` per
+`ReceiptInfo`, so a redelivery is one duplicate rather than ten.
+
+**The receipt comment now carries all five statements** ? money already moved, `NotProcessedYet` is a retry not a refund,
+the retry is not guaranteed, the log is the only recovery path with the fields named, and the server cannot gate on
+region ? and `logUnservedReceipt` prints `player= purchase= product= outcome=` so the command-bar remedy is possible from
+the log alone.
+
+**Policy gate.** `src/shared/policy.ts` holds `PolicyState` plus `policyStateFrom(info)` and `policyAllowsPurchase(state)`;
+the controller caches the state and does the async `GetPolicyInfoForPlayerAsync` once at mount. Verified against
+`@rbxts/types`: the field really is **`ArePaidRandomItemsRestricted`**. `unknown` and `loading` are both blocked, because
+failing open sells a restricted item to a restricted player and the money cannot be given back. The gate is checked
+**inside** the button handler as well as by styling, so a state change between mount and click cannot slip through.
+
+**A real ordering bug caught while wiring it:** `connectPolicyGate` runs at mount but the store is built lazily on first
+open, so if the policy resolved first, `applyPolicy` ran against an empty button list and every Premium button would stay
+disabled for the session despite an allowing policy. `buildStore` now re-applies the cached state after building.
+
+**`PromptProductPurchase` returns `void`** ? confirmed in the typings ? so `PromptProductPurchaseFinished` is the only
+cancellation signal. It is connected purely to release the busy guard and **grants nothing**; the server's
+`ProcessReceipt` remains the sole grant path. Because the typings do not promise the signal fires,
+`PURCHASE_GUARD_TIMEOUT_SECONDS = 30` releases the guard anyway.
+
+**Client layout.** `ChestRow` holds both sections in a horizontal `UIListLayout`, each half-width above 900 px and
+full-width stacked below it. `PremiumChestSection` mirrors `CoinChestSection` band for band, differing in exactly three
+places that would be *wrong* to share: its odds come from `robuxChestOdds()`, its shelf is fed `ROBUX_CHEST_RARITIES`
+(rare and above only ? a verbatim copy would advertise commons the chest cannot give), and its buttons prompt a product
+instead of firing a remote. `colors.premium` is a new theme slot rather than a literal, for the same reason `coin` and
+`rarity` are.
+
+**Tests: 53 -> 64, all green.** New: bundle grants ten and one id saving once; reports ids in roll order; duplicate saves
+nothing and grants nothing; save failure restores balls *and* purchases exactly; the trim is undone; an empty pool
+mid-loop reverts the balls already added; and **the retry after a failed save succeeds** with the same id ? the assertion
+that the array restoration works. Plus `policyStateFrom` / `policyAllowsPurchase` mapping tests.
+
+**Existing `applyRobuxChestGrant` tests needed no change** ? the bundle was added beside it, not through it.
+
+**Unverified without Studio or a published place.** Criteria 1 and 4 (side-by-side placement, disabled rendering) and the
+prompt itself. A real purchase needs a published place, a real Developer Product and both ids replaced. `Fusion` remains
+where it is, on the `Fusion` tab, untouched.
+
+**Still owed:** nothing else on the gate ? this round added it. `ArePaidRandomItemsRestricted` is now read and enforced
+client-side, and the server-side note in `economy.config.ts` stands as the explanation for why there is no server gate.
+
+## 62. Chest sections outlined; the Premium prize shelf scrolls too
+
+Two visual fixes, one file, no behaviour change to the economy.
+
+**Each chest section is now a card.** `CoinChestSection` and `PremiumChestSection` had transparent backgrounds, so two
+products on one sheet read as one long list with no boundary. Both now draw `paint.card` behind them, a `UICorner`, and a
+**1-pixel `UIStroke` tinted to that section's own button colour** ? `accent` for the coin chest, `premium` for the
+Premium one. Matching the button is deliberate: the box and the control that buys from it should look like the same
+offer, and two boxes outlined in one colour would look like one product split in half. `SECTION_STROKE_THICKNESS` is the
+new constant; the sections also gained `UIPadding` so content is not flush to the new border.
+
+**The Premium prize shelf now scrolls.** `drivePrizeShelf` was driving a single `prizeShelf` field, so only the coin
+chest's shelf moved ? which reads as "the paid one is broken" rather than as a difference. The field became
+`prizeShelves: Array<ScrollingFrame>`, both builders push their shelf, and the `RenderStepped` loop walks the list. Each
+shelf keeps its own `CanvasPosition`, so they scroll independently and one cannot drag the other.
+
+`fillPrizeShelf` already duplicated its content twice for the seam, so the Premium shelf needed no change there ? it was
+being filled correctly and simply never driven.
+
+**Unverified in Studio:** that the outlines read as separation rather than as clutter, and that both shelves appear to
+move at the same rate. `npm run build`, `npm run lint`, `prettier --check "src/**/*.ts"` and `npm test` (64 tests) are
+green.
+
+## 63. Inventory sheet built: `Balls` and `Fusion` tabs, and the store's strip removed
+
+The inventory was a 380x280 placeholder `Panel` containing the sentence "Nothing yet". This round makes it a real sheet:
+header, two tabs, and a collection-beside-detail row that becomes a stacked row below the 900-pixel breakpoint.
+
+**The store lost its category tabs.** `STORE_TABS = ["Balls", "Fusion"]` existed on the store because the brief's
+hierarchy asked for tabs there, but the `Fusion` tab was the *player's own balls*, which belongs to the inventory, and
+`Balls` pointed at the chests. With both now living in the inventory, a one-tab strip on the store would be a button
+that does nothing, so `buildCategoryTabs`, `selectTab`, `storeTabButtons`, `storeTabStrokes` and `TAB_HEIGHT` are gone
+and the store is a single vertical hierarchy. Nothing was lost: `buildFusionSection` was already deleted by item 58's
+rewrite path, and the store still opens chests.
+
+**`Balls` and `Fusion` are two tabs of one sheet, not two panels.** `TabStrip` already owns "exactly one tab is lit" and
+restyles itself on click, so `selectInventoryTab` only toggles the two view frames' `Visible` ? one writer, so the two
+views cannot both be showing.
+
+**Two selections, deliberately.** `inspectBallId` (which ball the detail pane describes) and `fusionMaterialId` (which
+ball is about to be spent) are separate fields. Sharing one would mean switching tabs reinterprets the last click as a
+different intent: a player would return to `Balls` to find an arbitrary ball highlighted, or to `Fusion` with a material
+already picked that they never chose. The inspect cursor *is* defaulted to the rarest owned ball, because "what do I
+have" should open showing something; the fusion cursor is **not** defaulted, because choosing it is an intent to spend.
+
+**One source of truth, and it is not `BALL_POOL`.** `src/shared/inventory.ts` is new: `ownedBallsFrom(encoded)` reads
+the `OwnedBalls` attribute and returns `Array<OwnedBall>`, dropping ids the build no longer has and zero counts, sorted
+by tier then id so the grid cannot reorder itself between two reads of the same profile. Building the grid from
+`BALL_POOL` would have produced a store that looks like a collection, listing balls the player does not own ? which is
+the single most likely way to get this screen wrong, and the reason the rule lives in a pure module that cannot reach
+the pool. `fusionOddsForBall` wraps `fusionOdds` so the panel carries no copy of the percentages.
+
+**Five layout defects fixed before they shipped**, four of them consequences of reusing `Panel`:
+
+1. `Panel`'s surface is a `UIListLayout`, **not** a flex layout, so the content row's `UIFlexItem(Fill)` did nothing and
+   a `0`-height row would have collapsed the sheet to header + tabs + footer. The row is an offset height and the sheet
+   is that height plus its three fixed bands (`PANEL_HEADER_HEIGHT + TAB_STRIP_HEIGHT + row + PANEL_FOOTER_HEIGHT`).
+2. The row was given `LayoutOrder: 2`, which `TabStrip` already claims ? equal orders in a `LayoutOrder` list is
+   undefined ordering. It is now 3.
+3. `UIPadding` takes a **`UDim`**, not a `UDim2`; four paddings were constructing `UDim2`.
+4. **The breakpoint was flipping the wrong list.** `applyInventoryLayout` flipped the *row's* `UIListLayout`, which holds
+   `BallsView` and `FusionView` ? of which exactly one is ever visible, so its direction never mattered. The list that
+   has to change is the one *inside* a view, between its collection and its detail pane. `buildInventoryPane` now takes
+   `horizontal`, each view registers its own layout in `inventorySplitLayouts`, and only those flip; the detail panes
+   stay vertical lists of stacked labels.
+5. **A view was sized as if it were a pane.** `BallsView`/`FusionView` were left at `INVENTORY_COLLECTION_FRACTION` of
+   the row, so the visible view occupied 72% of the sheet with dead space beside it. A view now fills the row
+   (`1, 1`) and only a detail pane takes a share, which also made the two explicit `detail.Size` / `facts.Size`
+   overrides redundant ? they were a second place for the same number to drift.
+
+**Empty states moved out of the scroll areas.** The first draft parented a "you own nothing" label inside the
+collection `ScrollingFrame`. `UIGridLayout` and `UIListLayout` reposition **every** child, so the label would have been
+slid into a grid cell or a list row instead of sitting where it was placed. Both messages now live in the detail/facts
+pane, which is a plain vertical list with room for them ? and which is the pane a player is already reading.
+
+**Two `statusLabel` bugs fixed on the way.** Both panels stay built for the session, so one shared footer field would be
+whichever was constructed last, and a fusion result would print into the *other* panel's hidden footer. The inventory
+has its own `inventoryStatus`, and `setStatus` picks the open panel's. `setOpen` also refreshed only for `shop`; it now
+refreshes for any target, because opening the inventory is equally the moment to re-read the profile.
+
+**Placeholders (all named constants):** `INVENTORY_ROW_HEIGHT` 300, `INVENTORY_CARD_WIDTH` 84, `INVENTORY_CARD_HEIGHT`
+86, `FUSION_ROW_HEIGHT` 34, `INVENTORY_PREVIEW_HEIGHT` 96, `INVENTORY_PREVIEW_BALL` 56, `INVENTORY_COLLECTION_FRACTION`
+0.72, `INVENTORY_STACKED_SPLIT` 0.55, `INVENTORY_STACKED_GROWTH` 1.7. The stacked branch grows the row **and** shrinks
+the sheet back through `capToViewport`, because two panes stacked inside one pane's height is the only way this layout
+overflows.
+
+**Tests: 64 -> 74, all green.** New `src/shared/inventory.spec.ts` (10): an empty profile yields nothing, only owned
+balls are listed, counts survive, rarity resolves, ordering is tier-then-id, an unknown id is dropped, a zero count is
+ignored, `fusionOddsForBall` sums to 100 and returns `[]` for a legendary. `npm run build`, `npm run lint` (0 problems),
+`prettier --check "src/**/*.ts"`, `npm run build:place` and `npm test` all pass.
+
+**Unverified without Studio.** Nothing here has been seen on screen: the side-by-side vs stacked transition at 900 px,
+that the grid scrolls rather than overflows, the empty-state copy in the facts pane, and that a fusion result reaches
+the inventory's own footer. `PromptProductPurchase` and the Robux path are untouched.
+
+**One sizing decision worth naming:** the row is `300` px and a 84x86 card grid scrolls inside it, so on a wide monitor
+the collection is a scroll area rather than a stretched grid. That is the same argument item 59 used for the store's
+fixed width: a fraction of the screen makes a four-card grid into four giant cards.
+
+**Still owed:** `View All` in the store is still a visual placeholder (items 58-62), and the `Fusion` tab has no
+"select none" affordance ? clearing a material requires reopening the sheet.
+
+## 64. Profile key bumped to `Player_v2_` as a dev wipe; the chest is exonerated, the inventory is not
+
+Reported: "when I bought a coin chest I got multiple balls ? I should only get one." Reading the code found no path that
+grants more than one: `openCoinChest` rolls once, picks once, and does one `ownedBalls.set(ballId, ownedBefore + 1)`;
+`Open 1` is wired with `count = 1`, so `openChests` fires exactly one `FireServer()` and never queues. **Confirmed in
+Studio by the reporter: one press of `Open 1` yields exactly one ball.** The chest is not the bug.
+
+The remaining suspect is the profile, not the display. `ownedBallsFrom` is a pure read of the `OwnedBalls` attribute and
+the inventory has no reference to `BALL_POOL` at all, so a grid showing every unlockable ball means the *profile* holds
+those ids. A probe turned up the arithmetic that makes a multi-ball result possible in the first place: `STARTING_COINS`
+500 against `COIN_CHEST_COST` 100 is **five** affordable chests, and `Open 10` (1000 coins) never checks affordability
+before queueing, so one press on a fresh profile drains five accepted opens and stops. That is a real defect regardless
+of this report, but it is not what produced the inventory the reporter saw.
+
+**What was changed:** `KEY_PREFIX` in `player-data-store.ts` went from `Player_` to `Player_v2_`, which makes every load
+miss and hand each player `emptyProfile` ? 500 coins, no balls ? **without deleting anything**. Old profiles stay intact
+under the old keys and come back when the string is reverted. Explicitly *not* a `SCHEMA_VERSION` bump: that makes
+`readStored` refuse the old data and the session goes read-only, which is a different and worse outcome.
+
+**This must be reverted before anything ships.** A committed bump is a silent wipe of every player's progress; that is
+why the docblock above the constant now says so.
+
+**The decisive check, unchanged:** the load line prints `balls=N` from the profile itself. `balls=0` with an empty grid
+is correct; `balls=0` with a full grid is an inventory bug, and `balls=9` means the profile is stale and the display was
+telling the truth. `npm run build`, `npm run lint`, `prettier --check "src/**/*.ts"` and `npm run build:place` are green.
+
+**Still owed:** `Open 10` should be all-or-nothing ? refuse the press outright when the balance does not cover all ten,
+rather than buying a truncated batch. Not done yet, because it changes behaviour the reporter is still reproducing
+against.
+
+## 65. `/dev` admin layer: `setCoins` and `wipeData` over a server-side chat command
+
+An administrative surface did not exist: changing a balance or resetting a profile meant editing code or deleting a
+DataStore key by hand, and item 64 showed the second does not even work (the running server re-saves over it).
+
+**Transport: `TextChatCommand`, verified in `@rbxts/types` 1.0.960.** `TextChatCommand` is creatable, exposes
+`PrimaryAlias` / `SecondaryAlias` as `string`, and fires `Triggered: (originTextSource: TextSource, unfilteredText:
+string) => void`. Two corrections to the brief's framing fell out of reading that signature:
+
+1. **`Triggered` does not give the invoking player.** It gives a `TextSource`, whose only useful member is
+   `readonly UserId: number`. The player is resolved with `Players.GetPlayerByUserId(source.UserId)`, and an
+   unresolvable source is a logged refusal rather than a nil index.
+2. **Whether an alias may contain a space is not in the typings** ? `PrimaryAlias` is just `string`, so `"/dev
+   setCoins"` would compile and might never fire. The alias is therefore one word (`/dev`) and the subcommand is read
+   out of `unfilteredText`, which the typing does promise is a string.
+
+**No client code at all.** The command is created and handled on the server, so this round adds nothing to
+`src/client/`. That is the stated preferred outcome, and it also means there is no new remote: a remote whose only job
+is to write coins is a remote a client can attempt to call, and its admin check would be the only thing between a
+stranger and the economy.
+
+**The admin list is server-only.** [admin.ts](../../src/server/admin.ts) is under `src/server`, which Rojo mounts at
+`ServerScriptService.TS` ? it does not replicate, so "no client can reach it" is a property of the project file rather
+than of a review rule. A shared list would only earn its place if the client needed to alter its own display, and with
+no client code it would be a list of which account to compromise, shipped to everybody.
+
+**No new `@Service()`**, deliberately. The two commands are economy verbs, and `EconomyService` already owns the
+things they need ? `publish`, the save-before-report ordering, the read-only refusal ? so a second service would
+either duplicate them or take a dependency edge back to this one. It also avoids regenerating `flamework.build`, which
+is the documented way to crash a running Rojo. `setCoins` / `wipeData` are public so the command bar can call them when
+chat is unavailable, and both re-validate rather than trusting their caller.
+
+**`wipeData` writes; it does not delete.** The snapshot is `coins` plus copies of `ownedBalls` and `purchases`, and a
+failed save restores all three *in place* ? in place because `Profile` is shared by reference, so reassigning a field
+would fix one holder and leave the store pointing at the emptied container. The session lock is left alone: it records
+who owns the profile, not what it contains, and releasing it would let a second server load the same player mid-session.
+`SCHEMA_VERSION` is untouched, because a version bump makes `readStored` refuse the profile next session.
+
+**`grantCoins` survives and stays.** It is a delta with no caller; `setCoins` is an absolute setter that is now used.
+Two verbs are kept because they answer two questions ? "this player should have 500" and "this player earned 50" ? and
+neither can express the other without a read-modify-write across two calls. Typing `setCoins prospeed1 500` against a
+delta would leave the player with their old balance plus 500, which logs as success and is wrong by the amount they
+already had. Deleting the delta now would mean re-adding it in the round where a prize is granted.
+
+**Validation is ordered, and the order is the design.** `checkCoinAmount` tests `not-a-number`, then `nan`, then
+`infinite`, then `not-an-integer`, then `negative`, then `above-cap`. NaN and infinity must come before the integer
+test because that test cannot see them: `math.huge % 1` is NaN, so infinity would be reported as fractional, and every
+comparison against NaN is false, so a NaN would be misreported as negative or as an integer. `-math.huge` reports
+`infinite` rather than `negative` ? it is refused either way and the infinity is the fact worth naming.
+
+**Target resolution is a scan of connected players, not `GetUserIdFromNameAsync`.** The call answers "does this account
+exist", which is not the question: a target who is not in this server is refused anyway, and the call yields and throws
+on an unknown name, so the handler would need a `pcall` and a web request to produce a refusal it can already produce
+locally. Matching is on `Name` (case-insensitive, unique) and the log prints `Name/DisplayName`, because a human reads
+one of the two and only the username is an identity.
+
+**One log line per action, written by the command layer.** The audit line is the only record that a wipe happened, so it
+names the admin, the target and the value; `setCoins`/`wipeData` print nothing on success because they do not know who
+the admin is. A non-admin's text is never parsed ? refusing on the UserId alone means every stranger gets the same line
+whatever they typed, so a malformed argument cannot confirm that the command exists or teach its syntax.
+
+**Two acceptance criteria were unsatisfiable as written, and were resolved by reading them as intent.**
+
+1. *"`grep "\uXXXX"` in `src/` is 0"* and *"no `RemoveAsync` exists anywhere in `src/`"*: the first is clean, but the
+   second matched **prose** ? two docblocks that explained why a key is not deleted. Prose was reworded rather than
+   deleting the explanation, so the grep now means "no call exists" instead of "no one mentioned it".
+2. *"Every new number is marked `**Placeholder.**`"* does not fit `ADMIN_USER_IDS`. `41354175` is an identity, not a
+   tuning value; marking it a placeholder invites somebody to adjust it and ship the wrong account. It is explicitly
+   documented as *not* a placeholder, next to `ADMIN_COIN_CAP`, which is.
+
+**Tests: 74 -> 114, all green.** New `src/server/test/admin.spec.ts` (40). Covers: the list holds exactly one UserId and
+it is `41354175`; `isAdmin` admits it and refuses `0`, a neighbour id and `-1`; every `checkCoinAmount` refusal with its
+distinct reason, including `0` being *accepted* and both infinities; all three accepted command shapes (with `/dev`,
+with bare `dev`, with no alias), whitespace collapse, case-insensitive subcommand, and each malformed form;
+`findPlayerByName` case-insensitive on `Name` and *not* matching `DisplayName`; `applyCoinSet` sets absolute, saves once,
+accepts zero, reverts on failure and touches nothing else; `applyProfileReset` resets to `STARTING_COINS` with empty
+balls and purchases, keeps `version`, and on save failure leaves the profile **byte-identical** (snapshot-and-compare,
+including that the purchases array is restored in full rather than merely emptied).
+
+**Not verified without Studio:** that a `TextChatCommand` parented to `TextChatService.TextChatCommands` with
+`PrimaryAlias = "/dev"` actually fires on the server, and whether `unfilteredText` arrives with or without the alias.
+Both are handled tolerantly by `parseDevCommand`, but only a playtest can confirm the command is reachable at all. Also
+unverified in-engine: the visual result of `wipeData` (coins pill to 500, inventory empty, without rejoining), and that
+a non-admin's line appears exactly once.
+
+**Still owed:** `Open 10` remains non-atomic (item 64), `View All` is still a placeholder, and the `/dev` command has no
+help text ? by design, since help would advertise the subcommands to anyone who guessed the alias.
+
+## 66. `Open 10` is one bulk purchase; the client queue is gone
+
+`Open 10` was a client loop: ten `FireServer` calls 500 ms apart, each hitting the server's cooldown gate on its own. It
+is now one call, one roll loop, one save and one reply.
+
+**Three failures, one shape.** (1) The rate limiter refused presses the client had already counted, so ten presses bought
+nine chests. (2) Ten writes in five seconds drew `DataStore request was added to queue`. (3) Every call mutated one
+shared `Profile` and then yielded inside `saveAsync`, so a failing call would have restored a `coinsBefore` captured
+before a later call decremented ? a revert that clobbers a debit it never saw. One call has no concurrent sibling.
+
+**The "free chest" was a logging defect, not a lost debit.** The 14:47 run printed `chest ok ball=split_ball coins=74100`
+twice. `openCoinChest` printed `profile.coins` **after** `saveAsync` ? which yields ? so the line read a shared mutable
+field that a later in-flight chest had already changed. Two prints, one value, no missing debit. The arithmetic proves
+it: nine accepted presses from 75000 land on exactly 74100, which is the last value printed, and no `save failed` line
+exists, so no revert ran. The fix is to capture the balance on the near side of the yield: `coins=${coinsBefore}->${coinsAfter}`.
+
+**The residual hazard the bulk verb removes:** two overlapping calls both debiting one shared profile is safe (read and
+write are adjacent, no yield between), but a *failed* save reverting a stale snapshot would undo a debit it never saw. A
+single call cannot overlap with itself, and the client's guard now releases on the reply rather than on a timer, so an
+`Open 10` and its own retry cannot interleave.
+
+**Transport: a `count` argument on the existing `OpenCoinChest` remote.** The handler took no arguments and validated
+nothing, so the cost of adding one is adding validation ? which `checkBulkOpenCount` supplies. A sibling remote would
+have meant two handlers for one verb and two call sites for the client to choose between. The cooldown is charged
+**once**, in the handler, for the whole request.
+
+**`count === 1` still goes to `openCoinChest`.** The server dispatches on the literal number: `Open 1` buys one chest
+without paying for a `ownedBalls` snapshot it cannot need, and `Open 10` goes to `openChestsBulk`. Everything else ?
+`undefined`, a string, a table, NaN, `-1`, `11` ? goes to the bulk verb, whose validator produces the refusal, so a
+hostile argument cannot reach a code path that skips validation.
+
+**`MAX_BULK_OPEN` is shared, not server-only.** The store's button is *built* from it (label, price, enabled state), so a
+cap the server enforced while the client guessed would be a button that can ask for something the server always refuses.
+`chestBatchCost` and `canAffordChests` are shared for the same reason: the button's state and the server's up-front
+check are one question with one answer.
+
+**Affordability is checked before the first roll.** A batch that cannot be paid for rolls nothing, so a refusal cannot
+leak the outcome of a roll the player did not buy ? the same rule `openCoinChest` follows for one chest.
+
+**The button says why it cannot act.** The price line becomes `have/price` (`500/1000`) and the whole button dims, so the
+reason is on the control the player is looking at rather than in a status line they have to press a dead button to
+reach. `fireChest` still re-checks and can explain in a sentence: that path covers a balance that changed under the
+button, and a client check is never the authority anyway.
+
+**Snapshot scope: `coins` and `ownedBalls`.** `openCoinChest` touches nothing else ? no `purchases`, no version, no lock
+? so the batch copies the same two fields. A purchases copy is taken only because `restoreProfile` requires an honest
+"before" for every field it covers; the batch never mutates it.
+
+**Tests: 114 -> 137, all green.** New `src/server/test/bulk-open.spec.ts` (23) rather than edits to the single-chest
+file, whose value is that it describes the old path exactly. Covers: every `checkBulkOpenCount` refusal with its reason
+(0, -1, 1.5, NaN, infinity, cap+1, string, table) and the cap accepted; `chestBatchCost`/`canAffordChests` including the
+exact-cost boundary and a NaN balance; a batch granting exactly ten and debiting exactly ten times the cost with **one**
+save; roll-order reporting; the balance reported being the batch's own; incrementing an existing count; a failed save
+restoring coins and balls byte-identically; a failed call leaving nothing behind so the retry grants the full batch; an
+empty pool aborting the whole batch; and `count = 0` writing nothing.
+
+**Not verified without Studio:** that `Open 10` produces exactly one remote call and one `bulk open` log line, the
+button's rendered dim/`have/price` state, and the absence of the DataStore queue line. The call site is one line and the
+test proves one save, but only a playtest shows the wire.
+
+## 67. `KEY_PREFIX` back to `Player_`; item 64's dev wipe reverted
+
+Item 64 appended a `v2` marker to the profile key so every load would miss and every player would get a fresh profile ?
+a dev wipe with no engine access, since a DataStore key cannot be deleted from outside the engine. It was left in place,
+so every session was loading a blank profile and writing to a second key while the real data sat untouched under the
+shipped prefix. This round puts it back.
+
+**One line, and the docblock that argued for it.** The comment above the constant explained *why bumping it is a safe
+way to get a fresh profile*, which is exactly the advice a future reader must not follow, so it was rewritten rather
+than deleted. It now says that this is the shipped key, that all three key constructions (`loadAsync`, `saveAsync`,
+`release`) derive from it, that changing it orphans every profile with no error and no log line, and that the supported
+way to reset one is `/dev wipeData` (item 65) ? which resets through the store instead of hiding data behind a new key.
+It also records the item 64 incident, **without reproducing the literal string**: the acceptance criterion is that
+`grep "Player_v2_"` in `src/` returns zero, and a docblock that quotes the old prefix would make that grep useless as a
+tripwire. The rejected alternative was to let the mention stand and weaken the criterion.
+
+**Nothing else changed.** No migration, no copy between keys, no deletion of the orphaned profiles, no `SCHEMA_VERSION`
+bump, no `RemoveAsync`. The admin commands and the economy verbs read the profile through the store and never touch the
+key string, so `/dev setCoins` and `/dev wipeData` behave identically before and after.
+
+**Verified before the edit:** the literal appeared in exactly one place (`player-data-store.ts`), and no test pins it ?
+`admin.spec.ts`'s `ADMIN_USER_IDS` hits are the admin list, not the key. 137 tests, `npm run build`, `npm run lint` and
+`prettier --check "src/**/*.ts"` all green, with no test modified.
+
+**What this cannot do, and the one way it loses something.** The revert changes what a *future* load reads. A server
+already running keeps the prefix its modules were evaluated with, so a session started before the revert still reads and
+writes the orphaned keys and cannot touch the restored ones ? stop the playtest, revert, then start a fresh one. Once a
+post-revert session is running it owns the restored key, and `unload` saves it on `PlayerRemoving`: any change made in
+that session, deliberately or through a `/dev` command, is written to the real profile. The Output line
+`[Economy] <name> loaded coins=... balls=...` is the only confirmation of which profile is live.
+
+## 68. Studio writes to a `_Dev` key namespace; the key is built in one function
+
+Studio playtests and the live game share one DataStore, so a playtest's chests, coins and `/dev` writes landed in the
+profile a live player would load, and a playtest's session lock made a live server refuse that player with
+`[Store] ? locked by another session` (and the reverse). Item 64 answered the first half with a one-off prefix bump,
+which is the wrong shape of fix: it changed the key for *every* environment and had to be reverted.
+
+**One function now builds the key.** The literal was concatenated inline at three call sites ? `loadAsync`, `saveAsync`
+and `release` ? so a namespace change was a three-place edit with a lock stranded on a key nobody read if one was
+missed. `profileKeyFor(userId, studio)` is the only place `KEY_PREFIX` is read, `profileKey(player)` is the only place
+`RunService.IsStudio()` is read, and all three sites call the latter. Extraction was part of the round, and the site
+count is why.
+
+**`STUDIO_KEY_SUFFIX = "_Dev"`, a `**Placeholder.**`.** Studio keys are `Player_41354175_Dev`; live keys are unchanged,
+and the live form is pinned character for character in a test because a key that formats differently is a key that
+*misses*, and a miss is a silent fresh profile ? the failure mode item 64 taught this file to fear.
+
+**Why a suffix and not a second `DataStore`:** the store name is baked into every call site that mentions it, while the
+key is built in exactly one function, and a suffix keeps the two forms side by side in the editor ? which is what makes
+"am I looking at test data" answerable at a glance.
+
+**`IsStudio()` is the environment, not the place's publication state.** A playtest of a published place is still Studio,
+so it gets `_Dev` ? which is the case this exists for. A live server is the only place it returns false. No attribute,
+config value or remote participates, deliberately: a namespace a client could influence is not a namespace.
+
+**The cost, written into the docblock rather than left to be discovered:** a playtest's profile is invisible to a live
+server and vice versa, so editing in Studio no longer previews against real data; and Studio keys are never cleaned up,
+because no key-deletion call exists in this tree and a new one is not being added.
+
+**Tests: 137 -> 143.** New `src/server/test/profile-key.spec.ts` (6): the live key pinned to `Player_41354175`, the
+Studio key pinned to `Player_41354175_Dev`, the two namespaces proven distinct, the suffix proven appended rather than
+prefixed or substituted, the id proven present in both forms, and two users proven distinct. No existing test touched ?
+none pinned the key string.
+
+**Not verified here:** that a live server actually reports `IsStudio()` false. The mapping is tested; the predicate's
+value on each host is an engine fact and only a published place can show the live half.
+
+**Operator note.** The first playtest after this change starts from a brand-new empty `_Dev` profile ? 500 coins, no
+balls ? because that namespace has never been written to. Every `Player_` profile is untouched and is what a live server
+reads. `/dev setCoins` and `/dev wipeData` go through the store, so they now operate on the `_Dev` profile in Studio
+without any change of their own.
