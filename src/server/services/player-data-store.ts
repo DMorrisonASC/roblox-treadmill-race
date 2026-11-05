@@ -253,6 +253,46 @@ function isStale(lock: StoredLock | undefined): boolean {
 }
 
 /**
+ * Ball ids that were renamed, as `old -> new` pairs.
+ *
+ * ## Why a read-time table and not a `SCHEMA_VERSION` bump
+ *
+ * Because a bump would cost every player everything. `readStored` **refuses** any profile whose version is not this
+ * build's, and a refused profile puts the session in `readonly`: no coins, no balls, no chest, no round — the same
+ * outcome item 64 produced by accident with a key prefix. A rename is not a schema change: the field is still
+ * `ownedBalls`, the shape is still `id -> count`, and this mapping is **exact** rather than a guess about what an old
+ * field meant. So the version stays at `1` and the old id is translated on the way in.
+ *
+ * ## What it prevents
+ *
+ * `ownedBallsFrom` drops any id `BALL_POOL` does not know. Without this table, a rename would leave every existing
+ * `split_ball` count sitting in the profile and invisible: not listed in the inventory, not offered by the picker, and
+ * nothing anywhere logging that a ball had disappeared. **Silent, permanent and unlogged** — the same three properties
+ * that make a key-prefix bump dangerous, and the reason this lives at the one gate every load passes through.
+ *
+ * A pair list rather than a `Map`: two entries of `[from, to]` are the whole mechanism, it needs no constructor form
+ * roblox-ts might compile differently, and the next rename is a row rather than a version.
+ *
+ * **This is the only place the retired id is written down in `src/`.** A second occurrence is how a rename gets
+ * half-applied; if one appears, delete it or move it here.
+ */
+const BALL_ID_RENAMES: ReadonlyArray<[string, string]> = [
+	["split_ball", "decoy_ball"],
+	["prism_ball", "recycle_ball"],
+];
+
+/** The current id for a stored ball id: the renamed one if there is a row for it, the same id otherwise. */
+function migratedBallId(storedBallId: string): string {
+	for (const [from, to] of BALL_ID_RENAMES) {
+		if (storedBallId === from) {
+			return to;
+		}
+	}
+
+	return storedBallId;
+}
+
+/**
  * Validates a stored value and converts it to a live profile.
  *
  * **Every field is checked with `typeIs` rather than trusted from the type parameter.** The generic on
@@ -286,12 +326,17 @@ export function readStored(value: unknown): Stored | undefined {
 	}
 
 	const ownedBalls = new Map<string, number>();
-	for (const [ballId, count] of pairs(rawOwned as Record<string, unknown>)) {
-		if (!typeIs(ballId, "string") || !typeIs(count, "number")) {
+	for (const [storedBallId, count] of pairs(rawOwned as Record<string, unknown>)) {
+		if (!typeIs(storedBallId, "string") || !typeIs(count, "number")) {
 			return undefined;
 		}
 
-		ownedBalls.set(ballId, count);
+		// Read through the rename table, so a profile written before the `decoy_ball` rename still owns its balls — see
+		// `BALL_ID_RENAMES` for what its absence would cost. The count is **added** to whatever is already under the new
+		// id rather than assigned, so a stored table containing both the old and the new id (only reachable from a profile
+		// written by two different builds) keeps both grants instead of silently losing one of them.
+		const ballId = migratedBallId(storedBallId);
+		ownedBalls.set(ballId, (ownedBalls.get(ballId) ?? 0) + count);
 	}
 
 	// **Absent is normal.** Every profile written before the Robux chest existed has no `purchases` key; a missing list

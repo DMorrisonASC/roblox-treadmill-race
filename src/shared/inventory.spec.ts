@@ -56,7 +56,7 @@ describe("ownedBallsFrom", () => {
 	});
 
 	it("resolves each ball's rarity", () => {
-		const balls = ownedBallsFrom(encode({ bully_ball: 1, prism_ball: 1 }));
+		const balls = ownedBallsFrom(encode({ bully_ball: 1, recycle_ball: 1 }));
 
 		for (const ball of balls) {
 			if (ball.id === "bully_ball") {
@@ -68,7 +68,7 @@ describe("ownedBallsFrom", () => {
 	});
 
 	it("orders by rarity, so the grid is stable between reads", () => {
-		const ascending = ownedBallsFrom(encode({ prism_ball: 1, bully_ball: 1, magnet_ball: 1 }));
+		const ascending = ownedBallsFrom(encode({ recycle_ball: 1, bully_ball: 1, magnet_ball: 1 }));
 
 		// Common first, legendary last, regardless of the order the ids happen to appear in the attribute.
 		expect(ascending[0].rarity).toBe("common");
@@ -96,7 +96,7 @@ describe("fusionOddsForBall", () => {
 	});
 
 	it("returns nothing for a legendary, which cannot be fused", () => {
-		expect(fusionOddsForBall("prism_ball").size()).toBe(0);
+		expect(fusionOddsForBall("recycle_ball").size()).toBe(0);
 	});
 
 	it("returns nothing for a ball it does not know", () => {

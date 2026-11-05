@@ -730,6 +730,29 @@ export const BALL_SPEED_START_JITTER = 1;
 export const BALL_SPEED_MIN = 0;
 
 /**
+ * **Placeholder.** The ceiling nothing may push `BALL_SPEED` above, in studs/second.
+ *
+ * ## Why a ceiling exists at all
+ *
+ * Because exactly one mechanic has no natural bound. A `bully` collision moves speed from one ball to another, and two
+ * balls wedged together exchange on a cooldown for as long as they stay in contact; item 22's log climbed **30 → 56.6
+ * across 428 impulses**, which is a ball moving at five times the belt and a round that cannot end. Every other writer is
+ * a designed value — a pickup's 12, a sprinter's 16, a rocket's 18 — and none of them needs bounding.
+ *
+ * ## Why 20 and not 12
+ *
+ * The argument against a ceiling is that nothing legitimate goes above 12. That was true before this round; it is not true
+ * now, because `ROCKET_TARGET_SPEED` is 18 by design. A ceiling at 12 would silently erase the rocket on the very next
+ * tick, which is the failure mode a clamp introduces when it is set to the *observed* maximum rather than to the
+ * *designed* one. 20 sits above every designed value, so the clamp never binds in normal play and binds only on
+ * accumulation — which is the only thing it is for.
+ *
+ * **This is a safety net, not a balance guard.** Nothing derives a power's magnitude from it, and the designer tunes the
+ * powers.
+ */
+export const BALL_SPEED_MAX = 20;
+
+/**
  * **Placeholder.** The speed a pickup sets a ball to, in studs/second. Above `BELT_SPEED` on purpose.
  *
  * ## Why above the reference, which is the opposite of the old model

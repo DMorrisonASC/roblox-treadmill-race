@@ -14,6 +14,17 @@ import {
 	SPAWNER_KILL_Y_ATTRIBUTE,
 	SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE,
 } from "shared/attributes";
+import { powerForBallId } from "shared/powers.config";
+import {
+	DECOY_OFFSET_STUDS,
+	forgetBall as forgetBallPower,
+	onRoundActive,
+	presentPower,
+	setPower,
+	setRoundActive as setPowersRoundActive,
+	spawnsDecoy,
+	tickDelta,
+} from "server/powers";
 
 import {
 	pickPoolEntry,
@@ -29,6 +40,7 @@ import {
 	BALL_BACKSPIN_MIN_BELT_SPEED,
 	BALL_BACKSPIN_TARGET_SLIP,
 	BALL_SPEED_DECAY_RATE,
+	BALL_SPEED_MAX,
 	BALL_SPEED_MIN,
 	BALL_SPEED_START,
 	BALL_SPEED_START_JITTER,
@@ -75,9 +87,13 @@ export interface BallOwner {
 	/**
 	 * The ball this competitor races as, when a round picked one.
 	 *
-	 * **Absent for synthetic debug owners**, which never pass through the picker. The attribute is written only when the
-	 * value exists, because an empty string is a *value* — it would read as "this body races as nothing", which is a
-	 * different statement from "nobody picked for this body".
+	 * **Absent for a player who never picked, and for the `decoy` twin.** The attribute is written only when the value
+	 * exists, because an empty string is a *value* — it would read as "this body races as nothing", which is a different
+	 * statement from "nobody picked for this body".
+	 *
+	 * **Present for a synthetic debug owner**, which does not pass through the picker: `RoundService.debugSpawnCompetitors`
+	 * draws a distinct id per body so a Studio session can exercise several powers in one press. That draw is the debug
+	 * path's own; it is *not* a fallback inside `spawnBall`, because a fallback would also hand a power to the decoy.
 	 */
 	readonly chosenBallId?: string;
 }
@@ -417,6 +433,32 @@ export class BallSpawnerService implements OnStart {
 	private readonly ballKillY = new Map<BasePart, number>();
 
 	/**
+	 * Which decoy a body spawned: **parent -> twin**, for the `decoy` power.
+	 *
+	 * ## Why a map rather than an attribute on the body
+	 *
+	 * An attribute *can* hold an instance reference — `SetAttributeValue` accepts an `Instance` and `AttributeValue` carries
+	 * an `InstanceHandle` — so this was a real choice rather than a forced one. Three things decided it:
+	 *
+	 * - **The read side is not the write side.** `GetAttribute` returns `AttributeValue`, whose instance member is
+	 *   `InstanceHandle`, not `BasePart`: every read would need an unchecked assertion to reach `.Parent`, and nothing in the
+	 *   type would prove the handle still points at a live body.
+	 * - **A handle to a destroyed instance reads back as `nil`**, which silently erases the link at exactly the moment this
+	 *   map has to answer a question about it — a parent culled while its twin is still on the belt.
+	 * - **It would replicate.** The link is server-only information; a client that could read it would not need the
+	 *   `DecoyOutline` request to be refused at all.
+	 *
+	 * **An `OwnerUserId` on the decoy was rejected for a different reason:** that is the field `getCompetitors()` filters
+	 * on, so writing it would make the twin a competitor and change the winner rule. The link has to live somewhere that is
+	 * not the body's identity.
+	 *
+	 * Cleared in both death paths — the parent's and the twin's — so its size tracks the live set like every other map in
+	 * this file. It is tiny (one entry per `decoy` competitor, so at most one per lane) and the reverse scan in
+	 * `forgetDecoy` costs nothing at that size.
+	 */
+	private readonly decoysByParent = new Map<BasePart, BasePart>();
+
+	/**
 	 * Each live ball's decorative weave state: which way it is currently drifting across the belt, and the
 	 * belt-local `Z` at which it turns around (signed, always the same sign as `direction`).
 	 *
@@ -622,6 +664,11 @@ export class BallSpawnerService implements OnStart {
 	public setRoundActive(active: boolean): void {
 		this.roundActive = active;
 
+		// **The powers' own view of the same fact.** `onBallCollision` had no phase gate until item 80 and relied on the
+		// proportional drain to make a `PostGame` transfer a no-op; this is the signal that lets it refuse outright, and it
+		// is the same boolean `stepBallSpeeds` already trusts — so it cannot disagree with the simulation.
+		setPowersRoundActive(active);
+
 		if (active) {
 			// **The round start is the moment the ride begins, so it is the moment the speed is seeded.**
 			//
@@ -645,6 +692,10 @@ export class BallSpawnerService implements OnStart {
 			for (const ball of this.liveBalls) {
 				if (ball.Parent !== undefined) {
 					ball.SetAttribute(BALL_SPEED_ATTRIBUTE, this.startSpeeds.get(ball) ?? BALL_SPEED_START);
+					// **The powers' timers start here and nowhere else.** A ball that spent fifteen seconds in `Waiting`
+					// must not spend its rocket there, so `Playing` entry is the clock's origin. A body spawned after this
+					// point gets its timers from `spawnBall`, which is the only other entry point.
+					onRoundActive(ball);
 					seeded++;
 				}
 			}
@@ -984,8 +1035,22 @@ export class BallSpawnerService implements OnStart {
 		// The pick, written in the same block and for the same reason: before `Parent`, so no frame exists in which a body
 		// has an owner but no chosen ball. A label, not a grant — the id is not added to `OwnedBalls`, and the body's
 		// appearance is untouched this round.
-		if (owner.chosenBallId !== undefined) {
-			ball.SetAttribute(CHOSEN_BALL_ID_ATTRIBUTE, owner.chosenBallId);
+		const chosenBallId = owner.chosenBallId;
+		if (chosenBallId !== undefined) {
+			ball.SetAttribute(CHOSEN_BALL_ID_ATTRIBUTE, chosenBallId);
+		}
+
+		// **The power, derived from the pick and written before `Parent`** — the same block as the owner, for the same
+		// reason: a body must never exist, even for one frame, carrying an owner and a chosen ball but no power, because
+		// the tick loop and every collision handler read `Power` and would spend that frame treating it as powerless.
+		//
+		// `setPower` does more than the attribute: the collision group (which `ghost` needs before the first physics step),
+		// the badge, and — for the two colliding powers — the `Touched` connection. `chosenBallId` is *rewritten* later
+		// when the player picks, and `RoundService.applyChosenBall` calls `setPower` again for exactly that reason, so this
+		// call is not the only one.
+		const power = chosenBallId !== undefined ? powerForBallId(chosenBallId) : undefined;
+		if (power !== undefined) {
+			setPower(ball, power, entry.size.X / 2);
 		}
 
 		// `fromMatrix` rather than `CFrame.Angles` composition: `randomSpawnRotation` already returned the
@@ -1051,9 +1116,145 @@ export class BallSpawnerService implements OnStart {
 
 		this.liveBalls.push(ball);
 		this.ballKillY.set(ball, this.readNumber(spawner, SPAWNER_KILL_Y_ATTRIBUTE, this.deriveKillY()));
+
+		// Timers start at `Playing` for every body, including one spawned into a running round — a ball created mid-round
+		// has no `Waiting` to sit out, but it must still get its rocket and its eclipse drawn, and the only place that
+		// happens is here or in `setRoundActive(true)`.
+		if (this.roundActive) {
+			onRoundActive(ball);
+		}
+
+		// The decoy last, so the body it copies is fully registered and so a decoy destroyed by the cap on this very spawn
+		// cannot take its parent with it.
+		if (power !== undefined && spawnsDecoy(power)) {
+			this.spawnDecoy(spawner, ball, entry, power, startSpeed);
+		}
+
 		this.enforceCap();
 
 		return ball;
+	}
+
+	/**
+	 * One ownerless body beside a `decoy` ball — its twin.
+	 *
+	 * ## What "ownerless" buys, and what it costs
+	 *
+	 * It carries **no owner attributes**, which is what makes it an orphan rather than a competitor:
+	 * `RoundService.getCompetitors()` filters on the owner pair, so a decoy cannot win, cannot hold a round open, and
+	 * cannot be reported as anybody's elimination. It is still a body on the belt that other balls collide with, which is
+	 * the entire point of the power.
+	 *
+	 * ## It looks exactly like its parent, and that is deliberate
+	 *
+	 * The first version of this decoy was a bare sphere: no `Power` attribute, no badge, no face textures and no markers.
+	 * That made it identifiable across the arena, so `decoy` deceived nobody and its only real effect was to hold a
+	 * `MaxLiveBalls` slot. It now gets the same four things the parent got — the attribute and badge through
+	 * `presentPower` (not `setPower`), the textures, and the markers.
+	 *
+	 * **`presentPower`, never `setPower`.** `setPower` also fills the aura registries and connects a `Touched` handler,
+	 * so a decoy made with it would project a real `magnet` or `eclipse` aura — an `eclipse` decoy would freeze the field
+	 * from a body the winner rule cannot see. Everything a viewer perceives goes through `presentPower`; everything the
+	 * simulation acts on stays with the parent. The decoy's `Power` attribute is therefore a *label*, and every mechanic
+	 * that reads one either skips it (`tickDelta` has no state for it, the aura registries never gain it) or is
+	 * cosmetic (`bouncy` hops, a `sprinter` decoy takes the bigger pickup boost).
+	 *
+	 * Two costs, stated rather than hidden:
+	 *
+	 * - **It counts toward `MaxLiveBalls`.** `enforceCap` is a body count, and excluding decoys would mean two notions of
+	 *   "a ball that counts" that every reader would have to know about. So a cap-bound round loses a real competitor
+	 *   sooner, and the log line for its eviction names `owner=none`.
+	 * - **`settleEliminations` sees it leave the belt** and logs an elimination with no owner. Nothing tells a player,
+	 *   because `notifyEliminated` refuses an ownerless body — but the count in the log will not match the number of
+	 *   players.
+	 */
+	private spawnDecoy(
+		spawner: BasePart,
+		parent: Part,
+		entry: ShapePoolEntry,
+		power: string,
+		startSpeed: number,
+	): void {
+		const decoy = new Instance("Part");
+		decoy.Name = "Decoy";
+		decoy.Shape = parent.Shape;
+		decoy.Size = parent.Size;
+		decoy.Anchored = false;
+		decoy.CanCollide = true;
+		decoy.Material = parent.Material;
+		decoy.TopSurface = Enum.SurfaceType.Smooth;
+		decoy.BottomSurface = Enum.SurfaceType.Smooth;
+		decoy.CFrame = parent.CFrame.add(new Vector3(DECOY_OFFSET_STUDS, 0, 0));
+
+		// The attribute, the collision group and the badge — the three things `setPower` does that a viewer can see, and
+		// none of the two it does that the simulation acts on. Applied before `Parent` for the same reason the parent's is:
+		// a body must never exist for a frame looking like a ball it is not.
+		presentPower(decoy, power, entry.size.X / 2);
+
+		// The six face textures, before `Parent` so they arrive as one tree rather than as separate child creations — the
+		// same ordering `spawnBall` uses. This consumes one slot of `BALL_TEXTURE_LOG_LIMIT`, which is instrumentation for
+		// the parent's spawn path; a decoy being logged there is acceptable and no longer distinguishable in the log.
+		this.attachBallTexture(decoy, entry);
+
+		// **No `ChosenBallId`.** It is a label for "the ball a player picked", and no player picked this body; every reader
+		// of it either filters on an owner (`applyChosenBall`) or is a log line that would then lie.
+		decoy.Parent = this.ballsFolder();
+		CollectionService.AddTag(decoy, TAGS.ball);
+
+		this.startSpeeds.set(decoy, startSpeed);
+		decoy.SetAttribute(BALL_SPEED_ATTRIBUTE, startSpeed);
+		this.lateral.set(decoy, this.newWeave());
+
+		// After `Parent`, for the reason the parent's markers are: the poles and the ring are anchored and carry their local
+		// offset as attributes, so they need the body to be in the DataModel before `CFrame.ToObjectSpace` has a meaningful
+		// frame. Without them the decoy is a sphere with textures and a badge but no spinning cues, which reads as a
+		// different object the moment it moves.
+		this.attachBallMarkers(decoy, entry);
+
+		this.liveBalls.push(decoy);
+		this.ballKillY.set(decoy, this.readNumber(spawner, SPAWNER_KILL_Y_ATTRIBUTE, this.deriveKillY()));
+
+		// The link the `DecoyOutline` remote answers from — see `decoysByParent` for why it is a map and not an attribute.
+		this.decoysByParent.set(parent, decoy);
+	}
+
+	/**
+	 * The twin a body spawned, if it spawned one and the twin is still alive.
+	 *
+	 * `undefined` covers both "this body is not a `decoy` ball" and "its twin has already been destroyed", which are the
+	 * same answer to any caller: there is no second body to point at. A caller that needs to tell them apart would be
+	 * asking a question nobody has to ask.
+	 */
+	public decoyFor(parent: BasePart): BasePart | undefined {
+		const decoy = this.decoysByParent.get(parent);
+		if (decoy === undefined || decoy.Parent === undefined) {
+			return undefined;
+		}
+
+		return decoy;
+	}
+
+	/**
+	 * Drops any decoy link involving this body, whichever side of it the body is.
+	 *
+	 * Called from both death paths with whichever body died. A parent's death leaves an orphaned twin on the belt — the twin
+	 * is not a child of the parent, deliberately, because `Destroy()` on the parent must not silently remove a body the
+	 * round may still be counting — so both directions have to be handled. The map is at most one entry per lane, which is
+	 * why the reverse scan is a loop rather than a second index that could disagree with the first.
+	 */
+	private forgetDecoy(ball: BasePart): void {
+		this.decoysByParent.delete(ball);
+
+		const stale = new Array<BasePart>();
+		for (const [parent, decoy] of this.decoysByParent) {
+			if (decoy === ball) {
+				stale.push(parent);
+			}
+		}
+
+		for (const parent of stale) {
+			this.decoysByParent.delete(parent);
+		}
 	}
 
 	private ballsFolder(): Folder {
@@ -1137,11 +1338,20 @@ export class BallSpawnerService implements OnStart {
 			const speed = this.readNumber(ball, BALL_SPEED_ATTRIBUTE, BALL_SPEED_START);
 			// `decayed`, not `next`: `next` is a Lua global and roblox-ts rejects the identifier outright.
 			const decayed = math.max(BALL_SPEED_MIN, speed - BALL_SPEED_DECAY_RATE * dt);
-			if (decayed !== speed) {
-				ball.SetAttribute(BALL_SPEED_ATTRIBUTE, decayed);
+
+			// **The powers speak once per ball per tick, and this loop is still the only writer.** `tickDelta` returns a
+			// signed delta — a rocket's snap, an eclipse or magnet victim's extra decay — and the clamp is applied here so
+			// that every contributor's arithmetic lands inside the model's range exactly once. A power that clamped its own
+			// delta would disagree with one that did not.
+			const delta = tickDelta(ball, { dt, roundActive: true });
+			// `advanced`, not `next`: `next` is a Lua global and roblox-ts rejects the identifier outright — the same
+			// reason the line above calls its intermediate `decayed`.
+			const advanced = math.clamp(decayed + delta, BALL_SPEED_MIN, BALL_SPEED_MAX);
+			if (advanced !== speed) {
+				ball.SetAttribute(BALL_SPEED_ATTRIBUTE, advanced);
 			}
 
-			const relative = decayed - beltSpeed;
+			const relative = advanced - beltSpeed;
 			const velocity = ball.AssemblyLinearVelocity;
 			const along = velocity.Dot(right);
 
@@ -1466,6 +1676,8 @@ export class BallSpawnerService implements OnStart {
 				this.startSpeeds.delete(ball);
 				this.releaseBackspin(ball);
 				this.releaseWallAssist(ball);
+				forgetBallPower(ball);
+				this.forgetDecoy(ball);
 			} else {
 				surviving.push(ball);
 			}
@@ -1542,6 +1754,14 @@ export class BallSpawnerService implements OnStart {
 		}
 
 		this.ballKillY.delete(ball);
+		// `lateral` and `startSpeeds` were missing from this block until this round: `pruneDestroyedBalls` clears them for a
+		// body that left the world by itself, but a body removed *here* is taken out of `liveBalls` before `Destroy()`, so
+		// the prune never sees it and both maps grew by one entry per cap and kill-plane destruction for the session. Found
+		// while placing `forgetBall` in this block, which is the same bug for a third map.
+		this.lateral.delete(ball);
+		this.startSpeeds.delete(ball);
+		forgetBallPower(ball);
+		this.forgetDecoy(ball);
 		this.releaseBackspin(ball);
 		this.releaseWallAssist(ball);
 		const index = this.liveBalls.indexOf(ball);

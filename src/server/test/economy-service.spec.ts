@@ -220,13 +220,13 @@ describe("applyRobuxChestGrant", () => {
 				return true;
 			},
 			() => "legendary",
-			() => "prism_ball",
+			() => "recycle_ball",
 		);
 
 		expect(outcome).toBe("duplicate");
 		// Not merely "did not add a second ball": it did not write at all, because a duplicate has nothing to persist.
 		expect(saves).toBe(0);
-		expect(profile.ownedBalls.get("prism_ball")).toBe(undefined);
+		expect(profile.ownedBalls.get("recycle_ball")).toBe(undefined);
 		expect(profile.ownedBalls.get("heavy_ball")).toBe(1);
 	});
 
@@ -368,7 +368,7 @@ describe("applyRobuxChestBundleGrant", () => {
 
 	it("reports every granted ball id, in roll order", () => {
 		const profile = profileWith({});
-		const picks = ["heavy_ball", "split_ball", "magnet_ball"];
+		const picks = ["heavy_ball", "decoy_ball", "magnet_ball"];
 		let picked = 0;
 
 		const result = applyRobuxChestBundleGrant(
@@ -389,7 +389,7 @@ describe("applyRobuxChestBundleGrant", () => {
 		expect(result.outcome).toBe("granted");
 		expect(result.granted.size()).toBe(3);
 		expect(result.granted[0]).toBe("heavy_ball");
-		expect(result.granted[1]).toBe("split_ball");
+		expect(result.granted[1]).toBe("decoy_ball");
 		expect(result.granted[2]).toBe("magnet_ball");
 	});
 
@@ -406,19 +406,19 @@ describe("applyRobuxChestBundleGrant", () => {
 				return true;
 			},
 			() => "legendary",
-			() => "prism_ball",
+			() => "recycle_ball",
 		);
 
 		expect(result.outcome).toBe("duplicate");
 		expect(result.granted.size()).toBe(0);
 		expect(saves).toBe(0);
-		expect(profile.ownedBalls.get("prism_ball")).toBe(undefined);
+		expect(profile.ownedBalls.get("recycle_ball")).toBe(undefined);
 	});
 
 	it("restores ownedBalls and purchases exactly when the save fails", () => {
 		// A profile that already owns something, so the restore has a real prior state to reproduce rather than an empty
 		// one where "correct" and "wiped" would look the same.
-		const profile = profileWith({ split_ball: 2, ghost_ball: 1 }, ["older-purchase"]);
+		const profile = profileWith({ decoy_ball: 2, ghost_ball: 1 }, ["older-purchase"]);
 		const ballsBefore = profile.ownedBalls.size();
 		const purchasesBefore = profile.purchases.size();
 
@@ -435,7 +435,7 @@ describe("applyRobuxChestBundleGrant", () => {
 		expect(result.granted.size()).toBe(0);
 		expect(profile.ownedBalls.size()).toBe(ballsBefore);
 		expect(profile.ownedBalls.get("rocket_ball")).toBe(undefined);
-		expect(profile.ownedBalls.get("split_ball")).toBe(2);
+		expect(profile.ownedBalls.get("decoy_ball")).toBe(2);
 		expect(profile.ownedBalls.get("ghost_ball")).toBe(1);
 		expect(profile.purchases.size()).toBe(purchasesBefore);
 		expect(profile.purchases[0]).toBe("older-purchase");

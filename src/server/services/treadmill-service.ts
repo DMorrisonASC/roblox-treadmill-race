@@ -2,6 +2,7 @@ import { CollectionService } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
 import { BELT_VISUAL_SPEED_ATTRIBUTE, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED } from "shared/attributes";
 import { TAGS } from "shared/tags";
+import { powerOf } from "server/powers";
 import {
 	BELT_BOUNCE_CHANCE,
 	BELT_BOUNCE_COOLDOWN,
@@ -449,11 +450,16 @@ export class TreadmillService implements OnStart {
 	 * depend on touch frequency in a way the constants do not describe.
 	 */
 	private rollBounce(_belt: BasePart, other: BasePart): void {
-		// The gate. First statement in the handler so a disabled assist costs one boolean read per contact
-		// and nothing more — see `BELT_BOUNCE_ENABLED` for why it is off this round and how to turn it back
-		// on. Everything below is left exactly as it was, so flipping the constant restores the previous
-		// behaviour with no other diff.
-		if (!BELT_BOUNCE_ENABLED) {
+		// The gate. First statements in the handler so a disabled assist costs one tag test and, for a ball, one attribute
+		// read — see `BELT_BOUNCE_ENABLED` for why it is off this round and how to turn it back on. Everything below is left
+		// exactly as it was, so flipping the constant restores the previous behaviour with no other diff.
+		//
+		// **`bouncy` overrides the gate**, and this is the one place the assist can still fire while the constant is `false`.
+		// The constant exists to keep a *this-round experiment* quiet — the belt material changed in the same round and two
+		// variables at once would be unreadable — whereas `bouncy` is a designed property of one ball that ships. A gate
+		// that suppressed it would make the ball's entire power invisible. The ordering matters: the tag test comes first so
+		// the attribute read is only paid for a ball, and only when the global gate is off.
+		if (!BELT_BOUNCE_ENABLED && (!other.HasTag(TAGS.ball) || !isBouncyBall(other))) {
 			return;
 		}
 
@@ -734,4 +740,14 @@ export class TreadmillService implements OnStart {
 
 		return this.getBeltSpeed();
 	}
+}
+
+/**
+ * Whether a body is the one ball the belt-bounce assist is allowed to fire for while the global gate is off.
+ *
+ * A free function rather than a method because it needs no service state and because `rollBounce` calls it on the hot
+ * path — one attribute read, no method dispatch through `self`.
+ */
+function isBouncyBall(part: BasePart): boolean {
+	return powerOf(part) === "bouncy";
 }

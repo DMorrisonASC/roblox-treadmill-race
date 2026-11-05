@@ -159,6 +159,39 @@ export const OWNER_DISPLAY_NAME_ATTRIBUTE = "OwnerDisplayName";
  */
 export const CHOSEN_BALL_ID_ATTRIBUTE = "ChosenBallId";
 
+/**
+ * The power a body races with, written at spawn from the chosen ball's id and rewritten when the player's pick changes.
+ *
+ * ## Why a derived attribute and not a lookup at the point of use
+ *
+ * Every reader of this is on the hot path — the tick loop, a `Touched` handler, `PickupService` — and each would otherwise
+ * have to resolve `ChosenBallId` through `BALL_POOL` and `POWERS` on every read. Attributes replicate with the instance and
+ * die with it, so the power is available to a client (for the badge) and to any future consumer without an API call, and
+ * needs no cleanup on any of the four death paths.
+ *
+ * **A body with no `Power` attribute has no power**, and that is load-bearing rather than incidental: an ownerless decoy is
+ * exactly such a body, and "no attribute" must never be read as "the default power".
+ */
+export const POWER_ATTRIBUTE = "Power";
+
+/**
+ * Whether a body's owner attribute pair names a competitor.
+ *
+ * ## Why this is pure, and why it is here
+ *
+ * "An ownerless body does not compete" used to be a fact about stray bodies. It is now load-bearing for a feature: the
+ * `decoy` power spawns one body per `decoy_ball` with **no** owner attributes at all, so this predicate returning `false`
+ * is the whole reason a decoy cannot win, cannot hold a round open and cannot be reported as somebody's elimination. A
+ * spec cannot construct a `BasePart`, so the rule is written over the two attribute *values* — which is also the only form
+ * in which it can be tested.
+ *
+ * Both attributes are required. A body with an id but no display name would log as `winner=`, and a body with a name but no
+ * id cannot be identified, so a half-written pair is not an owner.
+ */
+export function hasOwnerIdentity(userId: unknown, displayName: unknown): boolean {
+	return typeIs(userId, "number") && typeIs(displayName, "string");
+}
+
 /** Attribute on a `BallSpawner` part: hard cap on live balls. */
 export const SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE = "MaxLiveBalls";
 /**

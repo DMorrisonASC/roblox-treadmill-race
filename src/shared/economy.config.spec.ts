@@ -69,14 +69,14 @@ describe("decodeOwnedBalls", () => {
 		const owned = new Map<string, number>();
 		owned.set("bully_ball", 2);
 		owned.set("ghost_ball", 1);
-		owned.set("prism_ball", 4);
+		owned.set("recycle_ball", 4);
 
 		const decoded = decodeOwnedBalls(encodeOwnedBalls(owned));
 
 		expect(decoded.size()).toBe(3);
 		expect(decoded.get("bully_ball")).toBe(2);
 		expect(decoded.get("ghost_ball")).toBe(1);
-		expect(decoded.get("prism_ball")).toBe(4);
+		expect(decoded.get("recycle_ball")).toBe(4);
 	});
 
 	it("survives a malformed attribute instead of throwing", () => {

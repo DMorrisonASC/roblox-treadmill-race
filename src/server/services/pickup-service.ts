@@ -5,7 +5,6 @@ import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import { TAGS } from "shared/tags";
 import {
 	BELT_SURFACE_THICKNESS,
-	BOOST_TARGET_BALL_SPEED,
 	PICKUP_COLOR,
 	PICKUP_SIZE,
 	PICKUP_SPAWN_INTERVAL_SECONDS,
@@ -14,6 +13,7 @@ import {
 	PICKUPS_FOLDER_NAME,
 } from "shared/tuning";
 import { BallSpawnerService } from "./ball-spawner-service";
+import { pickupDecision, powerOf, speedAfterPickup } from "server/powers";
 
 /**
  * Three-decimal rounding, matching the formatter the other services use so two log lines are comparable.
@@ -340,20 +340,38 @@ export class PickupService implements OnStart {
 		// frame and the pickup would look like it did nothing. Raising the attribute is the actual boost: above
 		// `BELT_SPEED` it makes `RELATIVE_SPEED` positive, which is the direction that carries the ball back
 		// toward the spawn end instead of toward elimination.
+		//
+		// **The power decides the numbers, and every power destroys the pad.** `sprinter` takes a larger boost; every other
+		// ball takes the standard one. See `powers.pickupDecision` for why `consume` is no longer a per-power decision — it
+		// is `true` for every ball, because a surviving pad re-fires this handler on the ball resting on it and the boost is
+		// then re-applied every frame, which stops the ball from ever decaying off the belt. Consuming is decided *here*
+		// because only this handler owns the instance: a power that wanted the pickup destroyed could not do it without
+		// reaching into a map it does not own.
+		const decision = pickupDecision(powerOf(other));
 		const before = this.readBallSpeed(other);
-		if (before < BOOST_TARGET_BALL_SPEED) {
-			other.SetAttribute(BALL_SPEED_ATTRIBUTE, BOOST_TARGET_BALL_SPEED);
+
+		// `speedAfterPickup` rather than an inline comparison: the rule is "the pickup raises, never lowers", and applying it
+		// twice must equal applying it once. Named and pure, it can be asserted; inlined, it could only be read.
+		const after = speedAfterPickup(before, decision.boost);
+		if (after !== before) {
+			other.SetAttribute(BALL_SPEED_ATTRIBUTE, after);
 		}
 
-		const after = this.readBallSpeed(other);
-
-		// Removed before the destroy so the cap sees the slot free immediately, and so a destroy failing for
-		// any reason does not leave a triangle counted as live forever.
-		this.remove(pickup);
-		pickup.Destroy();
+		if (decision.consume) {
+			// Removed before the destroy so the cap sees the slot free immediately, and so a destroy failing for
+			// any reason does not leave a triangle counted as live forever.
+			this.remove(pickup);
+			pickup.Destroy();
+		} else {
+			// **Unreachable today, kept deliberately.** Every decision consumes, so this branch cannot run — but the service
+			// obeys the decision rather than assuming it, and deleting the branch would put the rule in two places: the
+			// `else` here and the return value there. If a future power wants to leave a pad in the world, this is the code
+			// that already handles it.
+			this.reconnect(pickup);
+		}
 
 		print(
-			`[Pickup] collected by ${other.GetFullName()} BALL_SPEED ${formatNumber(before)} -> ${formatNumber(after)} live=${this.live.size()}`,
+			`[Pickup] collected by ${other.GetFullName()} power=${powerOf(other) === "" ? "none" : powerOf(other)} BALL_SPEED ${formatNumber(before)} -> ${formatNumber(after)} consumed=${decision.consume ? "yes" : "no"} live=${this.live.size()}`,
 		);
 	}
 

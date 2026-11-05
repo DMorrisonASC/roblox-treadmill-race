@@ -2,6 +2,7 @@ import { CollectionService, Players, ReplicatedStorage, RunService, Workspace } 
 import { OnStart, Service } from "@flamework/core";
 import {
 	CHOSEN_BALL_ID_ATTRIBUTE,
+	hasOwnerIdentity,
 	OWNER_DISPLAY_NAME_ATTRIBUTE,
 	OWNER_USER_ID_ATTRIBUTE,
 	PLAYER_OWNED_BALLS_ATTRIBUTE,
@@ -11,6 +12,7 @@ import {
 	DEBUG_PLAYING_REMOTE_NAME,
 	DEBUG_SPAWN_REMOTE_NAME,
 	DEBUG_WAITING_REMOTE_NAME,
+	DECOY_OUTLINE_REMOTE_NAME,
 	ELIMINATION_REMOTE_NAME,
 	PICKER_OFFER_REMOTE_NAME,
 	PICKER_PICK_REMOTE_NAME,
@@ -21,6 +23,8 @@ import {
 } from "shared/remotes";
 import { PickerOfferMessage, PickerResult, REROLL_COST_COINS } from "shared/picker";
 import { ECONOMY_ACTION_COOLDOWN_MS } from "shared/economy.config";
+import { powerForBallId } from "shared/powers.config";
+import { setPower } from "server/powers";
 import { TAGS } from "shared/tags";
 import { ROUND_TRANSITION_ATTRIBUTE, TRANSITION_NETWORK_STEP } from "shared/constants";
 import { TRANSITION_CONFIG, coverSeconds, holdSeconds, openSeconds } from "shared/config/transition.config";
@@ -35,8 +39,10 @@ import {
 import { BallOwner, BallSpawnerService } from "./ball-spawner-service";
 import { EconomyService } from "./economy-service";
 import { decideRoundOutcome } from "../round-outcome";
+import { decideDecoyOutline } from "../decoy-outline";
 import { EliminationCause, splashTargetUserId } from "../elimination-signal";
 import { applyReroll, buildOffer, isPickAllowed, ownedIdsFrom, rollPremium, StoredOffer } from "../picker";
+import { pickDistinctBallIds } from "../debug-balls";
 import { TreadmillService } from "./treadmill-service";
 
 /**
@@ -215,6 +221,7 @@ export class RoundService implements OnStart {
 
 		this.createDebugRemotes();
 		this.createPickerRemotes();
+		this.createDecoyOutlineRemote();
 		this.createRoundStateValue();
 
 		// The first `[Round]` line a fresh server prints must name the phase it is in, not the one it is
@@ -323,7 +330,7 @@ export class RoundService implements OnStart {
 			this.clearAllBodies("debug key 3 restart");
 			this.resetSyntheticCounter();
 
-			const restarted = this.spawnRoundCompetitors("debug key 3 restart");
+			const restarted = this.spawnRoundCompetitors("debug key 3 restart", true);
 			if (restarted === 0) {
 				// `spawnRoundCompetitors` already printed the reason (no players, or no spawners). Staying in
 				// `Playing` with an empty belt is the honest outcome: the round is running and has nothing to
@@ -353,7 +360,7 @@ export class RoundService implements OnStart {
 		this.clearAllBodies("debug key 3");
 		this.resetSyntheticCounter();
 
-		const spawned = this.spawnRoundCompetitors(reason);
+		const spawned = this.spawnRoundCompetitors(reason, true);
 		if (spawned === 0) {
 			// `spawnRoundCompetitors` already logged why. Staying put is the only honest outcome: entering
 			// `Playing` with nothing to race is the 21:42 failure, and clearing again here would destroy
@@ -395,8 +402,17 @@ export class RoundService implements OnStart {
 	 * competitor that happened to explode. Players beyond the spawner count are therefore dropped, with a
 	 * single line naming how many were wanted and how many exist, because a per-player "you were dropped"
 	 * line would multiply with the player count and say the same thing each time.
+	 *
+	 * ## `drawBallIds`, and why it is a parameter rather than the default
+	 *
+	 * A real round has a pick: `Waiting` rolls an offer per player, so `chosenBallIdFor` answers and the body races the
+	 * ball the player chose. **The `3` key is the only path into `Playing` that skips `Waiting`**, so its competitors have
+	 * no pick at all and reach `spawnBall` as powerless bodies — no `Power` attribute, no badge, no collision group. Passing
+	 * `true` gives every competitor a drawn id instead, which is a *debug* affordance and must not become the fallback:
+	 * defaulting it on would let a real round with a missing offer race a random ball rather than the one on the player's
+	 * screen.
 	 */
-	public spawnRoundCompetitors(reason: string): number {
+	public spawnRoundCompetitors(reason: string, drawBallIds = false): number {
 		const players = Players.GetPlayers();
 		const wanted = players.size();
 
@@ -416,6 +432,17 @@ export class RoundService implements OnStart {
 			print(`[Round] spawn capped: wanted ${wanted}, spawners=${lanes}, spawned ${lanes}`);
 		}
 
+		// **The debug draw, and only the debug draw.** A real round enters `Waiting` first, where the picker writes a pick
+		// for every player, so `chosenBallIdFor` answers and this block never runs. The `3` key is the one path into
+		// `Playing` that skips `Waiting`, so its competitors have no pick — and took `spawnBall`'s "no ball id, no power"
+		// route, arriving with no `Power` attribute, no badge and no collision group.
+		//
+		// **One draw of `count`, indexed by lane, rather than one draw per owner.** The count is exact here (`min(players,
+		// lanes)`) and is known before the loop, so a single draw ties nothing together that is not already tied; and it is
+		// what makes the bodies distinct ids, which a per-owner `pickDistinctBallIds(1)` cannot promise — four independent
+		// single draws may collide. The `4` key draws the same way, so the two debug paths agree.
+		const drawnBallIds = drawBallIds ? pickDistinctBallIds(count) : undefined;
+
 		let spawned = 0;
 		for (let lane = 0; lane < count; lane++) {
 			const player = players[lane];
@@ -426,7 +453,7 @@ export class RoundService implements OnStart {
 			const owner: BallOwner = {
 				userId: player.UserId,
 				displayName: player.DisplayName,
-				chosenBallId: this.chosenBallIdFor(player),
+				chosenBallId: drawnBallIds !== undefined ? drawnBallIds[lane] : this.chosenBallIdFor(player),
 			};
 			const ball = this.spawner.spawnInLane(lane, owner);
 			if (ball === undefined) {
@@ -484,22 +511,56 @@ export class RoundService implements OnStart {
 
 		const first = owners[0];
 		const last = owners[owners.size() - 1];
+
+		// **The ids are named in the log because ten is more than a reader can infer from a count.** A press that produced
+		// four bodies tells a Studio session nothing about *which* four powers it is watching; one line naming them makes
+		// the observation repeatable ("run it again until `rocket` appears") instead of guesswork.
+		//
+		// Read back off the **bodies** rather than out of `owners`, so the line describes what exists: a spawn that failed
+		// leaves a body out of `spawned`, and a log naming an id with no body behind it would be worse than no log.
+		const ballIds = new Array<string>();
+		for (const ball of spawned) {
+			const ballId = ball.GetAttribute(CHOSEN_BALL_ID_ATTRIBUTE);
+			if (typeIs(ballId, "string")) {
+				ballIds.push(ballId);
+			}
+		}
+
 		print(
-			`[Round] debug spawn: ${spawned.size()} competitors (${first === undefined ? "none" : first.displayName}..${last === undefined ? "none" : last.displayName}), live=${this.liveBalls.size()}`,
+			`[Round] debug spawn: ${spawned.size()} competitors (${first === undefined ? "none" : first.displayName}..${last === undefined ? "none" : last.displayName}) balls=${ballIds.join(",")}, live=${this.liveBalls.size()}`,
 		);
 	}
 
 	/** Hands out the next `Debug#N` owner, continuing the shared counter. */
-	private nextDebugOwner(): BallOwner {
+	private nextDebugOwner(chosenBallId: string | undefined): BallOwner {
 		this.nextDebugOwnerNumber++;
-		return { userId: -this.nextDebugOwnerNumber, displayName: `Debug#${this.nextDebugOwnerNumber}` };
+		return {
+			userId: -this.nextDebugOwnerNumber,
+			displayName: `Debug#${this.nextDebugOwnerNumber}`,
+			chosenBallId,
+		};
 	}
 
-	/** `count` fresh synthetic owners, in order. */
+	/**
+	 * `count` fresh synthetic owners, in order, each racing a **different** ball.
+	 *
+	 * The ids come from `pickDistinctBallIds`, so one press never produces two bodies of the same ball — which is the
+	 * whole point of the debug spawn, since a Studio session watching four identical powers has learned nothing. The draw
+	 * is per press and does not consult the live field; see that function for why.
+	 *
+	 * **Nothing here writes a `Power` attribute.** `spawnBall` derives it from `chosenBallId` through `setPower`, so the
+	 * badge, the collision group and the `Touched` connection all follow from the id. A second write here would be a second
+	 * place for a body's power to be decided.
+	 *
+	 * `count` may exceed the number of ids only if the pool is smaller than the lane count; the pick then repeats, which is
+	 * the documented fallback rather than a case to guard.
+	 */
 	private nextDebugOwners(count: number): BallOwner[] {
+		const ballIds = pickDistinctBallIds(count);
+
 		const owners = new Array<BallOwner>();
 		for (let index = 0; index < count; index++) {
-			owners.push(this.nextDebugOwner());
+			owners.push(this.nextDebugOwner(ballIds[index]));
 		}
 		return owners;
 	}
@@ -1600,6 +1661,18 @@ export class RoundService implements OnStart {
 			const owner = readOwner(ball);
 			if (owner !== undefined && owner.userId === player.UserId) {
 				ball.SetAttribute(CHOSEN_BALL_ID_ATTRIBUTE, ballId);
+
+				// **The power has to follow the id, or the body races a ball the player did not choose.** `ChosenBallId` is
+				// written twice in this service's life: once at spawn from the offer's timeout pick, and once here when the
+				// player actually chooses. A `Power` derived only at spawn would leave a body whose badge says one thing and
+				// whose behaviour is the other — the failure mode is silent, because both attributes are individually valid.
+				//
+				// `setPower` rewrites the attribute, the badge, the collision group and (for a colliding power) the `Touched`
+				// connection, and drops any timers so the round's clock restarts with the new power at `Playing` entry.
+				const power = powerForBallId(ballId);
+				if (power !== undefined) {
+					setPower(ball, power, ball.Size.Y / 2);
+				}
 			}
 		}
 	}
@@ -1774,6 +1847,93 @@ export class RoundService implements OnStart {
 
 	// #endregion
 
+	/**
+	 * Creates the `DecoyOutline` `RemoteFunction`.
+	 *
+	 * **The only `RemoteFunction` in this tree**, so the conventions are set here rather than inherited: created at runtime
+	 * with the other remotes (never in the project file, so a rename leaves nothing behind), tabless of arguments in both
+	 * directions, and the handler assigned to `OnServerInvoke` rather than connected as a signal. A reader adding the second
+	 * one should copy this shape rather than reach for a `RemoteEvent` pair.
+	 *
+	 * `OnServerInvoke` is typed `(player, ...args) => void`, so a return value is not part of the type. Returning the body
+	 * anyway is deliberate and safe: TypeScript allows a value-returning function where `void` is expected, roblox-ts
+	 * erases the annotation, and the compiled handler returns the instance to the caller. The alternative — a
+	 * `RemoteEvent` carrying the answer — would need a per-player correlation id and would let an answer arrive after the
+	 * round it described had ended.
+	 */
+	private createDecoyOutlineRemote(): void {
+		let folder = ReplicatedStorage.FindFirstChild(REMOTES_FOLDER_NAME);
+		if (folder === undefined || !folder.IsA("Folder")) {
+			const created = new Instance("Folder");
+			created.Name = REMOTES_FOLDER_NAME;
+			created.Parent = ReplicatedStorage;
+			folder = created;
+		}
+
+		const remote = new Instance("RemoteFunction");
+		remote.Name = DECOY_OUTLINE_REMOTE_NAME;
+		remote.Parent = folder;
+		remote.OnServerInvoke = (player) => this.onDecoyOutlineRequest(player);
+	}
+
+	/**
+	 * Answers "which body is my twin" for one caller, or refuses with a reason.
+	 *
+	 * The order is `decideDecoyOutline`'s, and every refusal is logged with its reason because a client's `nil` cannot say
+	 * which of four things happened. The comment that matters is on the ownership check in `decoy-outline.ts`: the twin must
+	 * never carry an `OwnerUserId`, and a request from a client that has modified itself to claim otherwise gets `nil`
+	 * rather than an outline on somebody else's ball.
+	 */
+	private onDecoyOutlineRequest(player: Player): BasePart | undefined {
+		const body = this.bodyOwnedBy(player.UserId);
+		const decoy = body !== undefined ? this.spawner.decoyFor(body) : undefined;
+		const decoyOwner = decoy !== undefined ? readOwner(decoy) : undefined;
+
+		const decision = decideDecoyOutline({
+			phase: this.phase,
+			callerUserId: player.UserId,
+			bodyOwnerUserId: body !== undefined ? readOwner(body)?.userId : undefined,
+			hasDecoy: decoy !== undefined,
+			decoyOwnerUserId: decoyOwner?.userId,
+		});
+
+		if (decision.kind === "refused") {
+			print(
+				`[Decoy] outline refused player=${player.Name}(${player.UserId}) reason=${decision.reason} phase=${this.phase}`,
+			);
+			return undefined;
+		}
+
+		if (decoy === undefined) {
+			// Unreachable — `granted` implies `hasDecoy` — and handled explicitly so the function returns a body or nothing
+			// rather than relying on a narrowing the reader has to reconstruct.
+			return undefined;
+		}
+
+		print(
+			`[Decoy] outline granted player=${player.Name}(${player.UserId}) decoy=${decoy.GetFullName()} phase=${this.phase}`,
+		);
+		return decoy;
+	}
+
+	/**
+	 * The caller's own live body, or `undefined`.
+	 *
+	 * A scan of the round's tracked set rather than a map: the set is already the authority on what exists, and a
+	 * player→body index would be a second record to keep in step with every destruction path — the reason `applyChosenBall`
+	 * scans too. The set is one entry per competitor, so this is at most five comparisons on a keypress.
+	 */
+	private bodyOwnedBy(userId: number): BasePart | undefined {
+		for (const ball of this.liveBalls) {
+			const owner = readOwner(ball);
+			if (owner !== undefined && owner.userId === userId) {
+				return ball;
+			}
+		}
+
+		return undefined;
+	}
+
 	private createDebugRemotes(): void {
 		let folder = ReplicatedStorage.FindFirstChild(REMOTES_FOLDER_NAME);
 		if (folder === undefined || !folder.IsA("Folder")) {
@@ -1870,11 +2030,13 @@ function readOwner(ball: BasePart): BallOwner | undefined {
 	const userId = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);
 	const displayName = ball.GetAttribute(OWNER_DISPLAY_NAME_ATTRIBUTE);
 
-	if (!typeIs(userId, "number") || !typeIs(displayName, "string")) {
+	if (!hasOwnerIdentity(userId, displayName)) {
 		return undefined;
 	}
 
-	return { userId: math.floor(userId), displayName };
+	// The type guard belongs in `hasOwnerIdentity`, which a spec can call; this cast is the price of narrowing across a
+	// function boundary and is exactly what the guard above proved.
+	return { userId: math.floor(userId as number), displayName: displayName as string };
 }
 
 /** Seconds to two places, so an `elapsed=` field is readable without `string.format`. */

@@ -2056,3 +2056,423 @@ processes are live). `elimination-splash-controller` is confirmed in the registr
 **Not verified without Studio:** the splash's appearance and readability over the arena, the 26%-from-top position, the pop
 timing, `1` leaving zero bodies on the belt with the timer counting from the forced entry, and that a `4` press during a
 one-competitor round cannot save it from the immediate-win rule (item 72).
+
+## 74. Ball powers: ten kinds, one table, a module rather than a service, and a badge
+
+**The picker was a choice with no consequence.** Nine ball ids behaved identically and `SHAPE_POOL`'s `power?: string` was
+read by nothing. This round gives each ball one power, fixed, and deletes the dead seam: a body's power comes from
+`ChosenBallId` through `powers.config.ts`, because the pool describes a *shape* and two balls of the same shape race as
+different powers. An unread field is a trap for the next reader who sets it.
+
+**The table is `src/shared/powers.config.ts`, keyed by ball id.** `bully`, `bouncy`, `ghost`, `heavy`, `split`, `magnet`,
+`rocket`, `prism`, `eclipse`, `sprinter`, one `kind` each out of seven, and every magnitude a named `**Placeholder.**`
+constant with the arithmetic in its docblock. `sprinter_ball` is a new **common**, so the pool is ten. **The chest odds did
+not move**: `RARITY_WEIGHTS` is per *tier*, so a fourth common changes the chance of each individual common (60% / 4 = 15%
+each) and leaves the tier table at 60/30/9/1. The brief predicted the odds helper's arithmetic would move; it does not,
+because adding a ball to a tier is not adding weight to a tier.
+
+**`src/server/powers/` is a module, not a `@Service()`** - and that is why it can be tested. A Flamework service is
+constructed by `Flamework.ignite()` against a DataModel, so ten powers living inside one would be ten rules no spec could
+assert. `round-outcome.ts` is the precedent: pure rules over plain tables (`powerTickDelta`, `transferAmounts`,
+`pickupDecision`, `drawTimers`, `windowOpen`, `collisionGroupFor`, `spawnsDecoy`) and a thin imperative wrapper that reads
+attributes and poses instances. **36 tests**, none of which needs a `BasePart`.
+
+**The one-writer rule survived.** `stepBallSpeeds` is still the only writer of `BALL_SPEED` inside a tick: `tickDelta`
+returns a *delta*, the loop adds it to the decayed value, clamps to `[BALL_SPEED_MIN, BALL_SPEED_MAX]` and writes once.
+Collision powers write directly, which is safe only because nothing else writes between two ticks - a force there would be
+erased before it moved anything, which is the mistake this whole design exists to avoid.
+
+**`BALL_SPEED_MAX = 20` is new and exists for exactly one mechanic.** A bully chain has no natural bound; item 22's log
+climbed 30 -> 56.6 across 428 impulses. Every other writer is a designed value (pickup 12, sprinter 16, rocket 18), so the
+ceiling sits above all of them and binds only on accumulation.
+
+**Four decisions worth recording.**
+
+- **Collision groups.** A group is a *pair* of names, so disabling a ghost group against `Default` would also stop a ghost
+  hitting walls and the belt. Hence two groups: every ball moves to `CompetitorBall`, a ghost to `GhostBall`, and the pairs
+  `GhostBall`/`CompetitorBall` and `GhostBall`/`GhostBall` are the only ones disabled. Registered once on the first spawn,
+  behind a flag *and* a `pcall` (a group a designer made by hand would otherwise throw). **The cost: balls are no longer in
+  `Default`**, which a designer debugging a collision will notice.
+- **Auras are a registry, not an O(N^2) scan.** `magnetBalls` and `eclipseBalls` are sets maintained by `setPower` and
+  `forgetBall`, so a victim's tick scans the auras that exist rather than the whole field: two distance checks per ball per
+  frame with two magnets, against 2500 per tick and 150 000 per second for a full-field scan of a feature that is usually
+  absent.
+- **`bouncy` overrides the global bounce gate** rather than moving it per-ball. `BELT_BOUNCE_ENABLED = false` exists to
+  keep a *this-round experiment* quiet; `bouncy` is a shipped property of one ball, and a gate that suppressed it would make
+  the power invisible. The handler now pays one attribute read per ball contact while the gate is off, and nothing more.
+- **Only colliding powers get a `Touched` connection.** The brief asked for one per ball filtered inside the handler; a
+  tenth of the per-contact work for identical behaviour, and this file already pays two handlers per ball.
+
+**Two defects the wiring exposed.**
+`ChosenBallId` is written **twice** - once at spawn from the offer's timeout pick, once when the player picks - so a
+`Power` derived only at spawn would leave a body carrying the player's chosen ball id and racing the timeout pick's power.
+`RoundService.applyChosenBall` now calls `setPower`, which rewrites the attribute, the badge, the collision group and the
+connection.
+`onRoundActive` initially called `forgetBall`, which disconnects the `Touched` connection: a bully or heavy ball would have
+entered `Playing` unable to collide for the whole round. State is per-round, the connection is per-body, and the two are now
+cleared separately.
+
+**Also fixed, found at the site the brief sent me to:** `destroyBall` cleared `ballKillY` but not `lateral` or
+`startSpeeds`, so both maps grew by one entry per cap and kill-plane destruction for a session - `pruneDestroyedBalls`
+never sees a body that was removed from `liveBalls` first. Two lines, in the block `forgetBall` had to be placed in.
+
+**A pickup is no longer always consumed.** `prism` is the only power whose decision is `consume: true`, so every other ball
+leaves the triangle in the world - which is what "and consumes the pickup" as an *effect* implies. **This is a real change
+to the belt's economy and it is flagged in the report:** a pad that is never removed can be re-taken by any ball that drifts
+back over it, and a ball oscillating around a pad never eliminates. `pickupDecision` is the single line to reverse.
+
+**Badge.** `BillboardGui` has **no `AutomaticSize`** - verified in `@rbxts/types`: it extends `LayerCollector` extends
+`GuiBase2d`, and `AutomaticSize` is declared on `GuiObject`. So the badge is sized from `POWER_BADGE_WIDTH` with
+`fromOffset`, `TextScaled = false`, `AlwaysOnTop`, `StudsOffset` (camera-relative, so it stays above on screen), and
+`powerLabelFits` asserts every label fits so a longer power name fails the suite rather than truncating in Studio. It is
+created on the server, parented to the body, and is **outside the `getScreenGui(layer)` convention** - that governs screen
+layers, and a world-space primitive has no display order.
+
+**Tests: 185 -> 221.** New `src/server/test/powers.spec.ts` (36): the rocket window and its once-only snap, magnet radius
+and non-stacking, eclipse windows and cross-eclipse, bully conservation, heavy asymmetry and resistance, geometric
+convergence, both bounds, the three pickup decisions, the two group names, the decoy predicate, the table's one-to-one
+mapping, label casing and width, that the table covers every `POWER_IDS` entry and every ball in `BALL_POOL`, and that `BALL_SPEED_MAX` clears every designed value. No existing test changed.
+
+**Not verified without Studio:** the badge's appearance, its apparent size at distance and `MaxDistance`, whether
+`PhysicsService` honours the two groups on a real place, the felt effect of every magnitude, that a decoy appears beside its
+parent without a launch, and that a body destroyed mid-round really loses its state entry (a source read here, because it
+needs an instance).
+
+## 75. The debug spawn draws four distinct balls; a models table and the cross-validation test
+
+**A Studio session could only see one power at a time, and only by editing code.** `nextDebugOwner` returned an owner with
+no `chosenBallId`, so every `Debug#N` body took the "no ball id, no power" path through `spawnBall` and arrived powerless.
+`4` now gives each body a different id, and everything else follows from the id: the `Power` attribute, the badge, the
+collision group and the `Touched` connection are all `setPower` calls that already existed. **Nothing was wired twice** - the
+only new write is `chosenBallId` on the owner.
+
+**The draw is `src/server/debug-balls.ts`, a module and not a method.** `RoundService` cannot be constructed in Jest (its
+dependencies reach `DataStoreService`), so a draw inside it could only be a source read; `round-outcome.ts` is the
+precedent. `pickDistinctBallIds(count, random)` takes the random source as a parameter, which is what makes the two
+properties that matter testable: distinct ids within one press, and termination for any count. It is a **partial
+Fisher-Yates** - each pick is removed from a working deck - so `count <= 10` is distinct by construction and there is no
+retry loop to be stuck in. When the deck empties it refills, so `count > 10` returns ten distinct ids followed by repeats
+rather than hanging: **that case cannot fire today** (five lanes, ten ids) and exists so the function is total.
+
+**Distinct per press, not against the live field.** A live-field check would refuse the button because somebody else's ball
+was on the belt - a rule about the scene rather than about the pool - and with ten ids against four bodies it would refuse
+for no reason most of the time.
+
+**The log line was extended, not duplicated.** `balls=<a>,<b>,<c>,<d>` goes on the existing `debug spawn:` line, read back
+off the **bodies** (`GetAttribute` on each returned part) rather than out of `owners`, so a spawn that failed cannot leave
+the log naming an id with nothing behind it.
+
+**`spawnBall`'s fallback is deliberately untouched.** A missing `ChosenBallId` still means "no ball id, no power". Moving
+the draw into that fallback would give the `split` decoy a power - the decoy carries no owner attributes and goes through the
+same `spawnBall` - and a decoy with `eclipse` would freeze the field from a body `getCompetitors()` cannot see. The random
+pick lives in `debugSpawnCompetitors` and nowhere else.
+
+**`src/shared/models.config.ts` is new and nothing reads it.** One entry per ball id, every `model` `undefined`, an
+interface (`{ assetId?: string }`) rather than `string | undefined` because the swap needs more than one field - a mesh has a
+size, often an attachment, and a loader needs to know whether it replaces the `Part` or hangs a `SpecialMesh` inside it - and
+as a bare string those would arrive as a second table keyed by the same ids, which is the drift `powers.config.ts` exists to
+prevent one file over. Deliberately **not** part of `shape-pool.ts`: the pool describes a silhouette, a model belongs to an
+id, and item 12 separated the two on purpose.
+
+**The cross-validation test is the point of the round.** `src/shared/ball-tables.spec.ts` iterates `BALL_POOL` **once** and
+asserts the pool lookup (`rarityOfBall`), the power lookup and the model lookup all resolve; a second test asserts no model
+entry names a ball outside the pool, no duplicate keys, and that the table's size equals the pool's. The existing mapping
+test in `powers.spec.ts` was **widened, not duplicated**: it gained the third direction (no `POWERS` row naming a ball the
+pool does not have), and kept `POWER_IDS` reachability. **Today `POWER_IDS` had an orphan check in one direction only** -
+every declared power was reachable, but a `POWERS` row could name a ball that does not exist.
+
+**Tests: 221 -> 232.** New `src/server/test/debug-balls.spec.ts` (9): exact counts, distinctness across 40 seeds x every
+count, distinctness under a source pinned at `0` (the worst case for a rejecting draw), the whole pool, repeats past the
+pool with a distinct first pass, pool membership, `0`/negative/fractional counts, and a source that returns `1`. New
+`src/shared/ball-tables.spec.ts` (2). The widened mapping test is unchanged in count. **No existing test was otherwise
+modified.**
+
+**No controller, no service** - `src/server/debug-balls.ts` sits outside `Flamework.addPaths("src/server/services")` and is
+a plain module, so no registry rebuild.
+
+**Not verified without Studio:** that a `4` press really puts four distinct balls with four visible badges on the belt, that
+each behaves as its power says, and whether four powers at once are legible or turn a round into noise. The log line is the
+instrument for the first of those.
+
+## 76. Every ball consumes its pickup; the debug `3` press draws a ball
+
+**A pickup that survives its collection is a ball that cannot die.** `pickupDecision` returned `consume: false` for every
+ball except `prism`, so the triangle stayed under the ball that took it, `Touched` re-fired while the ball rested on it, and
+`BALL_SPEED` was reset to the boost value every frame. The run showed one ball held on the belt for 71 seconds and a round
+that never ended. `prism` consuming was never a distinct effect - it was the absence of this defect on one ball.
+
+**The fix is one return value, not one branch.** `pickupDecision` now returns `consume: true` unconditionally, and the only
+branch left is `sprinter`'s boost value. The service was already correct on both counts: it destroys on `consume`, and it
+applies `decision.boost` rather than re-reading the constant (checked, not assumed - `if (before < decision.boost)`), so
+`prism` and `sprinter` were both reaching the ball with the right number. The `consumed=` field in the log is the **decision
+result**, not a post-attempt observation, so it becomes `yes` on every collection with no logging change.
+
+**`speedAfterPickup(current, boost)` is new and is the idempotence rule.** The old site was
+`if (before < decision.boost) set(decision.boost)` - true, but only readable. As `math.max(current, boost)` the rule is
+named, testable, and asserts the property that matters: applying the same boost twice is applying it once. That property is
+**separate from the consume rule** and the test says so - with every ball consuming, a second touch cannot happen, so a test
+written against the service would pass trivially.
+
+**The `3` press was spawning powerless bodies.** `forcePlaying` is the one path into `Playing` that skips `Waiting`, and
+`Waiting` is where the picker writes a pick - so `chosenBallIdFor(player)` answered `undefined` and `spawnBall` took its
+"no ball id, no power" route: no `Power` attribute, no badge, no collision group. The `power=none` collection lines in the
+run were that body.
+
+**`spawnRoundCompetitors(reason, drawBallIds = false)`** - an optional parameter rather than a change to what the function
+does. A real round passes nothing, keeps `chosenBallIdFor(player)`, and races the ball on the player's screen; `forcePlaying`
+passes `true` on both of its paths (the fresh entry and the `Playing → Playing` restart). **Defaulting it on was rejected:**
+a real round with a missing offer would then race a random ball instead of the pick, which is the failure the picker exists
+to prevent.
+
+**One draw of `count`, indexed by lane - not one draw per owner.** The brief recommended per-owner; the count is exact at
+this point (`min(players, lanes)`) and is known before the loop, so a single draw ties nothing together that is not already
+tied. The decisive argument is distinctness: `pickDistinctBallIds(1)` four times can return the same id twice, so a `3`
+press with several players could hand out two bullies while a `4` press never does. One draw of `count` makes the two debug
+paths agree, and the `pickDistinctBallIds` deck guarantees distinct ids within the press.
+
+**The `3` press still prints no `debug spawn:` line - reported, not fixed.** That line belongs to `debugSpawnCompetitors`
+(key `4`). What a `3` press does print, now that the ids exist, is the existing per-body `[Picker] spawn player=… ball=…`
+line and the `[Round] spawn lane=… owner=… body=…` line, so the ids are on the record without a second summary line.
+
+**Tests: 232 -> 233.** The four `pickupDecision` tests were **widened**, not duplicated: `consume` is asserted `true` for
+all ten powers, an empty power and a non-power string; `sprinter`'s boost is asserted against `SPRINTER_BOOST_SPEED` with
+every other power at the standard value; and a new `speedAfterPickup` block asserts raising, not lowering, and the
+one-touch/two-touches identity across every power. Everything else in the suite is untouched.
+
+**Stale prose left deliberately:** `powers.config.ts`'s `effect` string for `prism` still reads "takes the pickup's boost
+and consumes the pickup". It is not false, but it no longer distinguishes prism from any other ball, and the brief forbade
+touching that file. The README's powers table and acceptance checks were corrected instead.
+
+**Not verified without Studio:** that a Studio run shows `consumed=yes` with no repeated `collected` line for one ball, and
+that a `3` press puts powered, badged bodies on the belt.
+
+## 77. The `split` decoy is now indistinguishable from its parent
+
+**"There's an empty ball still?" - it was the decoy, and it was nearly empty.** Item 74 shipped a decoy with no `Power`
+attribute, no badge, **no face textures and no markers** - checked against `spawnDecoy`, which called none of the four
+attach helpers. The Studio run proves which body it was: `[Round] debug spawn: ... balls=split_ball,eclipse_ball,...` gave
+one decoy, the five competitors produced `[Ball:1]`-`[Ball:5]`, `[MarkerSpin] bodies=5` counted only bodies *with*
+markers, and `[Round] cleared 6 ball(s)` counted every tagged body - six against five competitors.
+
+**So `split` deceived nobody.** A bare sphere beside four textured, badged ones is identifiable across the arena; the
+power's only real effect was to hold a `MaxLiveBalls` slot. A decoy that looks different is not a decoy.
+
+**The fix is a split of `setPower` into two functions.**
+`presentPower(ball, power, radius)` writes the `Power` attribute, sets the collision group and attaches the badge - the
+three things `setPower` does that a viewer can perceive. `setPower` is now `presentPower` plus the two things the
+simulation acts on: the aura registry entry and the `Touched` connection. **The decoy calls `presentPower` and never
+`setPower`**, which is the whole point: a decoy in `magnetBalls` or `eclipseBalls` would project a real aura, and an
+`eclipse` decoy would freeze the field from a body `getCompetitors()` cannot see.
+
+**`spawnDecoy` now also calls `attachBallTexture` (before `Parent`, so the textures arrive as one tree) and
+`attachBallMarkers` (after `Parent`, because the poles and ring need a real `CFrame` frame).** It still writes **no**
+`ChosenBallId` - that is a label for "the ball a player picked", no player picked this body, and the only readers either
+filter on an owner or would be a log line that then lies.
+
+**The decoy is visually live and mechanically inert.** `powerOf(decoy)` now returns its parent's power, so `tickDelta`
+finds no state for it (nothing calls `onRoundActive` for a decoy) and the aura registries never gain it; `bouncy` hops and
+a `sprinter` decoy takes the bigger pickup boost, both cosmetic. It still has no owner attributes, so it still cannot win,
+hold a round open, or be reported as anybody's elimination.
+
+**Cost accepted:** a decoy consumes one slot of `BALL_TEXTURE_LOG_LIMIT`, which is instrumentation for the parent's spawn
+path. It is logged and no longer distinguishable there, which is the correct behaviour for a decoy.
+
+**Item 74's criterion 8 is superseded, deliberately.** It asserted "every body carrying a power has exactly one
+`PowerBadge`; a decoy has none". The invariant that survives is the one worth having: **every body carrying a `Power`
+attribute has exactly one badge** - and a decoy now carries the attribute, so it carries the badge. Item 74's history is
+left as written; this item is the reversal.
+
+**Tests: 233, unchanged.** No test asserted the decoy's appearance, and the change is entirely in `spawnDecoy` plus a
+refactor of `setPower` that leaves every exported rule identical. `npm run build` / `lint` / `prettier` / `test` green.
+
+**Not verified without Studio:** that the decoy is genuinely indistinguishable at a distance, that its markers spin with
+it, and that a `split` ball's twin now reads as a second competitor on sight rather than as a bug.
+
+## 78. `split_ball` becomes `decoy_ball`, `split` becomes `decoy`, and the powers get a real README section
+
+**The ball and the power were both a decoy, and `split` described an effect the ball no longer has.** Since item 77 the body
+spawned beside a `split_ball` is visually identical and mechanically inert, so the name promised a split into two competing
+bodies and delivered a twin that cannot win. `decoy_ball` / `decoy` says what it is.
+
+**Every id-bearing site moved; nothing else did.** `BALL_POOL`, `models.config.ts`, `POWER_IDS`, the `POWERS` row and its
+`effect` string, `spawnsDecoy`'s comparison, the prose that named the old ids in `attributes.ts`, `debug-balls.ts` and
+`ball-spawner-service.ts`, and four assertions in `economy-service.spec.ts`. **`spawnsDecoy` and `spawnDecoy` keep their
+names**: the thing spawned is still a decoy in plain English, and `decoy` spawning a `spawnDecoyedBody` would read as a
+tautology rather than as a clarification.
+
+**The migration is a read-time table, and the version stays at 1.** `ownedBallsFrom` drops any id `BALL_POOL` does not know,
+so a rename without a mapping would leave every existing count in the profile and **invisible** - not listed, not offered by
+the picker, and not logged anywhere. `BALL_ID_RENAMES` in `player-data-store.ts` is an `old -> new` pair list applied inside
+`readStored`'s `ownedBalls` loop, and the count is *added* rather than assigned so a profile holding both ids keeps both
+grants. A `SCHEMA_VERSION` bump was rejected because `readStored` refuses any other version and a refusal puts the session in
+`readonly` - no coins, no balls, no chest, no round - which is the outcome item 64 produced by accident. A rename is not a
+schema change: same field, same shape, exact mapping.
+
+**The README's powers section was restructured.** It had a paragraph *inside* the table, between the `prism` and `eclipse`
+rows, which is the defect: a table that is not a table. Now: a three-paragraph preamble (one fixed power per ball; the
+`Power` attribute from `ChosenBallId`; the constraint that velocity is rewritten every tick), one unbroken ten-row table,
+the pickup-consumption paragraph **below** the table where it belongs, and ten prose blocks naming what each power does,
+when it is the right pick and when it is the wrong one. Prose states intention only - no magnitudes, no rarity ordering.
+
+**Two of those blocks report a finding rather than a design.** `prism` and `bouncy` have no right pick today: consumption
+became universal in item 76, which left `prism` with no difference from a ball with no pickup power at all, and `bouncy`'s
+hop changes nothing about `BALL_SPEED`. Both are written as "none today" instead of inventing a situational claim.
+
+**Tests: 233 -> 239.** New `src/server/test/store-migration.spec.ts` (6): the old id loads as the new one with its count
+intact and no duplicate key; the migrated id resolves against the pool; other ids are untouched; an old and a new id are
+summed rather than overwritten; `SCHEMA_VERSION` is still 1 and a current-version profile loads; any other version is still
+refused. Four `economy-service.spec.ts` assertions changed id, and one `powers.spec.ts` describe/it pair renamed - those are
+the only modified tests.
+
+**Criterion "grep `split_ball` in `src/` = 0" is unsatisfiable and was not met.** The retired id has to be written down
+somewhere for the loader to recognise it, and criterion 2 requires a test that stores `split_ball`. There are exactly
+**five** occurrences in `src/`, all of them the mechanism: two in `player-data-store.ts` (the docblock and the table row) and
+three in the migration spec. Everywhere else in the tree - and all of `README.md` - is zero.
+
+**Not verified without Studio:** that a real profile written before this build loads with its `split_ball` count appearing as
+`decoy_ball` in the inventory and the picker. The spec proves `readStored` translates it; the belt proves the wires.
+
+## 79. The owner sees a red outline on their own decoy twin, and nobody else does
+
+**The twin is indistinguishable to everyone, which is the power and the problem.** Item 77 made a `decoy` twin look
+identical to its parent — same badge, textures, markers — so its owner cannot tell which of two identical balls they
+control and has to wait for one to behave differently. Everyone else must keep seeing two identical balls, or the power
+deceives nobody. That is **per-viewer information**, and it cannot be an attribute: an attribute on the body replicates to
+every client, which would announce the twin to the whole server.
+
+**So the client asks and the server answers.** `ReplicatedStorage.Remotes.DecoyOutline` is **the first `RemoteFunction` in
+this tree** — every other channel is a `RemoteEvent` or a replicated value, because every other fact is the same for all
+viewers. A request/response rather than an event because the answer is a fact about the world *now*: a player who joins
+mid-`Playing` needs it immediately and has missed every event that could have carried it, and `nil` is a meaningful answer
+that only a request/response channel can carry. `InvokeServer()` takes no arguments, so no client can name a body.
+
+**The server answers from a map, not an attribute.** `BallSpawnerService.decoysByParent` is a server-only parent -> twin
+map behind `decoyFor(body)`. There is no attribute type that holds an `Instance`, and an `OwnerUserId` on the twin was
+rejected because that is the field `getCompetitors()` filters on - writing it would make the twin a competitor and change
+the winner rule. The map is cleared from **both** death paths by `forgetDecoy`, whichever side of the link died: a parent's
+death leaves the twin on the belt (it is deliberately not a child of the parent), so both directions have to be handled.
+
+**The decision is a module.** `src/server/decoy-outline.ts` exists because "I asked and got `nil`" is the same symptom for
+four different causes and the only place that distinction can live is the server's log. Four reasons, each reachable and
+each logged: `wrong-phase`, `no-body`, `no-decoy`, `not-owner`. `not-owner` is a guard rather than a client condition — a
+twin must never carry `OwnerUserId`, and if one ever does and it is not the caller's, outlining it would hand one player
+information about another's ball. Ordering is phase, body, decoy, ownership, so a request outside `Playing` does not send a
+reader looking at the spawn path.
+
+**The client asks once per `Playing`, never on mount and never in a loop.** A player who joins mid-round reads the phase in
+`onStart` and asks immediately — their mount *is* their entry, so that case needs no special handling. A `generation`
+counter is bumped on **every** transition, including `Playing → Playing`, and re-checked *after* `InvokeServer` returns
+because the invoke yields: a reply that arrives after the round ended must not put an outline on a body that is no longer
+anybody's twin. Leaving `Playing` destroys the `Highlight` unconditionally, and the twin's own `Destroying` signal clears it
+too, so a cull mid-round cannot leave the controller holding a dead instance.
+
+**The visual:** `FillColor` and `OutlineColor` both `theme.colors.error`, `OutlineTransparency = 0`,
+`FillTransparency = 0.65` (**Placeholder**) so it reads as a tint rather than a coat of paint, and `DepthMode = Occluded`
+rather than `AlwaysOnTop` so it does not draw through the arena wall — a red ring on a body the player cannot see reads as
+a bug and leaks the twin's position through geometry. Parented to the twin, so `Destroy()` on the body takes it.
+
+**Registry.** A controller was added, so `flamework.build` and `out/tsconfig.tsbuildinfo` were removed and the build was
+re-run — no mass delete, because two Rojo processes may be live. `decoy-outline-controller` confirmed in the registry.
+
+**Tests: 239 -> 247.** New `src/server/test/decoy-outline.spec.ts` (8): granted for the owner in `Playing`; `wrong-phase`
+for each other phase; `no-body` for no body; `no-body` for a body that is not the caller's; `no-decoy` for a ball with no
+twin; `not-owner` for a twin carrying somebody else's id; the four failures as a conjunction; and phase reported first when
+everything is wrong. No existing test changed.
+
+**Not verified without Studio:** the outline rendering at all, whether `0.65` reads as a tint against a red-and-white ball,
+whether `Occluded` hides it exactly when it should, and that a spectator genuinely sees two plain balls. The handler's
+refusal path is proven by the log line, not by the picture.
+
+## 80. `prism_ball` becomes `recycle_ball` and its pickup survives the collection; `onBallCollision` gets a phase gate
+
+**A prism is a shape, not a mechanic, and the mechanic it named had been deleted a round earlier.** Item 76 made every ball
+consume the pickup, which left `prism` with no effect of its own - the README even recorded it as "none today, a finding
+rather than a design". This round gives it one: `recycle_ball` / `recycle` takes the standard boost and **leaves the pad in
+the world**, so the pad is the resource and the power is keeping it in play for whoever follows.
+
+**The rename follows the `split_ball` round exactly.** `BALL_POOL`, `models.config.ts`, `POWER_IDS`, the `POWERS` row and
+its `effect` string, the region title in `powers.config.ts`, the prose in `powers/index.ts`, four `economy-service.spec.ts`
+fixtures, two in `economy.config.spec.ts`, three in `inventory.spec.ts`, and the migration table. **A migration row, not a
+`SCHEMA_VERSION` bump**: `readStored` refuses any other version and a refusal is `readonly` - no coins, no balls, no chest,
+no round - which is item 64's accident. The mapping is exact, so it is a second row in `BALL_ID_RENAMES`.
+
+**`pickupDecision` has exactly one new branch and it is `consume: false` for `recycle` only.** Every other power, and a body
+with no power, still destroys the pad. The exception is safe by *arithmetic* rather than by a guard: `speedAfterPickup` is
+`math.max(current, boost)`, so a ball parked on a surviving pad is raised once and every later collection computes the same
+value and writes nothing - it still decays off the belt on schedule. **No "already used" state was added**, because that
+would be a guard the value rule already makes unnecessary.
+
+**The service was already correct: it destroys the triangle only when `decision.consume` is true.** Verified before
+touching anything - `onPickupTouched` has an `if (decision.consume) { remove; Destroy } else { reconnect }` branch since item
+76, and that `else` was written then as "unreachable today, kept deliberately" for a future power that wanted to leave a pad
+in the world. This is that power; the branch went live with no change to it.
+
+**`onBallCollision` gained a phase gate it never had.** The item-80 survey proved the handler ran its transfer machinery
+during `PostGame`, made harmless only by the fact that `setRoundActive(false)` zeroes every ball's `BALL_SPEED` and the drain
+is proportional (`0.1 x 0 = 0`) - an accident of the arithmetic, not a rule, and a flat drain would have written speed back
+onto frozen bodies. The gate is `powersActive`, a module flag fed by the **existing** `setRoundActive` signal that
+`BallSpawnerService` has used since item 22 to gate `stepBallSpeeds`. Importing `RoundService` was rejected because it closes
+`RoundService` -> `BallSpawnerService` -> `powers` -> `RoundService`, the cycle item 22 already refused once; reading the
+`RoundState` `StringValue` was rejected as a second source of truth for a fact the spawner is told, plus a `FindFirstChild`
+on a collision handler. No cooldown is stamped outside `Playing`, so the first contact of the next round is never damped.
+
+**The pad teardown needed no change, and was verified rather than assumed.** `PickupService.onPhaseChanged` clears every
+pickup on any phase that is not `Playing`, so a surviving recycle pad cannot outlive the round. That also means the brief's
+stated reason for the gate - "a ball parked at `PostGame` with a live pad keeps collecting forever" - is not reachable for
+*pickups*; the gate is there for transfers.
+
+**Tests: 247 -> 252.** Two migration cases (`prism_ball=2` alone, and `split_ball` + `prism_ball` + `bully_ball` in one
+profile); `pickupDecision` widened to assert `recycle` is the only non-consuming power while every other power, the empty
+case and a non-power string still consume, plus `recycle` taking the standard boost; `speedAfterPickup` widened with the
+reusability case (the same boost applied twice to a recycle ball leaves one value); and a two-case phase-gate block that
+drives `setRoundActive(false)` and a counting fake body to prove `onBallCollision` returns **before** it reads anything, then
+flips the flag to prove the handler still reaches its tag test. Every test naming the old id was updated: four in
+`economy-service.spec.ts`, two in `economy.config.spec.ts`, three in `inventory.spec.ts`.
+
+**Criterion "grep `prism` in `src/` = 0" was not met and is not achievable.** `prism_ball` is now zero outside the migration
+row and its two tests. The word `prism` also survives in **six comment lines** about `Enum.MeshType.Prism` - the mesh type
+the pickup triangle was *not* built from (items 25 and 76 settled on `PartType.Wedge`) - in `pickup-service.ts` and
+`tuning.ts`. Those describe a geometry enum, not a ball, and rewriting them would lose the checkable reference. `README.md`
+is at zero.
+
+**Not verified without Studio:** that the triangle is still standing after a recycle ball passes over it, that
+`consumed=no` prints and the next ball through it gets the boost, and that the gate stops a `PostGame` transfer (the log
+would need a bully wedged on a victim at the phase change).
+
+## 81. Documentation pass: the README corrected to the round-based game, and the missing pointers in this log named
+
+**The README still described the two-fixture slice of items 11-25**, and every section that predated the round machine was wrong in at least one sentence. This round changed no source, no config and no generated file: it read the tree, ran the build, and corrected the documents to what the code does. `npm run build` exits 0 — the only output is Flamework's `TypeScript version differs` notice — and `git status --short` carries the same 27 paths as the baseline taken at the start of the session, so items 74-80's uncommitted work is untouched.
+
+**Seven drifted claims in `README.md`, corrected in place.**
+
+- *Intro.* Said "Two independent, observable test fixtures — a treadmill belt and a server-authoritative ball spawner. No rounds, no elimination, no UI." Rounds arrived at item 26 and UI at item 39. It now describes the round-based race and the economy, and points at `tuning.ts`'s model docblock before saying anything about movement.
+- *Layout.* Named `src/client/controllers/spawn-trigger-controller.ts`, deleted at item 35, and described `treadmill-service` as a service that "drags things along" the belt — the mechanism item 18 replaced. The table now lists the six services, the ten controllers, the powers module and the plain modules that exist so a spec can import them.
+- *Belt fixture.* Said the vector is `CFrame.RightVector` scaled by `BeltSpeed`, so "a positive speed drags toward the part's right". There is no drag: `BeltSpeed` is the reference number `BALL_SPEED` is subtracted from. Rewritten, with the `BeltSpeed`/`BeltSpeedActual` split and the frictionless floor this service creates — which also made the next sentence false, "Every part is placed by hand in Studio. This repo creates none of them", now scoped to the four hand-placed fixtures.
+- *Spawner fixture.* Listed `Radius`, `Enabled` and `Rate` as derived attributes (retired at items 11 and 16) and gave `KillY` as `FallenPartsDestroyHeight + 2 * Radius`, which is `+ poolMaxExtent()`. The table is now `KillY` and `MaxLiveBalls` only, and spawn height is "one rotated half-height plus 0.5 studs", because `rotatedHalfHeight` is what the code reads.
+- *"Manual trigger".* Described pressing `1`, the `SpawnBall` remote and its 100 ms per-player limit. The remote, its handler and the limit were deleted at item 35, and the keys became `1`-`4` at item 73. Replaced by a game-loop section: the four phases and their durations, the winner rule including the solo case item 72 made deliberate, and a key table that names what each key does *and* refuses.
+- *Acceptance checks 1-6.* Tested belt drag, a 2/second stream, and `Rate` against `MaxLiveBalls`; none of those three mechanisms survives. Replaced with six checks over the phase keys, the solo win, the `4` draw and both cull paths. Checks 7-12 were already correct and are unchanged.
+- *"Deliberately absent".* Listed the belt ramp, ball randomisation, rounds, elimination, UI and currency as absent — all six exist. Rewritten to what is actually absent (models, prediction, audio, particles, an in-round coin path). Its "no VFX" sentence lost the word *tint*: the decoy owner's `Highlight` is one.
+
+**Three parts were added rather than corrected.** A game-loop and key section, because the old README had nowhere to say what the game is — the "manual trigger" paragraph is where the loop now sits; a store/picker/inventory section, because the economy has been in the tree since item 51 and the README never mentioned it; and `npm test` in *Running it*, with the note that `pretest` rebuilds the place because a stale `build/game.rbxlx` would silently test the previous build.
+
+**The toolchain bullet about Flamework was itself a hazard.** It said to run `npm run clean` when the manifest goes stale, which is the command item 52 records crashing Rojo 7.7.1 twice while `rojo serve` was live. It now says to delete `flamework.build` and `out/tsconfig.tsbuildinfo`, and names the crash.
+
+**One correction to my own first draft, recorded because it is the same defect.** The new intro said Fusion was imported by exactly one controller — the brief said so, and I wrote it before checking. `grep` says three: `phase-banner`, `round-transition` and `shop`, and item 55 had already recorded the store as a second Fusion user. The sentence was rewritten in place. Repeating a claim without checking it is the thing this item is about.
+
+**`TAGS.md` was not created, deliberately.** `src/shared/tags.ts`, `attributes.ts` and `remotes.ts` already *are* the register, and every constant in them carries the prose explaining what writes it and what breaks when it is missed. A fourth copy would be the copy that drifts — the failure `powers.config.ts` exists to prevent one file over. The count is **seven**: `TreadmillBelt`, `BallSpawner`, `Ball`, `BallDecoration`, `TreadmillWall`, `EliminationZone`, `Pickup`. The three that matter to the load-bearing mechanic are `TreadmillBelt` (the reference number and the frame), `Ball` (the attribute's carrier, and the tag both the cleanup pass and the teardown enumerate) and `BallDecoration` (welded to a ball and deliberately *not* tagged `Ball`, or the cull would count every marker as a live body).
+
+**Superseded items that never received the one-line pointer this file's preamble promises.** The preamble asks for a pointer when a later item resolves an earlier one; four items still read as current when they are not. This session may only append, so they are recorded here rather than patched:
+
+- **Item 9** ("Not done, by design") says there are no rounds, elimination, survivor tracking, win condition, UI or powers. Items 26, 39 and 74 supply all of them. It reads as a statement of scope rather than as a snapshot, which is what makes it quotable out of context.
+- **Item 16** says bodies come from "exactly one automatic spawn per bound `BallSpawner`, at server start" and that "manual `1` still spawns extra bodies (rate-limited as before)". Item 26 deleted the automatic spawn; item 35 deleted the manual path and the remote.
+- **Item 26** names `StartRoundController` on key `2`. That controller was deleted at item 35 and the key is now `3`.
+- **Item 35**'s key map (`1` → force `Waiting`, `2` → force `Playing`, `3` → spawn four) was replaced at item 73 by `1` → `Intermission`, `2` → `Waiting`, `3` → `Playing`, `4` → spawn.
+
+**Four source docblocks argue for decisions the code has stopped making.** Reported, not fixed — this session touches no `src/`:
+
+- `src/shared/attributes.ts`, the `Enabled`/`Rate` block: "the spawner now spawns **exactly one body per bound `BallSpawner`, once, at server start**, and never again." Bodies are created by `spawnRoundCompetitors` inside a round since item 26; the same file's header says it twice more.
+- `src/shared/tags.ts`, `treadmillWall`: points at `TreadmillService.applyWallAssist`. Item 25 moved the assist to `BallSpawnerService.attachWallAssist`/`applyWallAssist`, and `TreadmillService` no longer binds the tag at all.
+- `src/client/controllers/debug-keys-controller.ts`, the `3` bullet: "refused while already `Playing`, because the alternative — restart the round — would destroy every competitor for one stray keypress." `forcePlaying` restarts the competitors in that phase, and `round-service.ts`'s own comment calls the branch "debug key 3 restart"; only `PostGame` is refused.
+- `src/server/services/treadmill-service.ts` still opens with "Drags anything resting on a `TreadmillBelt` part across its surface", keeps its `TEMPORARY INSTRUMENTATION` block, and its mechanism block still says `RoundService` "ramps it from 0 at `Playing` entry" for `BELT_SPEED` — the split item 18 made means only `BeltSpeedActual` ramps.
+
+**Not verified in any of this:** nothing above is a runtime observation. The README's new acceptance checks are instructions for the next Studio run, not results; the claims they encode come from source reads and from the items that produced the code.

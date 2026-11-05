@@ -174,7 +174,7 @@ export class EconomyService implements OnStart {
 
 		// **Captured here, not read after the save.** `saveAsync` yields, so `profile.coins` at the far side of it is a
 		// shared field that a second in-flight chest may already have changed. Reading it there produced log lines whose
-		// balance appeared not to move — `chest ok ball=split_ball coins=74100` twice in a row in the 14:47 run — which
+		// balance appeared not to move — `chest ok ball=<id> coins=74100` twice in a row in the 14:47 run — which
 		// reads as a free chest and is really a delayed print of somebody else's debit.
 		const coinsAfter = profile.coins;
 

@@ -50,10 +50,10 @@ export const RARITY_WEIGHTS: Record<Rarity, number> = {
  * grant nothing. The service refuses to roll a tier with no entries rather than granting a nameless ball.
  */
 export const BALL_POOL: Record<Rarity, Array<string>> = {
-	common: ["bully_ball", "bouncy_ball", "ghost_ball"],
-	rare: ["heavy_ball", "split_ball"],
+	common: ["bully_ball", "bouncy_ball", "ghost_ball", "sprinter_ball"],
+	rare: ["heavy_ball", "decoy_ball"],
 	epic: ["magnet_ball", "rocket_ball"],
-	legendary: ["prism_ball", "eclipse_ball"],
+	legendary: ["recycle_ball", "eclipse_ball"],
 };
 
 /** **Placeholder.** Coins one chest costs. Earned coins only; there is no Robux path to this number. */

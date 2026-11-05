@@ -67,19 +67,6 @@ export interface ShapePoolEntry {
 	 */
 	readonly shape: Enum.PartType;
 	readonly size: Vector3;
-	/**
-	 * Which power this entry's body carries, if any.
-	 *
-	 * **Nothing reads this today.** It exists so the next slice has a seam to fill rather than a type
-	 * to change: a power that depends on the body's identity needs the body to *have* an identity
-	 * before the power can be looked up, and adding the field later would mean touching the pool, the
-	 * spawner, and every spawn call site at once.
-	 *
-	 * A string rather than a boolean or an enum because the pool is data: the set of powers is not
-	 * known yet, and an enum here would force a code change to add one. `"standard"` means "no power",
-	 * named rather than omitted so a later `undefined` cannot be read as "forgot to set it".
-	 */
-	readonly power?: string;
 }
 
 /**
@@ -108,9 +95,11 @@ export const SHAPE_POOL: ReadonlyArray<ShapePoolEntry> = [
 		// measured against this one, on this belt, at this `BeltSpeed`.
 		shape: Enum.PartType.Ball,
 		size: new Vector3(1, 1, 1),
-		// No power yet. Named rather than omitted so a reader can tell "deliberately standard" from
-		// "someone forgot the field" — the two look identical when a value is absent.
-		power: "standard",
+		// **`power` used to live here and is deleted.** It was an optional `string` field, documented as "nothing
+		// reads this today", and by this round nothing still did: a body's power comes from `ChosenBallId` on the
+		// instance, through `powers.config.ts`, because the pool describes a *shape* and two balls of the same shape race
+		// as different powers. Leaving the field would have been a second, unread channel that a reader could reasonably
+		// set and expect to work.
 	},
 ];
 

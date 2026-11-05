@@ -95,3 +95,23 @@ export const PICKER_PICK_REMOTE_NAME = "PickerPick";
 
 /** A re-roll request, from the client. Carries nothing: the server owns the price and the old offer. */
 export const PICKER_REROLL_REMOTE_NAME = "PickerReroll";
+
+/**
+ * The decoy outline: a `RemoteFunction` the client invokes to ask **"is my ball's twin on the belt, and which body is it?"**
+ *
+ * ## The only `RemoteFunction` in this tree, and why the answer is not an attribute
+ *
+ * Every other channel here is a `RemoteEvent` or a replicated value, because every other fact is the same for all viewers.
+ * This one is not: the whole point of the `decoy` power is that a twin is indistinguishable from a real body, and an
+ * outline visible to everyone would give the power away. **Per-viewer information cannot live in an attribute** — an
+ * attribute on the body replicates to every client — so the client has to ask, and the server has to answer one caller at a
+ * time.
+ *
+ * A **request/response** rather than an event, because the answer is a fact about the world at the moment of asking rather
+ * than a notification about a change: a client that joins mid-`Playing` needs the answer immediately and has missed every
+ * event that could have carried it. `RemoteFunction` also makes the refusal explicit — the server returns `nil` and logs
+ * why, where an event would leave the client waiting for something that is never coming.
+ *
+ * The client never sends anything: `InvokeServer()` takes no arguments, so no client can name a body or a player.
+ */
+export const DECOY_OUTLINE_REMOTE_NAME = "DecoyOutline";
