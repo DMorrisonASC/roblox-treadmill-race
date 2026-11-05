@@ -77,6 +77,14 @@ export type FusionResult =
 export type AdminOutcome = "ok" | "no-profile" | "save-failed" | "bad-amount";
 
 /**
+ * What spending coins produced.
+ *
+ * `insufficient-coins` is separate from `bad-amount` because one is a player who cannot afford something and the other
+ * is a caller with a broken price — they are the same refusal to the caller but different defects in the log.
+ */
+export type SpendOutcome = "ok" | "insufficient-coins" | "no-profile" | "save-failed" | "bad-amount";
+
+/**
  * The folder the engine keeps chat commands in.
  *
  * A name, not a path: `TextChatService` has no typed `TextChatCommands` property in the installed typings, so the folder
@@ -627,6 +635,57 @@ export class EconomyService implements OnStart {
 		}
 
 		warn(`[Economy] ${player.Name} wipeData failed: ${outcome} — profile untouched`);
+		return outcome;
+	}
+
+	/**
+	 * Charges a player `amount` coins for something already decided, and reports whether the charge landed.
+	 *
+	 * ## Why this is a verb and not a call to `setCoins`
+	 *
+	 * `setCoins` is absolute and admin-flavoured: it validates against `ADMIN_COIN_CAP` and its whole purpose is "make
+	 * the balance this". A price is a **delta with an affordability precondition**, which is the same shape as
+	 * `openCoinChest`'s cost check and the opposite of an absolute set. Expressing a purchase as
+	 * `setCoins(player, coins - price)` would read the balance in the caller, which is a read-modify-write across a
+	 * remote — the pattern that lost a debit in the 14:47 log.
+	 *
+	 * ## Why the cost is checked here rather than by the caller
+	 *
+	 * The caller has a price it thinks is affordable, but the profile is the only authority on the balance and it may
+	 * have changed since the caller last looked. Checking inside the same function that debits makes
+	 * "refused means nothing was written" true without the caller having to reason about a second read.
+	 *
+	 * ## The ordering
+	 *
+	 * Cheap refusals first (a malformed price cannot spend anything), then the balance, then mutate, save, and revert on
+	 * failure. Identical to every other verb in this file.
+	 */
+	public spendCoins(player: Player, amount: number): SpendOutcome {
+		if (!typeIs(amount, "number") || amount !== amount || amount <= 0 || amount % 1 !== 0) {
+			warn(`[Economy] ${player.Name} spend refused: bad amount`);
+			return "bad-amount";
+		}
+
+		const profile = this.store.getProfile(player);
+		if (profile === undefined) {
+			warn(`[Economy] ${player.Name} spend refused: read-only, no profile`);
+			return "no-profile";
+		}
+
+		if (profile.coins < amount) {
+			// Logged with both numbers: the caller decided the price, so a refusal here is the only place the discrepancy
+			// between what it expected and what the profile holds is visible.
+			warn(`[Economy] ${player.Name} cannot afford ${amount}: coins=${profile.coins}`);
+			return "insufficient-coins";
+		}
+
+		const outcome = applyCoinSpend(profile, amount, (candidate) => this.store.saveAsync(player, candidate));
+		if (outcome === "ok") {
+			this.publish(player, profile);
+			return outcome;
+		}
+
+		warn(`[Economy] ${player.Name} spend of ${amount} failed: ${outcome} — balance restored`);
 		return outcome;
 	}
 
@@ -1193,6 +1252,37 @@ export function applyProfileReset(profile: Profile, save: (profile: Profile) => 
 	if (!save(profile)) {
 		profile.coins = coinsBefore;
 		restoreProfile(profile, ballsBefore, purchasesBefore);
+		return "save-failed";
+	}
+
+	return "ok";
+}
+
+/**
+ * Charges `amount` coins and saves once, restoring the balance on failure.
+ *
+ * The scalar sibling of `applyCoinSet`: same ordering, same single-field revert, opposite direction. It exists as a
+ * function for the same reason the others do — the price path's "refused means nothing changed" claim has to be provable
+ * with a fake save, and `EconomyService` cannot be constructed in this runtime.
+ *
+ * Affordability is checked here as well as in the service. That duplication is deliberate: one check is where the balance
+ * is read to report a refusal, the other is where it is written, and the second is the one that cannot be bypassed by a
+ * caller that forgot.
+ */
+export function applyCoinSpend(profile: Profile, amount: number, save: (profile: Profile) => boolean): SpendOutcome {
+	if (!typeIs(amount, "number") || amount !== amount || amount <= 0 || amount % 1 !== 0) {
+		return "bad-amount";
+	}
+
+	if (profile.coins < amount) {
+		return "insufficient-coins";
+	}
+
+	const coinsBefore = profile.coins;
+	profile.coins = coinsBefore - amount;
+
+	if (!save(profile)) {
+		profile.coins = coinsBefore;
 		return "save-failed";
 	}
 

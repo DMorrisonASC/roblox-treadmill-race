@@ -1800,3 +1800,155 @@ value on each host is an engine fact and only a published place can show the liv
 balls ? because that namespace has never been written to. Every `Player_` profile is untouched and is what a live server
 reads. `/dev setCoins` and `/dev wipeData` go through the store, so they now operate on the `_Dev` profile in Studio
 without any change of their own.
+
+## 69. `Waiting`-phase ball picker: server-rolled offers, timeout pick, free premium roll, paid re-roll
+
+`Waiting` was a 15-second lobby with nothing in it. It now offers every player a choice of ball to race, with a countdown,
+a 10% chance of seeing their whole collection, and a coin-priced re-roll.
+
+**The offer is rolled and stored on the server, and the client is told the result.** A client that generated its own three
+would be looking at cards the server never recorded, and the timeout pick ? "a random one of those three" ? would refer to
+options that never existed. `src/server/picker.ts` holds the pure rules; `RoundService` holds the map.
+
+**Where the offer is generated is not where the brief says `Waiting` begins.** The brief points at `enterWaiting`, but
+`spawnRoundCompetitors` runs *before* it in both entry paths, and the body carries the chosen id as an attribute written
+before `Parent`. Generating in `enterWaiting` would mean the first body of every round had no pick. A new
+`startWaitingRound(reason)` calls `openOffers()` and then the spawn, and both entries ? the `1` key and the intermission
+timer ? go through it, so the generation exists once.
+
+**Uniform over distinct ids, not the multiset.** `ownedIdsFrom` dedupes first: a player holding `ghost_ball x5` and
+`heavy_ball x1` must not see `ghost_ball` five times as often. The first pass takes distinct ids without replacement, and
+only the shortfall is filled with independent draws ? which is what makes "owning two receives one of them twice" true
+rather than approximate, and what stops a five-ball owner seeing three identical cards.
+
+**The timeout pick is drawn at creation, not at expiry.** The body exists from `Waiting` entry with an id already on it, so
+the default is chosen then (uniform over that player's own options) and logged as `source=timeout` when the window closes.
+The distribution is identical; the difference is only when the dice are rolled, and re-rolling at close would produce a
+second id that disagrees with the attribute on the body.
+
+**A zero-ball player gets `N` copies of one common ball** and nothing else ? not a grant, not an empty state, not a
+warning. `BALL_POOL["common"]` is non-empty (verified), and an empty pool refuses that player rather than inventing an id.
+The premium roll is skipped for them rather than scaled, and logs `premium=false` so the line does not imply it fired.
+
+**The premium flag is rolled once per player per `Waiting` entry** and reused by the re-roll: rolling again on a re-roll
+would be a second 10% chance for three coins. A premium offer refuses a re-roll outright, because a freshly generated
+premium offer is the same set ? charging for a no-op is the one thing this economy has consistently refused to do.
+
+**The re-roll charges before it rebuilds**, and that order has a name: `applyReroll(pay, rebuild)` returns
+`payment-failed` without ever calling `rebuild`, so a failed save cannot leave new cards in hand. The spend goes through a
+new `EconomyService.spendCoins`, which is a delta with an affordability precondition ? `setCoins` is absolute and
+admin-flavoured, and expressing a price as `setCoins(coins - price)` would be a read-modify-write across a remote.
+
+**`BallOwner` gained an optional `chosenBallId`**, written as `ChosenBallId` in the same block as the owner attributes,
+before `Parent` ? so no frame exists in which a body has an owner but no ball. It is absent for synthetic debug owners,
+because an empty string is a *value* ("races as nothing") and absence is a statement ("nobody picked").
+
+**The spawned ball's appearance is unchanged.** The pick is recorded, not rendered; a later round reads the attribute.
+
+**New `PickerController`** on `hudCore`: phase-gated on `RoundState`, cards tinted by `colors.rarity`, a countdown driven
+by `Workspace.GetServerTimeNow()` against a server-sent absolute deadline (so latency shifts the start rather than
+stretching the phase), and a re-roll button using item 66's `have/price` shape. The pick is optimistic *in appearance only*
+? a refusal un-marks the card.
+
+**Registry note.** A controller was added, so `flamework.build` had to be regenerated. Two `rojo` processes were live and a
+wholesale `rm -rf out` has crashed Rojo 7.7.1 twice in this project, so the rebuild deleted `flamework.build` and
+`out/tsconfig.tsbuildinfo` instead ? a full re-emit with no mass delete. Verified: `picker-controller` is in the registry.
+
+**Tests: 143 -> 168.** New `src/server/test/picker.spec.ts` (25): the dedupe, distinct-first draw (a fixed sequence that
+would repeat under replacement), one-ball repetition, the two-ball case, the premium set including the smaller-than-N
+case, the single-repeated-id fallback, the fallback granting nothing, `rollPremium` at the boundary, pick validation
+refusing an id the player owns but was not offered, the timeout pick coming from the offer, `applyReroll` never rebuilding
+on a refused payment, and `applyCoinSpend`'s debit / refusal / restore / bad-price paths.
+
+**Not verified without Studio:** the panel's appearance and placement, the countdown's accuracy, that the picker hides at
+`Playing`, and the wire behaviour of the three remotes. Criteria 1-11, 13 and 14 are covered by the suite or by source
+read; 12 is Studio-only.
+
+## 70. Ball picker rebuilt to the reference hierarchy; the name derivation moves to one shared helper
+
+The picker from item 69 worked and looked wrong: cards were positioned by offset inside one hand-built row, which is a layout
+for exactly three cards. The reference's hierarchy is now the actual parenting ? `BallPicker` (vertical) ? `Header` (title,
+spacer, countdown) / `BallChoices` (horizontal scroller of cards) / `Footer` (All Balls, Reroll) ? with each card a vertical
+list of name, tinted ball and rarity.
+
+**Why the parenting mattered.** An offer's length is not three: a premium offer is every ball the player owns, and a
+one-ball player is offered that ball three times. A row that is a real `UIListLayout` inside a horizontal `ScrollingFrame`
+accepts either without a hand-computed offset, and the card count is `offer.options.size()` and nothing else.
+
+**The one absolute placement left is the sheet's own anchor.** Everything inside it is a list item; the sheet is
+content-sized in height (`AutomaticSize.Y`) and clamped by `capToViewport`, which is item 59's lesson ? a fraction of the
+screen height pins bands to its top and bottom with a hole between them.
+
+**Two reference elements have no data and were not invented.** No ball has a power, an effect or any text, so the
+description slot renders the **rarity** (the only per-ball fact `rarityOfBall` can answer), as its own child so a later round
+replaces one line instead of inserting one. No ball has an image, so the placeholder is a tinted `Frame` + `UICorner` circle,
+the same pattern the store uses ? no art id is created anywhere.
+
+**`All Balls` renders disabled with its reason on it.** The premium upgrade is a per-phase *random roll* on the server, not a
+player action, so there is nothing to bind. Its caption says `random per round` where a price would go, which is the same
+place item 66 put `have/price`. An enabled button with no backend is the worse outcome.
+
+**The countdown is the server's.** The deadline arrives absolute, computed on the server clock when the offer was rolled, and
+is compared against `Workspace.GetServerTimeNow()` ? engine-synchronised, not a local clock. `os.clock()` is process uptime
+and a per-frame decrement accumulates every hitch. What remains is a one-time offset estimate, which shifts when the count
+starts rather than making it wrong by the end. The panel hides on the phase change regardless: this number informs, it does
+not decide.
+
+**Before an offer arrives the band says `Waiting for your balls...`** ? a loading state, not zero cards and not an empty
+state. A zero-ball player is offered the fallback ball three times and renders as three ordinary cards, because that is a
+real ball they race with for one round, not a fault.
+
+**`ballName` and `rarityLabel` now live in `src/shared/ball-name.ts`.** The tree had two copies of the ball one within a
+round of each other (`shop-controller`'s local `displayName` and a `ballLabel` in `shared/picker.ts`); two copies of a
+derivation are one opinion and one future bug, visible as `Bully ball` in one panel and `Bully Ball` in the next. The store
+imports it under aliases so every call site in that file still reads as it did.
+
+**That alias is the one place this round touches the store**, and it is the one place two instructions disagreed: Decision 3
+requires a single shared helper, and criterion 9 requires the store unchanged. The change is an import line plus the deletion
+of two duplicated functions ? no behaviour, no layout, no copy ? and the alternative was shipping the third copy.
+
+**No new controller**, so no registry rebuild: `PickerController` already existed from item 69 and this round replaced its UI.
+The frame, the remotes, the phase subscription and the guards are the same objects, re-parented.
+
+**Tests unchanged at 168.** Nothing here is testable in Jest Lua: the layout, the selection highlight and the countdown are
+Studio-only. `npm run build`, `npm run lint`, `prettier --check "src/**/*.ts"` and `npm test` are green, and `Enum.Font`,
+`fromHex` and art ids are absent from the new file by grep.
+
+**Not verified without Studio:** the sheet's proportions, the card row's distribution at three and at nine cards, the
+countdown's readability and its last-three-seconds colour, and the selection highlight's contrast on an accent fill.
+
+## 71. Picker layout defects fixed: overflow, a lost countdown, a twice-drawn label and a washed-out button
+
+A screenshot of the built panel showed five separate faults. Each traced to one line.
+
+**The countdown was laid out past the right edge.** The header was `title, spacer, countdown`, and the spacer was
+`Size = (1, 0)` with `AutomaticSize.X`. A scale width inside a horizontal `UIListLayout` is *added* to the row, so the row's
+total exceeded the header and the countdown landed beyond it. Two half-width labels (`0.5, -SPACING.xs`) cannot overflow:
+they always sum to one.
+
+**The cards were clipped at the bottom.** A horizontal `ScrollingFrame` draws its scrollbar inside its own box, and the band
+was exactly one card tall, so the bar ate the last few pixels of every card. The band is now `CARD_HEIGHT +
+CHOICES_SCROLLBAR_ROOM` and the cards are top-aligned to leave the bar its own strip.
+
+**"REROLL" was drawn twice, once below the sheet.** Two causes stacked. The caption label's text was set to `"REROLL"` in
+`refreshFooter`, duplicating the button's own name; it is now a reason (`not enough coins`) or empty. And the button's
+contents were taller than `FOOTER_HEIGHT`, so the third line escaped the panel ? the sheet now sets `ClipsDescendants`, so
+a mis-sized band costs clipped pixels inside the sheet instead of text floating over the game.
+
+**The re-roll button stayed dimmed at a balance that could afford it.** The price was evaluated once, when the offer
+arrived, and the `Coins` attribute had not replicated yet ? `affordable` was computed against `undefined` and never
+revisited. The controller now subscribes to the attribute.
+
+**The cost line was squeezed into a few pixels.** The cost row was `AutomaticSize.XY` around a label whose height was
+`1, 0` ? a circular measurement. The row has an explicit height and automatic width only.
+
+Two more, found while fixing those: button text used `textPrimary`, which is dark-on-accent; it now uses the theme's
+`onAccent` slot, which exists for exactly this. And the sheet was 62% of the screen wide, so three cards left a third of
+the panel empty on the right and looked like a card that failed to load ? the width is now derived from a full row of
+cards (`CARD_WIDTH * PICKER_OPTION_COUNT + gaps + padding`), which is what the reference does, clamped by `capToViewport`
+for a narrow window. A premium offer scrolls inside that width rather than widening the panel.
+
+**Tests unchanged at 168** ? none of this is reachable from Jest Lua. Build, lint, prettier and the suite are green.
+
+**Still Studio-only:** the proportions at three cards and at nine, the scrollbar's placement, the countdown's readability,
+and the contrast of `onAccent` on the accent fill.

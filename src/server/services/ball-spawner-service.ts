@@ -10,6 +10,7 @@ import {
 	MARKER_LOCAL_UP_ATTRIBUTE,
 	OWNER_DISPLAY_NAME_ATTRIBUTE,
 	OWNER_USER_ID_ATTRIBUTE,
+	CHOSEN_BALL_ID_ATTRIBUTE,
 	SPAWNER_KILL_Y_ATTRIBUTE,
 	SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE,
 } from "shared/attributes";
@@ -71,6 +72,14 @@ function formatVector(value: Vector3): string {
 export interface BallOwner {
 	readonly userId: number;
 	readonly displayName: string;
+	/**
+	 * The ball this competitor races as, when a round picked one.
+	 *
+	 * **Absent for synthetic debug owners**, which never pass through the picker. The attribute is written only when the
+	 * value exists, because an empty string is a *value* — it would read as "this body races as nothing", which is a
+	 * different statement from "nobody picked for this body".
+	 */
+	readonly chosenBallId?: string;
 }
 
 /** Every `NormalId`, in enum order. Used to paint all six faces of a spawned body. */
@@ -971,6 +980,13 @@ export class BallSpawnerService implements OnStart {
 		// into.
 		ball.SetAttribute(OWNER_USER_ID_ATTRIBUTE, owner.userId);
 		ball.SetAttribute(OWNER_DISPLAY_NAME_ATTRIBUTE, owner.displayName);
+
+		// The pick, written in the same block and for the same reason: before `Parent`, so no frame exists in which a body
+		// has an owner but no chosen ball. A label, not a grant — the id is not added to `OwnedBalls`, and the body's
+		// appearance is untouched this round.
+		if (owner.chosenBallId !== undefined) {
+			ball.SetAttribute(CHOSEN_BALL_ID_ATTRIBUTE, owner.chosenBallId);
+		}
 
 		// `fromMatrix` rather than `CFrame.Angles` composition: `randomSpawnRotation` already returned the
 		// images of the world X and Y axes, so passing them as the basis vectors is exact — no matrix

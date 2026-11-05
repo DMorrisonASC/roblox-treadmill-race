@@ -149,6 +149,16 @@ export const SPAWNER_KILL_Y_ATTRIBUTE = "KillY";
 export const OWNER_USER_ID_ATTRIBUTE = "OwnerUserId";
 export const OWNER_DISPLAY_NAME_ATTRIBUTE = "OwnerDisplayName";
 
+/**
+ * The ball a body is racing as, this round.
+ *
+ * **Written before `Parent`, like the owner attributes, and for the same reason:** a body that existed in the world for
+ * one frame without its chosen id would be a body whose round result cannot be attributed to a pick. It is a *label*, not
+ * a grant ? the id is not added to `OwnedBalls` and nothing about the body's appearance changes yet. A later round reads
+ * it to render the ball; this one only records it.
+ */
+export const CHOSEN_BALL_ID_ATTRIBUTE = "ChosenBallId";
+
 /** Attribute on a `BallSpawner` part: hard cap on live balls. */
 export const SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE = "MaxLiveBalls";
 /**

@@ -40,6 +40,7 @@ import { Panel, PanelFooter, PANEL_FOOTER_HEIGHT, PANEL_HEADER_HEIGHT, PanelHead
 import { TabStrip, TAB_STRIP_HEIGHT } from "shared/ui/tabs";
 import { attachPressFeedback } from "shared/ui/press";
 import { capToViewport } from "shared/ui/viewport";
+import { ballName as displayName, rarityLabel as tierName } from "shared/ball-name";
 
 /** The one phase the tabs belong to. A client cannot import the server's `RoundPhase`. */
 const PHASE_INTERMISSION = "Intermission";
@@ -3227,22 +3228,9 @@ function fusionHint(ball: OwnedBall): string {
 }
 
 /**
- * A tier as a label: `legendary` becomes `Legendary`.
+ * A tier as a label, and a ball id as a label.
  *
- * Derived rather than tabled. A display-name map would be a second place to update when a tier is added, and falling
- * out of step with `RARITIES` is the drift the `Record<Rarity, ...>` in the theme prevents by type.
+ * **Both live in `shared/ball-name.ts` now.** They were duplicated here and in the picker within one round of each other,
+ * and two copies of a derivation are one opinion plus one future bug — the visible symptom being `Bully ball` in one panel
+ * and `Bully Ball` in the next. The aliases keep every call site in this file reading as it did.
  */
-function tierName(rarity: Rarity): string {
-	return `${rarity.upper().sub(1, 1)}${rarity.sub(2)}`;
-}
-
-/**
- * A ball id as a label: `bully_ball` becomes `Bully ball`.
- *
- * Ids are the stored unit and the wire format, so they are not the display unit. Title-casing and replacing
- * separators is the whole transformation — there is no display-name table to fall out of step with `BALL_POOL`.
- */
-function displayName(ballId: string): string {
-	const spaced = ballId.gsub("_", " ")[0];
-	return `${spaced.upper().sub(1, 1)}${spaced.sub(2)}`;
-}

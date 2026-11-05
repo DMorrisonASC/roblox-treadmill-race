@@ -84,3 +84,18 @@ export const DEBUG_SPAWN_REMOTE_NAME = "DebugSpawn";
  */
 export const OPEN_COIN_CHEST_REMOTE_NAME = "OpenCoinChest";
 export const FUSE_BALLS_REMOTE_NAME = "FuseBalls";
+
+/**
+ * The picker's three channels, all server-authoritative.
+ *
+ * `PickerOffer` is **server to client only** ? the client never fires it, and it carries an offer the server has already
+ * stored, so a client cannot ask for a different one. `PickerPick` and `PickerReroll` are client to server, and both
+ * answer on `PickerOffer`'s sibling below rather than by mutating anything the client owns.
+ */
+export const PICKER_OFFER_REMOTE_NAME = "PickerOffer";
+
+/** A pick, from the client. Carries one ball id, which is checked against the stored offer rather than against `OwnedBalls`. */
+export const PICKER_PICK_REMOTE_NAME = "PickerPick";
+
+/** A re-roll request, from the client. Carries nothing: the server owns the price and the old offer. */
+export const PICKER_REROLL_REMOTE_NAME = "PickerReroll";

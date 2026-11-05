@@ -1,14 +1,24 @@
-import { CollectionService, Players, ReplicatedStorage, RunService } from "@rbxts/services";
+import { CollectionService, Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
-import { OWNER_DISPLAY_NAME_ATTRIBUTE, OWNER_USER_ID_ATTRIBUTE } from "shared/attributes";
+import {
+	CHOSEN_BALL_ID_ATTRIBUTE,
+	OWNER_DISPLAY_NAME_ATTRIBUTE,
+	OWNER_USER_ID_ATTRIBUTE,
+	PLAYER_OWNED_BALLS_ATTRIBUTE,
+} from "shared/attributes";
 import {
 	DEBUG_PLAYING_REMOTE_NAME,
 	DEBUG_SPAWN_REMOTE_NAME,
 	DEBUG_WAITING_REMOTE_NAME,
+	PICKER_OFFER_REMOTE_NAME,
+	PICKER_PICK_REMOTE_NAME,
+	PICKER_REROLL_REMOTE_NAME,
 	REMOTES_FOLDER_NAME,
 	ROUND_STATE_VALUE_NAME,
 	WINNER_NAME_VALUE_NAME,
 } from "shared/remotes";
+import { PickerOfferMessage, PickerResult, REROLL_COST_COINS } from "shared/picker";
+import { ECONOMY_ACTION_COOLDOWN_MS } from "shared/economy.config";
 import { TAGS } from "shared/tags";
 import { ROUND_TRANSITION_ATTRIBUTE, TRANSITION_NETWORK_STEP } from "shared/constants";
 import { TRANSITION_CONFIG, coverSeconds, holdSeconds, openSeconds } from "shared/config/transition.config";
@@ -21,6 +31,8 @@ import {
 	WAITING_SECONDS,
 } from "shared/tuning";
 import { BallOwner, BallSpawnerService } from "./ball-spawner-service";
+import { EconomyService } from "./economy-service";
+import { applyReroll, buildOffer, isPickAllowed, ownedIdsFrom, rollPremium, StoredOffer } from "../picker";
 import { TreadmillService } from "./treadmill-service";
 
 /**
@@ -161,9 +173,35 @@ export class RoundService implements OnStart {
 	 */
 	private nextDebugOwnerNumber = 0;
 
+	// #region picker state
+
+	/**
+	 * Every player's current offer. **The single writer of "which ball am I racing as".**
+	 *
+	 * It lives here rather than in its own service because the offer is born and dies inside one phase, and this class is
+	 * the only thing that owns both ends of it: the moment `Waiting` begins (where the offer is rolled) and the moment the
+	 * body is spawned (where the pick becomes an attribute). A separate service would have to be told "the phase changed"
+	 * by this one and would have to reach back into `liveBalls` to update a body — a dependency pair that is either
+	 * circular or duplicated.
+	 */
+	private readonly offers = new Map<Player, StoredOffer>();
+
+	/** Rewritten on every `Waiting` entry, and sent with each offer, so the countdown cannot be extended by a re-roll. */
+	private pickerDeadline = 0;
+
+	/** Last accepted re-roll per player. Same shape as `EconomyService`'s cooldowns, same 500 ms constant. */
+	private readonly pickerCooldowns = new Map<Player, number>();
+
+	private offerRemote?: RemoteEvent;
+	private pickRemote?: RemoteEvent;
+	private rerollRemote?: RemoteEvent;
+
+	// #endregion
+
 	public constructor(
 		private readonly treadmill: TreadmillService,
 		private readonly spawner: BallSpawnerService,
+		private readonly economy: EconomyService,
 	) {}
 
 	public onStart(): void {
@@ -172,6 +210,7 @@ export class RoundService implements OnStart {
 		this.treadmill.setBeltSpeed(0);
 
 		this.createDebugRemotes();
+		this.createPickerRemotes();
 		this.createRoundStateValue();
 
 		// The first `[Round]` line a fresh server prints must name the phase it is in, not the one it is
@@ -208,7 +247,7 @@ export class RoundService implements OnStart {
 		this.resetSyntheticCounter();
 		this.initialLiveCount = 0;
 
-		const spawned = this.spawnRoundCompetitors(reason);
+		const spawned = this.startWaitingRound(reason);
 
 		this.enterWaiting(reason, spawned);
 	}
@@ -347,7 +386,11 @@ export class RoundService implements OnStart {
 				continue;
 			}
 
-			const owner: BallOwner = { userId: player.UserId, displayName: player.DisplayName };
+			const owner: BallOwner = {
+				userId: player.UserId,
+				displayName: player.DisplayName,
+				chosenBallId: this.chosenBallIdFor(player),
+			};
 			const ball = this.spawner.spawnInLane(lane, owner);
 			if (ball === undefined) {
 				continue;
@@ -355,6 +398,13 @@ export class RoundService implements OnStart {
 
 			this.trackBall(ball);
 			spawned++;
+
+			// The pick reaching the body, logged where it lands rather than where it was chosen: the two can disagree if
+			// an offer was never generated, and this line is what makes that visible.
+			const chosen = owner.chosenBallId;
+			if (chosen !== undefined) {
+				print(`[Picker] spawn player=${player.Name} ball=${chosen}`);
+			}
 
 			print(`[Round] spawn lane=${lane} owner=${owner.displayName}(${owner.userId}) body=${ball.GetFullName()}`);
 		}
@@ -677,6 +727,10 @@ export class RoundService implements OnStart {
 		this.runningStartedAt = os.clock();
 		this.frozenElapsed = 0;
 
+		// The pick window closes with the phase, and only when the phase actually moved: every refusal above returns before
+		// this line, so a lobby that re-arms keeps its offers and its countdown rather than silently losing them.
+		this.closeOffers();
+
 		// The idle clock starts with the round, and the warning flag with it: a round that begins and then
 		// sits still for `ROUND_IDLE_WARN_SECONDS` is exactly the case the warning is for, and a flag left
 		// set from a previous round would suppress it.
@@ -849,7 +903,7 @@ export class RoundService implements OnStart {
 				// `Waiting` timer would refuse forever. A refusal from the spawn (a player who left between
 				// the check above and this call) re-arms `Intermission` instead, which is where a server with
 				// nobody watching belongs.
-				const spawned = this.spawnRoundCompetitors("intermission elapsed");
+				const spawned = this.startWaitingRound("intermission elapsed");
 				if (spawned === 0) {
 					print(
 						`[Round] Intermission timer restarted — no competitors spawned, another ${INTERMISSION_SECONDS}s`,
@@ -1320,6 +1374,309 @@ export class RoundService implements OnStart {
 	 * intend, and the review that matters is "what can a client ask for" — which is easier to answer when
 	 * each request is its own event. The cost is three find-or-creates in one function, paid once.
 	 */
+	// #region picker
+
+	/**
+	 * Generates every player's offer, then spawns the competitors — **the one place `Waiting` begins**, and therefore the
+	 * one place an offer is created.
+	 *
+	 * ## Why the offer is made before the spawn rather than inside `enterWaiting`
+	 *
+	 * The body carries the chosen ball id as an attribute written before `Parent`, so a pick has to exist *before* the
+	 * body does. `enterWaiting` runs after the spawn in both entry paths (and inside a transition wipe on the automatic
+	 * one), so generating offers there would mean the first body of every round had no pick.
+	 *
+	 * ## Why this is a function and not two call sites
+	 *
+	 * There are two ways into `Waiting` — the `1` key and the intermission timer — and "roll the offers" appearing twice is
+	 * how one path ends up without them. Both call this.
+	 */
+	private startWaitingRound(reason: string): number {
+		this.openOffers();
+		return this.spawnRoundCompetitors(reason);
+	}
+
+	/**
+	 * Rolls one offer per connected player and tells each client.
+	 *
+	 * ## The premium roll is evaluated here and nowhere else
+	 *
+	 * Once per player per `Waiting` entry. Rolling it anywhere a client can cause — a re-roll, a pick, a tick — would make
+	 * a 10% offer something a player could farm by pressing a button, which is a different feature with a different price.
+	 *
+	 * ## A player who owns nothing does not roll
+	 *
+	 * There is nothing to expand the offer *to*, so the roll is skipped rather than scaled, and the log says
+	 * `premium=false` rather than implying it fired and lost. `buildOffer` enforces the same rule; the check here is what
+	 * keeps the log honest.
+	 */
+	private openOffers(): void {
+		this.offers.clear();
+		// Read once, at entry: a re-roll must not extend the phase, so the deadline is a property of the phase rather than
+		// of the offer that happens to be on screen.
+		this.pickerDeadline = Workspace.GetServerTimeNow() + WAITING_SECONDS + this.pendingTimerHold;
+
+		for (const player of Players.GetPlayers()) {
+			const offer = this.generateOfferFor(player);
+			if (offer === undefined) {
+				continue;
+			}
+
+			print(
+				`[Picker] offer player=${player.Name} options=${offer.options.join(",")} premium=${offer.premium} fallback=${offer.fallback}`,
+			);
+
+			this.sendOffer(player, offer);
+		}
+	}
+
+	/**
+	 * Builds and stores one player's offer, and nothing else — no log, no message.
+	 *
+	 * The split matters for the re-roll: a replacement goes out on the *reply* to the re-roll, so a function that also
+	 * logged and fired here would produce two offer lines and two renders for one purchase.
+	 *
+	 * `premium` is a parameter rather than always rolled, because a re-roll must reuse the phase's premium decision:
+	 * rolling again would give a second chance at a 10% upgrade for three coins.
+	 */
+	private generateOfferFor(player: Player, premium?: boolean): StoredOffer | undefined {
+		const owned = ownedIdsFrom(this.ownedAttribute(player));
+		const wantsPremium = premium !== undefined ? premium : owned.size() > 0 && rollPremium(math.random);
+
+		const offer = buildOffer(owned, wantsPremium, math.random);
+		if (offer === undefined) {
+			// The common pool is empty. That is a build bug, not a player state: refuse this player rather than inventing an
+			// id, because an invented id is a body nothing in the game can name.
+			warn(`[Round] no common ball to fall back to — ${player.Name} has no offer`);
+			this.offers.delete(player);
+			return undefined;
+		}
+
+		this.offers.set(player, offer);
+		return offer;
+	}
+
+	/**
+	 * The id a body for this player races as.
+	 *
+	 * `undefined` when no offer exists — a synthetic debug owner, or a player who joined after the offers were rolled. The
+	 * attribute is then simply absent, which says "nobody picked for this body" rather than naming a ball.
+	 */
+	private chosenBallIdFor(player: Player): string | undefined {
+		const offer = this.offers.get(player);
+		return offer !== undefined ? offer.pick : undefined;
+	}
+
+	private ownedAttribute(player: Player): string {
+		const encoded = player.GetAttribute(PLAYER_OWNED_BALLS_ATTRIBUTE);
+		return typeIs(encoded, "string") ? encoded : "";
+	}
+
+	private offerMessage(offer: StoredOffer): PickerOfferMessage {
+		return {
+			options: offer.options,
+			premium: offer.premium,
+			fallback: offer.fallback,
+			deadline: this.pickerDeadline,
+		};
+	}
+
+	private sendOffer(player: Player, offer: StoredOffer): void {
+		const remote = this.offerRemote;
+		if (remote === undefined) {
+			return;
+		}
+
+		remote.FireClient(player, this.offerMessage(offer));
+	}
+
+	/**
+	 * Writes the pick onto the player's live body, if it has one.
+	 *
+	 * A scan of the round's own live set rather than a lookup table: the set is at most a handful of bodies and is already
+	 * the authority on what exists, whereas a player→body map would be a second record to keep in step with every
+	 * destruction path (`kill plane`, cap eviction, elimination, teardown) — the exact leak this class avoids elsewhere by
+	 * keeping ownership on the body.
+	 */
+	private applyChosenBall(player: Player, ballId: string): void {
+		for (const ball of this.liveBalls) {
+			const owner = readOwner(ball);
+			if (owner !== undefined && owner.userId === player.UserId) {
+				ball.SetAttribute(CHOSEN_BALL_ID_ATTRIBUTE, ballId);
+			}
+		}
+	}
+
+	/**
+	 * Closes the pick window when `Waiting` ends, logging the timeout picks once.
+	 *
+	 * ## Why the timeout pick is not drawn here
+	 *
+	 * It was drawn when the offer was created, because the body is spawned at entry and must carry an id from birth. The
+	 * distribution is identical — uniform over the player's own options — and the difference is only *when* the dice are
+	 * rolled. Drawing again here would produce a second id that disagrees with the attribute already on the body.
+	 *
+	 * ## Why the map is cleared rather than kept
+	 *
+	 * A pick arriving after the phase has moved must be refused, and "no offer" is the refusal. Clearing is also what
+	 * makes the next `Waiting` start from nothing instead of inheriting a stale premium flag.
+	 */
+	private closeOffers(): void {
+		for (const [player, offer] of this.offers) {
+			if (!offer.pickedByClient) {
+				print(`[Picker] pick player=${player.Name} ball=${offer.pick} source=timeout`);
+			}
+		}
+
+		this.offers.clear();
+	}
+
+	/** A client's pick. Validated against the stored offer, never against `OwnedBalls`. */
+	private onPick(player: Player, ballId: unknown): void {
+		const reply = (result: PickerResult) => {
+			const remote = this.pickRemote;
+			if (remote !== undefined) {
+				remote.FireClient(player, result);
+			}
+		};
+
+		const offer = this.offers.get(player);
+		if (offer === undefined) {
+			reply({ ok: false, reason: "no-offer" });
+			return;
+		}
+
+		if (!typeIs(ballId, "string") || !isPickAllowed(offer, ballId)) {
+			// Both cases are one refusal on purpose: a non-string is malformed and an un-offered id is a client asking for
+			// something it was not shown, and neither is worth teaching the difference over a remote.
+			reply({ ok: false, reason: "not-offered" });
+			return;
+		}
+
+		offer.pick = ballId;
+		offer.pickedByClient = true;
+		this.applyChosenBall(player, ballId);
+
+		print(`[Picker] pick player=${player.Name} ball=${ballId} source=client`);
+		reply({ ok: true });
+	}
+
+	/**
+	 * A paid re-roll: charge, then replace the offer.
+	 *
+	 * ## Why the charge comes first
+	 *
+	 * Generating the replacement offer before the save would leave a player with a new set of cards and an unchanged
+	 * balance if the save failed — free value created by a failure. Charging first means the only two outcomes are "paid and
+	 * replaced" and "nothing happened", which is the same ordering every other verb in this tree uses.
+	 *
+	 * ## Why a premium offer cannot be re-rolled
+	 *
+	 * A premium offer already contains every ball the player owns, so a freshly generated one is the *same set*. Charging
+	 * 3 coins for it would be charging for nothing, which is the one thing this economy has consistently refused to do.
+	 * The refusal is explicit rather than silent so the client can hide the button.
+	 */
+	private onReroll(player: Player): void {
+		const reply = (result: PickerResult) => {
+			const remote = this.rerollRemote;
+			if (remote !== undefined) {
+				remote.FireClient(player, result);
+			}
+		};
+
+		if (!this.isPickerAllowed(player, "reroll")) {
+			return;
+		}
+
+		const offer = this.offers.get(player);
+		if (offer === undefined) {
+			reply({ ok: false, reason: "no-offer" });
+			return;
+		}
+
+		if (offer.premium) {
+			reply({ ok: false, reason: "premium-offer" });
+			return;
+		}
+
+		let payment = "ok";
+		const result = applyReroll(
+			() => {
+				payment = this.economy.spendCoins(player, REROLL_COST_COINS);
+				return payment === "ok";
+			},
+			() => this.generateOfferFor(player, false),
+		);
+
+		if (result.outcome !== "ok") {
+			print(`[Round] reroll refused for ${player.Name}: ${result.outcome} (${payment})`);
+			reply({ ok: false, reason: result.outcome === "payment-failed" ? payment : "no-offer" });
+			return;
+		}
+
+		const replacement = result.offer;
+
+		// The body is already in the world with the previous id, so the new default has to follow it. Without this the
+		// attribute would name a ball from the old offer and the log would disagree with the body.
+		this.applyChosenBall(player, replacement.pick);
+
+		print(
+			`[Picker] reroll player=${player.Name} cost=${REROLL_COST_COINS} options=${replacement.options.join(",")}`,
+		);
+
+		reply({ ok: true, offer: this.offerMessage(replacement) });
+	}
+
+	/** Whether this player may re-roll now. Local because `EconomyService`'s cooldown map is private and this is not its verb. */
+	private isPickerAllowed(player: Player, action: string): boolean {
+		const now = os.clock();
+		const last = this.pickerCooldowns.get(player);
+
+		if (last !== undefined && (now - last) * 1000 < ECONOMY_ACTION_COOLDOWN_MS) {
+			print(`[Round] ${player.Name} ${action} ignored — within ${ECONOMY_ACTION_COOLDOWN_MS}ms cooldown`);
+			return false;
+		}
+
+		this.pickerCooldowns.set(player, now);
+		return true;
+	}
+
+	/**
+	 * Creates the three picker remotes.
+	 *
+	 * `PickerOffer` is only ever fired by the server. It is a `RemoteEvent` in the shared folder because that is how this
+	 * tree ships state to a client, not because the client may use it: an `OnServerEvent` connection is deliberately absent,
+	 * so a client that fires it changes nothing.
+	 */
+	private createPickerRemotes(): void {
+		let folder = ReplicatedStorage.FindFirstChild(REMOTES_FOLDER_NAME);
+		if (folder === undefined || !folder.IsA("Folder")) {
+			const created = new Instance("Folder");
+			created.Name = REMOTES_FOLDER_NAME;
+			created.Parent = ReplicatedStorage;
+			folder = created;
+		}
+
+		const offer = new Instance("RemoteEvent");
+		offer.Name = PICKER_OFFER_REMOTE_NAME;
+		offer.Parent = folder;
+		this.offerRemote = offer;
+
+		const pick = new Instance("RemoteEvent");
+		pick.Name = PICKER_PICK_REMOTE_NAME;
+		pick.Parent = folder;
+		pick.OnServerEvent.Connect((player, ballId: unknown) => this.onPick(player, ballId));
+		this.pickRemote = pick;
+
+		const reroll = new Instance("RemoteEvent");
+		reroll.Name = PICKER_REROLL_REMOTE_NAME;
+		reroll.Parent = folder;
+		reroll.OnServerEvent.Connect((player) => this.onReroll(player));
+		this.rerollRemote = reroll;
+	}
+
+	// #endregion
+
 	private createDebugRemotes(): void {
 		let folder = ReplicatedStorage.FindFirstChild(REMOTES_FOLDER_NAME);
 		if (folder === undefined || !folder.IsA("Folder")) {
