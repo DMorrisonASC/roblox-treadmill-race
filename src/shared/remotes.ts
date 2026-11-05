@@ -11,22 +11,6 @@
 export const REMOTES_FOLDER_NAME = "Remotes";
 
 /**
- * Fired by the client on key `2`, handled on the server. Forces the current phase to its next one.
- *
- * No arguments, for the same reason `SpawnBall` carries none: the server decides what the current phase
- * is and therefore what the next one is, and a client must not be able to name a phase. A player who
- * could pass one would be able to skip straight to `Playing` or drive the machine backwards.
- *
- * This is a **Studio affordance, not gameplay** — it exists so the four phases can be stepped through
- * without waiting out 30 + 15 + 5 seconds. The automatic loop advances on its own timers; this only
- * shortens the wait.
- *
- * Created by `RoundService` rather than declared in the Rojo project, matching the spawn remote: the
- * event and its handler stay owned by the same service, at the cost of a `WaitForChild` on the client.
- */
-export const ADVANCE_PHASE_REMOTE_NAME = "AdvancePhase";
-
-/**
  * A `StringValue` in `ReplicatedStorage` carrying the current phase name, written by `RoundService` on
  * every transition.
  *
@@ -68,9 +52,21 @@ export const WINNER_NAME_VALUE_NAME = "WinnerName";
  * These are **Studio affordances, not gameplay**, and they are ungated by design for now: the round can
  * be driven end to end solo without waiting out the 30 + 15 + 5 second timers. Admin gating is deferred.
  */
+export const DEBUG_INTERMISSION_REMOTE_NAME = "DebugIntermission";
 export const DEBUG_WAITING_REMOTE_NAME = "DebugWaiting";
 export const DEBUG_PLAYING_REMOTE_NAME = "DebugPlaying";
 export const DEBUG_SPAWN_REMOTE_NAME = "DebugSpawn";
+
+/**
+ * The elimination splash, fired **to one player** when their own competitor leaves the round.
+ *
+ * A remote rather than a `Player` attribute, and the difference is the whole decision: an attribute is *state*, so it
+ * persists, so it needs clearing at the next round and it would have to be read with a "have I already seen this value"
+ * baseline to avoid firing on rejoin. A remote is an *event* ? the server fires it once, to one client, at the moment it
+ * happens ? and a player who joins mid-`PostGame` simply never receives one, which is the required behaviour rather than
+ * something the client has to rule out.
+ */
+export const ELIMINATION_REMOTE_NAME = "Elimination";
 
 /**
  * The economy remotes. Both are **requests for a state change**, not commands: the client asks, the server

@@ -7,9 +7,11 @@ import {
 	PLAYER_OWNED_BALLS_ATTRIBUTE,
 } from "shared/attributes";
 import {
+	DEBUG_INTERMISSION_REMOTE_NAME,
 	DEBUG_PLAYING_REMOTE_NAME,
 	DEBUG_SPAWN_REMOTE_NAME,
 	DEBUG_WAITING_REMOTE_NAME,
+	ELIMINATION_REMOTE_NAME,
 	PICKER_OFFER_REMOTE_NAME,
 	PICKER_PICK_REMOTE_NAME,
 	PICKER_REROLL_REMOTE_NAME,
@@ -32,6 +34,8 @@ import {
 } from "shared/tuning";
 import { BallOwner, BallSpawnerService } from "./ball-spawner-service";
 import { EconomyService } from "./economy-service";
+import { decideRoundOutcome } from "../round-outcome";
+import { EliminationCause, splashTargetUserId } from "../elimination-signal";
 import { applyReroll, buildOffer, isPickAllowed, ownedIdsFrom, rollPremium, StoredOffer } from "../picker";
 import { TreadmillService } from "./treadmill-service";
 
@@ -155,7 +159,6 @@ export class RoundService implements OnStart {
 	 * technically true and practically useless. A round that starts with one entrant simply runs its
 	 * clock.
 	 */
-	private initialLiveCount = 0;
 
 	/** The replicated `StringValue` clients read. Created in `onStart`. */
 	private roundState?: StringValue;
@@ -195,6 +198,7 @@ export class RoundService implements OnStart {
 	private offerRemote?: RemoteEvent;
 	private pickRemote?: RemoteEvent;
 	private rerollRemote?: RemoteEvent;
+	private eliminationRemote?: RemoteEvent;
 
 	// #endregion
 
@@ -217,15 +221,51 @@ export class RoundService implements OnStart {
 		// leaving, so it is a state line rather than an arrow. `Intermission` is the initial value of
 		// `this.phase`, so there is no transition to log — only the announcement.
 		this.publishPhase();
-		print(`[Round] state=${this.phase} — press 2 to skip a phase`);
+		print(`[Round] state=${this.phase} — keys: 1=Intermission 2=Waiting 3=Playing 4=spawn`);
 		this.startIntermissionTimer();
 	}
 
 	// #region public API
 
 	/**
+	 * Forces the machine into `Intermission`, from any phase.
+	 *
+	 * ## Why this needed building
+	 *
+	 * `enterIntermission` had exactly one caller: the `PostGame` hold's timed transition. Nothing could *reach* the lobby
+	 * except by playing a round out, which meant testing anything that lives there (`Waiting`'s picker, most of all) cost
+	 * a thirty-second wait. A debug key cannot call the timed path either — that path goes through `endPlaying` first, which
+	 * awards a winner and holds `PostGame` for five seconds.
+	 *
+	 * ## Why it duplicates three lines of `endPlaying` instead of calling it
+	 *
+	 * `endPlaying`'s job is to *decide a result*: freeze the clock, publish a winner, log `winner=`. A debug jump decides
+	 * nothing — there is no result to publish and no winner to name — so routing through it would either invent a result or
+	 * need a "don't log this" flag. The three things that genuinely must happen are here instead: stop the belt ramp, stop
+	 * the simulation, and reset the synthetic counter, in that order, before the teardown that `enterIntermission` does.
+	 *
+	 * **The timer is re-armed by `enterIntermission` itself**, not inherited: it calls `startIntermissionTimer` after
+	 * `++this.generation`, and that timer loops only while `phase === "Intermission"` *and* the generation matches. A jump
+	 * that skipped `enterIntermission` would leave the previous phase's loop counting from its own start.
+	 *
+	 * **Not wrapped in `transitionAround`.** The wipe exists to cover a phase change the player did not ask for; a debug key
+	 * is asked for, and covering the screen would hide the teardown the key exists to demonstrate.
+	 */
+	public forceIntermission(reason: string): void {
+		this.stopBeltRamp();
+		this.spawner.setRoundActive(false);
+		this.resetSyntheticCounter();
+
+		this.enterIntermission(reason);
+	}
+
+	/**
 	 * Forces the machine into `Waiting`, from any phase, skipping whatever timer or end condition would
 	 * have got there.
+	 *
+	 * **Bound to `2` since item 73.** The keys are in phase order now — `1` Intermission, `2` Waiting, `3` Playing,
+	 * `4` spawn — so this used to be `1` and the docblocks and logs that said so were corrected with it. A reader holding a
+	 * log from before that change will otherwise think `1` still reaches `Waiting`.
 	 *
 	 * **Every press is a reset, not a nudge.** Leaving `Playing` (or `PostGame`) means the bodies it was
 	 * running are abandoned: the round is about to spawn a fresh competitor into a lane that still has
@@ -243,9 +283,8 @@ export class RoundService implements OnStart {
 	 * The synthetic counter resets with the world it describes, so the numbering restarts each round.
 	 */
 	public forceWaiting(reason: string): void {
-		this.clearAllBodies("debug key 1");
+		this.clearAllBodies("debug key 2");
 		this.resetSyntheticCounter();
-		this.initialLiveCount = 0;
 
 		const spawned = this.startWaitingRound(reason);
 
@@ -281,11 +320,10 @@ export class RoundService implements OnStart {
 	 */
 	public forcePlaying(reason: string): void {
 		if (this.phase === "Playing") {
-			this.clearAllBodies("debug key 2 restart");
+			this.clearAllBodies("debug key 3 restart");
 			this.resetSyntheticCounter();
-			this.initialLiveCount = 0;
 
-			const restarted = this.spawnRoundCompetitors("debug key 2 restart");
+			const restarted = this.spawnRoundCompetitors("debug key 3 restart");
 			if (restarted === 0) {
 				// `spawnRoundCompetitors` already printed the reason (no players, or no spawners). Staying in
 				// `Playing` with an empty belt is the honest outcome: the round is running and has nothing to
@@ -307,21 +345,20 @@ export class RoundService implements OnStart {
 			// **New guard, added with the restart change.** `forcePlaying` previously had no `PostGame` branch
 			// at all, so pressing `2` there cleared a round whose winner was still on display and entered a
 			// fresh `Playing` — the one case where the clear destroys a result rather than a race in progress.
-			// `1` remains the way out of `PostGame`, because it goes to `Waiting` and its own teardown path.
+			// `1` remains the way out of `PostGame`, because it goes to `Intermission` and its own teardown path.
 			print(`[Round] debug-advance refused — ${this.phase} is clearing`);
 			return;
 		}
 
-		this.clearAllBodies("debug key 2");
+		this.clearAllBodies("debug key 3");
 		this.resetSyntheticCounter();
-		this.initialLiveCount = 0;
 
 		const spawned = this.spawnRoundCompetitors(reason);
 		if (spawned === 0) {
 			// `spawnRoundCompetitors` already logged why. Staying put is the only honest outcome: entering
 			// `Playing` with nothing to race is the 21:42 failure, and clearing again here would destroy
 			// nothing while implying it had.
-			print(`[Round] debug key 2: no competitors spawned, staying in ${this.phase}`);
+			print(`[Round] debug key 3: no competitors spawned, staying in ${this.phase}`);
 			return;
 		}
 
@@ -409,10 +446,6 @@ export class RoundService implements OnStart {
 			print(`[Round] spawn lane=${lane} owner=${owner.displayName}(${owner.userId}) body=${ball.GetFullName()}`);
 		}
 
-		// Set, not incremented: this is the number of competitors the round must beat down to one, and the
-		// spawner's `MaxLiveBalls` eviction can shrink the live set between calls.
-		this.initialLiveCount = spawned;
-
 		return spawned;
 	}
 
@@ -425,14 +458,11 @@ export class RoundService implements OnStart {
 	 * Spawns one competitor per bound spawner, each with its own synthetic owner, from any `Playing`
 	 * round.
 	 *
-	 * ## Why `initialLiveCount` is *set*, not incremented
+	 * ## Why this needs no bookkeeping any more
 	 *
-	 * The end condition asks "did more than one competitor ever start". A debug spawn changes that answer
-	 * from the moment it lands, so the field has to move with it — but incrementing by four would
-	 * over-count whenever the spawner evicted a body between two presses, and the count exists precisely to
-	 * be compared against a live set that the `MaxLiveBalls` eviction can shrink. Setting it to the live
-	 * count after the spawn keeps the two consistent by construction: `initialLiveCount` becomes "how many
-	 * competitors this round has had to beat", which is the only reading the win check needs.
+	 * `initialLiveCount` used to be rewritten here so the win check could tell "one competitor left" from "one competitor
+	 * ever started". The field is gone (item 72) because the check no longer asks that question, so a debug spawn needs no
+	 * record of its own: the bodies are tracked below, and the next check simply counts them.
 	 *
 	 * ## Why it is refused outside `Playing`
 	 *
@@ -452,13 +482,10 @@ export class RoundService implements OnStart {
 			this.trackBall(ball);
 		}
 
-		// Set, not added to: see the note above.
-		this.initialLiveCount = this.getLiveBalls().size();
-
 		const first = owners[0];
 		const last = owners[owners.size() - 1];
 		print(
-			`[Round] debug spawn: ${spawned.size()} competitors (${first === undefined ? "none" : first.displayName}..${last === undefined ? "none" : last.displayName}), live=${this.liveBalls.size()}, initial=${this.initialLiveCount}`,
+			`[Round] debug spawn: ${spawned.size()} competitors (${first === undefined ? "none" : first.displayName}..${last === undefined ? "none" : last.displayName}), live=${this.liveBalls.size()}`,
 		);
 	}
 
@@ -805,7 +832,6 @@ export class RoundService implements OnStart {
 
 		this.treadmill.setBeltSpeed(0);
 		this.frozenElapsed = 0;
-		this.initialLiveCount = 0;
 		this.warnedNoZone = false;
 
 		// The winner belongs to the round that just ended, so it is cleared here rather than at the start of
@@ -1068,6 +1094,10 @@ export class RoundService implements OnStart {
 			this.forgetBall(ball);
 			ball.Destroy();
 
+			// Leaving the belt is *losing*, so the owner is told. Read before the destroy, and dispatched through the pure
+			// rule so "synthetic owners are not told" has one definition rather than one `if` per removal site.
+			this.notifyEliminated(owner, "left-belt");
+
 			// **Every elimination restarts the idle clock.** The warning it guards exists to say "nothing has
 			// happened for 60 s", and a round that is shedding a competitor every few seconds is the exact
 			// opposite of that — without this reset the line would fire on a schedule that has nothing to do
@@ -1127,11 +1157,30 @@ export class RoundService implements OnStart {
 	 *
 	 * ## The conditions, in this order
 	 *
-	 *  - **No competitors left** → `winner=none`. Reported rather than treated as a draw, because "every
-	 *    competitor was eliminated" is a definite result a bet can settle against.
-	 *  - **One competitor, and more than one ever started** → that owner wins. `initialLiveCount > 1` is
-	 *    what makes this *last standing* rather than "first frame": a round that began with one competitor
-	 *    is not won by that competitor surviving the first tick.
+	 *  - **No competitors left** → `winner=none`, `no survivors`. Reported rather than treated as a draw, because "every
+	 *    competitor was eliminated" is a definite result a bet can settle against. Reachable only when two or more left in
+	 *    the same instant — the spawner's cleanup pass destroys a whole batch in one loop, and `evaluateAfterLoss` defers
+	 *    so the batch lands before this runs — or when a body is destroyed without going through elimination.
+	 *  - **Exactly one competitor** → that owner wins, `last standing`. **No guard on how many the round started with.**
+	 *
+	 * ## The `initialLiveCount > 1` guard is deleted, and this records why
+	 *
+	 * Item 37 added it to stop a round that began with a single competitor from naming that competitor the winner of a race
+	 * it ran alone. That is now the **wrong** answer: a round with one entrant is a round that entrant wins, and refusing to
+	 * name them produced `PostGame — no winner` for a solo session — a result the player could not act on and could not tell
+	 * apart from a broken round. The field is deleted with the guard (item 72): with no reader, leaving it written would be
+	 * an inert field, and this project removes those.
+	 *
+	 * What that costs, stated plainly: **a round that starts with one competitor ends at the first check** — at most
+	 * `TICK_INTERVAL_SECONDS` after `Playing` begins, with that competitor named. A solo session therefore races for about a
+	 * second. That is the requested rule; the alternative that keeps a solo race alive is a finish-line signal this tree
+	 * does not have, not a guard on this check.
+	 *
+	 * ## Why the count and not the branch decides the log
+	 *
+	 * Both lines carry `live=`, so a log reader can tell a genuine wipe-out from a last-standing result without knowing
+	 * which branch this function took — and a future third branch cannot accidentally reuse a reason string that no longer
+	 * describes it.
 	 *
 	 * ## There is no time limit, and that is deliberate
 	 *
@@ -1153,24 +1202,37 @@ export class RoundService implements OnStart {
 	private checkEndCondition(): boolean {
 		const live = this.getCompetitors();
 
-		if (live.size() === 0) {
-			this.endPlaying(this.initialLiveCount === 0 ? "no competitors" : "no survivors", undefined);
-			return true;
-		}
-
-		if (live.size() === 1 && this.initialLiveCount > 1) {
-			const survivor = live[0];
-			if (survivor === undefined) {
-				this.endPlaying("ended: no survivors", undefined);
-				return true;
+		// The decision is a pure function so the rule can be asserted without an engine; this method is the dispatch. Owners
+		// are collected rather than defaulted: `getCompetitors` already filtered to owned bodies, and inventing a
+		// `userId 0` fallback would let a broken invariant publish a winner that does not exist.
+		const owners = new Array<BallOwner>();
+		for (const body of live) {
+			const owner = readOwner(body);
+			if (owner !== undefined) {
+				owners.push(owner);
 			}
+		}
 
-			const owner = readOwner(survivor);
-			this.endPlaying(`last standing: ${survivor.GetFullName()}`, owner === undefined ? undefined : owner);
+		const outcome = decideRoundOutcome(owners);
+
+		if (outcome.kind === "continue") {
+			return false;
+		}
+
+		if (outcome.kind === "no-survivors") {
+			this.endPlaying("no survivors, live=0", undefined);
 			return true;
 		}
 
-		return false;
+		// The winner's *body* is still needed for the log line, and the body is the thing that exists — the owner is a pair
+		// of attributes on it. Reading it back here keeps `decideRoundOutcome` free of instances.
+		const survivor = live.size() === 1 ? live[0] : undefined;
+
+		this.endPlaying(`last standing, live=1${survivor === undefined ? "" : `: ${survivor.GetFullName()}`}`, {
+			userId: outcome.winner.userId,
+			displayName: outcome.winner.displayName,
+		});
+		return true;
 	}
 
 	/**
@@ -1308,13 +1370,48 @@ export class RoundService implements OnStart {
 			return;
 		}
 
+		// **Read before the body is forgotten and long before it is gone**, because the owner lives in attributes on the
+		// instance: a destroyed part returns its defaults, so a post-destroy read would report `userId 0` and the rule would
+		// quietly treat a real player as synthetic and tell nobody.
+		const owner = readOwner(ball);
+
 		this.forgetBall(ball);
+
+		// Culled, not torn down: `KillY` and the `MaxLiveBalls` cap remove a competitor the same way the zone does, and the
+		// player whose ball fell out of the world is exactly as eliminated. Teardown never reaches here — `clearAllBodies`
+		// forgets each body before destroying it, so the membership check above returns early — which is what keeps a
+		// phase change from splashing every player at once.
+		this.notifyEliminated(owner, "culled");
 
 		// A body lost to the kill plane or a future path is still a change in the round's state, so it
 		// restarts the idle clock for the same reason a zone elimination does — see `warnIfIdle`.
 		this.lastProgressAt = os.clock();
 
 		this.evaluateAfterLoss();
+	}
+
+	/**
+	 * Tells one player their competitor is out, if there is one to tell.
+	 *
+	 * The recipient is decided by `splashTargetUserId`, not here: "synthetic owners are not players" and "a teardown is
+	 * not an elimination" are rules, and a rule written at two call sites is a rule that will disagree with itself the
+	 * third time. The remote is server-to-client only, so this is the sole way the signal can be produced.
+	 */
+	private notifyEliminated(owner: BallOwner | undefined, cause: EliminationCause): void {
+		const userId = splashTargetUserId(owner, cause);
+		if (userId === undefined) {
+			return;
+		}
+
+		const remote = this.eliminationRemote;
+		const player = Players.GetPlayerByUserId(userId);
+		if (remote === undefined || player === undefined) {
+			return;
+		}
+
+		// No arguments: the splash is one fixed word and the client needs nothing to render it. A payload would be a
+		// second source of truth for text the controller already owns.
+		remote.FireClient(player);
 	}
 
 	/**
@@ -1688,15 +1785,30 @@ export class RoundService implements OnStart {
 
 		// The client sends nothing and these handlers ignore everything they could send: which phase to
 		// enter is a constant per key, and a client that could pass a phase could skip a round.
+		// `1` forces `Intermission`, so the phase keys are in phase order and every phase is reachable without waiting out
+		// a timer. Named for its action like its siblings; the folder is find-or-create, but these children are created
+		// fresh on every server start and are not part of the place, so renaming one leaves nothing behind.
+		const intermission = new Instance("RemoteEvent");
+		intermission.Name = DEBUG_INTERMISSION_REMOTE_NAME;
+		intermission.Parent = folder;
+		intermission.OnServerEvent.Connect(() => this.forceIntermission("debug key 1"));
+
 		const waiting = new Instance("RemoteEvent");
 		waiting.Name = DEBUG_WAITING_REMOTE_NAME;
 		waiting.Parent = folder;
-		waiting.OnServerEvent.Connect(() => this.forceWaiting("debug key 1"));
+		waiting.OnServerEvent.Connect(() => this.forceWaiting("debug key 2"));
 
 		const playing = new Instance("RemoteEvent");
 		playing.Name = DEBUG_PLAYING_REMOTE_NAME;
 		playing.Parent = folder;
-		playing.OnServerEvent.Connect(() => this.forcePlaying("debug key 2"));
+		playing.OnServerEvent.Connect(() => this.forcePlaying("debug key 3"));
+
+		// Server to client only: no `OnServerEvent` connection, so a client firing it changes nothing. One player is told,
+		// because a splash is one player's result.
+		const elimination = new Instance("RemoteEvent");
+		elimination.Name = ELIMINATION_REMOTE_NAME;
+		elimination.Parent = folder;
+		this.eliminationRemote = elimination;
 
 		const spawn = new Instance("RemoteEvent");
 		spawn.Name = DEBUG_SPAWN_REMOTE_NAME;

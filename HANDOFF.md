@@ -1952,3 +1952,107 @@ for a narrow window. A premium offer scrolls inside that width rather than widen
 
 **Still Studio-only:** the proportions at three cards and at nine, the scrollbar's placement, the countdown's readability,
 and the contrast of `onAccent` on the accent fill.
+
+## 72. One competitor wins immediately; the `initialLiveCount` guard and the field are gone
+
+`checkEndCondition` refused to name a winner unless the round had once had more than one competitor, so a solo session
+finished `PostGame - no winner`. That is now the wrong answer: **one competitor left is the winner**, whether the round
+started with one or with five. The rule lives in `src/server/round-outcome.ts` as `decideRoundOutcome(owners)` so it can be
+asserted without an engine; `RoundService.checkEndCondition` became the dispatch.
+
+**The field is deleted, not kept.** With the guard gone, nothing read `initialLiveCount` - its four resets, two writes and
+its `initial=` field in the debug-spawn log were all that remained. An inert field is what this project removes, so the
+declaration, the writes and the log column are gone; the debug-spawn docblock that argued for setting rather than
+incrementing is replaced by a paragraph saying why no bookkeeping is needed now.
+
+**`no survivors` is now reachable only from zero.** Two bodies destroyed in one cleanup pass: the spawner's pass destroys a
+batch in a loop, each `Destroying` fires synchronously, and `evaluateAfterLoss` defers, so the whole batch lands before the
+check runs and the count is genuinely zero. A body destroyed without going through elimination is the other route.
+
+**The ordering, per spawn site (Decision 1).** All five satisfy "the count is current before any check can observe the new
+body", and for one reason rather than five: **every spawn path - `spawnRoundCompetitors` (used by `forceWaiting`, the
+`Waiting` timer and the intermission timer), both `forcePlaying` branches, and `debugSpawnCompetitors` - completes without
+yielding**, and the only asynchronous check is `evaluateAfterLoss`'s `task.defer`, which runs after the current callback
+finishes. `spawnRoundCompetitors` and `forcePlaying` track each body immediately after `spawnInLane`; the debug path spawns
+in bulk and tracks in a second loop, which is equally safe because nothing can interleave a synchronous loop.
+`forceWaiting` is the strongest case: it is synchronous end to end, so by the time any defer runs the phase is already
+`Waiting` and `evaluateAfterLoss` returns on its phase guard.
+
+**The mechanism chosen is "spawns are synchronous within one resumption"** (Decision 3), not a pending-spawn flag and not a
+count updated at decision time. Rejected: a flag is state that has to be cleared on every failure path, and a count moved
+before the body exists can be right while the body is missing - the failure mode the round's own orphan rule exists to
+prevent. **The case it does not cover:** a `3` press whose remote callback runs in a *later* resumption than the deferred
+check. The round has legitimately ended by then, `debugSpawnCompetitors` refuses outside `Playing`, and the press starts
+nothing. That is correct behaviour rather than a gap, but it is the boundary.
+
+**A solo round now ends at the first check.** `enterPlaying` does not evaluate the condition; the tick does, after
+`TICK_INTERVAL_SECONDS` (1 s). So a session with one player finishes about a second into `Playing`, with that player named
+- the rule as stated, and the visible change from `PostGame - no winner` to `PostGame - <name>`. **This is the round's most
+consequential behaviour and the report names the alternative:** if a solo competitor is meant to *race* and win at the
+exit, that needs a finish-line signal this tree does not have, and criterion 7's "zero competitors is `no survivors`"
+would have to be revisited, because a competitor leaving is exactly what takes the count to zero.
+
+**Tests: 168 -> 177.** New `src/server/test/round-outcome.spec.ts` (9): two and five competitors continue; a two-round's
+survivor is named; a solo competitor is named with no memory of how many started (criterion 3); a synthetic `Debug#N` owner
+counts identically; an empty list is `no-survivors` and names nobody; the input list is not mutated; and a repeated call is
+stable, which matters because the check runs on a tick *and* after every loss.
+
+**Not verified without Studio, in order:** (1) the `1`/`3` press landing in the same frame as a loss - the ordering argument
+above is a source read, and a playtest is the only place to see it; (2) that a solo round ends at `elapsed=1.0`; (3) that
+the banner reads `PostGame - <name>` and clears at `PostGame -> Intermission`.
+
+## 73. Debug keys in phase order, and an arcade elimination splash on its own layer
+
+**Keys: `1` Intermission, `2` Waiting, `3` Playing, `4` spawn four.** They were `1` Waiting, `2` Playing, `3` spawn, so the
+lobby - and therefore the picker - was reachable only by waiting out a thirty-second `Intermission`. Every docblock and log
+that named the old bindings was corrected at the same time, and the corrected text says what the old binding was, because a
+reader holding an older log will otherwise watch `1` jump to the lobby and conclude the key broke. The startup line is now
+`keys: 1=Intermission 2=Waiting 3=Playing 4=spawn`.
+
+**`1` needed a new verb.** `enterIntermission` had exactly one caller: the `PostGame` hold's timed transition, which routes
+through `endPlaying` first and therefore awards a winner and holds for five seconds. `forceIntermission` does the three
+things a jump needs - stop the belt ramp, stop the simulation, reset the synthetic counter - and then calls
+`enterIntermission`, which does the teardown and re-arms the timer from `++generation`. It is deliberately **not** routed
+through `endPlaying`, which exists to decide a result, and deliberately **not** wrapped in `transitionAround`: the wipe
+covers changes the player did not ask for.
+
+**Remote names.** `DebugIntermission` is new; `DebugWaiting` / `DebugPlaying` / `DebugSpawn` already matched their actions and
+were kept. All four are created at runtime by `createDebugRemotes`, not declared in the project file, so a rename leaves
+nothing behind in a fresh DataModel. `ADVANCE_PHASE_REMOTE_NAME = "AdvancePhase"` was still declared from before item 35 and
+referenced nowhere - deleted, since an unhandled name is exactly the stale remote the brief asks about.
+
+**The elimination signal is a remote, not an attribute.** An attribute is *state*: it persists, it needs clearing at the next
+round, and a client returning mid-`PostGame` would need a "have I already seen this value" baseline to avoid replaying it. A
+remote is an *event* - fired once, to one player, at the moment it happens - and a rejoining player simply never receives one,
+which is the required behaviour rather than something the client has to rule out. `Elimination` is server-to-client only, with
+no `OnServerEvent` connection, and carries no arguments: the word is the controller's.
+
+**Who is told is a pure rule** (`src/server/elimination-signal.ts`): `teardown` tells nobody (the phase changed; everyone was
+removed at once), no owner tells nobody, `userId <= 0` tells nobody (`Debug#N`), and everything else tells that player. Two
+call sites - `settleEliminations` (`left-belt`) and `handleExternalDestruction` (`culled`, i.e. `KillY` and the cap) - so
+"the cap is an elimination but a teardown is not" has one definition. **Owner read before the destroy**, because a destroyed
+instance reports its defaults and `userId 0` would fail the `<= 0` test and tell nobody silently.
+
+**The splash lives on a new `splash` layer at display order 35**, between `hudTopbar` (30) and `transition` (40): it draws
+over gameplay, so it outranks the HUD, and the wipe must still be able to cover it. `CoreUISafeInsets`, because its position
+is a share of the layer and has to agree with the HUD about where 26% from the top is.
+
+**Animation, exactly as specified:** `UIScale` 0 -> 1.15 (`0.15 s`, `Back`/`Out`) -> 1.0 (`0.1 s`, `Quad`/`Out`), hold
+`0.5 s`, then `TextTransparency` and the stroke's `Transparency` to 1 over `0.2 s` (`Quad`/`In`). `LIFETIME_SECONDS` is the
+sum of the four, and the frame is **destroyed** at the end rather than hidden - one frame per elimination, kept invisible, is
+a leak that only shows after a long session. The scale is on the frame so the glyphs never re-typeset.
+
+**Theme direction: `getTheme()` (HUD), not `surfaceOpaqueTheme()`.** The splash draws over the world, and the reference's
+legibility is a light glyph on a near-black `Contextual` outline - a pair that survives both a pale arena and a dark one. The
+light direction's dark ink would need a light outline against a dark sky, which inverts the look.
+
+**Tests: 177 -> 185.** New `src/server/test/elimination-signal.spec.ts` (8): left-belt and culled notify the owner; teardown
+notifies nobody; synthetic ids (negative) and a zero id notify nobody; an ownerless body notifies nobody; the cause table is
+exhaustive (exactly two of three notify). `src/server/test/round-outcome.spec.ts` from item 72 is unmodified.
+
+**Registry.** A controller was added, so `flamework.build` was regenerated (cache files only, no mass delete - two rojo
+processes are live). `elimination-splash-controller` is confirmed in the registry.
+
+**Not verified without Studio:** the splash's appearance and readability over the arena, the 26%-from-top position, the pop
+timing, `1` leaving zero bodies on the belt with the timer counting from the forced entry, and that a `4` press during a
+one-competitor round cannot save it from the immediate-win rule (item 72).

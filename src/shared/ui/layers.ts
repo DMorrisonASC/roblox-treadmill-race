@@ -34,6 +34,8 @@ export const HUD_CORE_GUI_NAME = "HudCoreGui";
 export const FULL_SCREEN_GUI_NAME = "FullScreenGui";
 /** **Placeholder.** The `ScreenGui` name for the round-transition layer. */
 export const TRANSITION_GUI_NAME = "TransitionGui";
+/** **Placeholder.** The `ScreenGui` name for the action-splash layer. */
+export const SPLASH_GUI_NAME = "SplashGui";
 
 /**
  * **Placeholder.** Draw order for the full-screen layer: **below both HUD layers**.
@@ -72,8 +74,18 @@ export const HUD_TOPBAR_DISPLAY_ORDER = 30;
  */
 export const TRANSITION_DISPLAY_ORDER = 40;
 
-/** Which layer an element wants. The four names map one-to-one to the four constructors below. */
-export type UiLayer = "hudTopbar" | "hudCore" | "fullScreen" | "transition";
+/**
+ * **Placeholder.** Draw order for the action-splash layer: **above the HUD, below the wipe.**
+ *
+ * The constraint is one sentence and it is the whole reason the layer exists: a splash is read *over* gameplay, so it
+ * outranks every HUD element, and it is still something the round transition must be able to cover, so it yields to the
+ * wipe. Sitting it inside `hudCore` would let a panel clip or cover it; sitting it in `transition` would let a splash
+ * draw on top of the black cover.
+ */
+export const SPLASH_DISPLAY_ORDER = 35;
+
+/** Which layer an element wants. The five names map one-to-one to the five constructors below. */
+export type UiLayer = "hudTopbar" | "hudCore" | "fullScreen" | "transition" | "splash";
 
 /**
  * The only public entry point. Returns the layer's `ScreenGui`, creating it if this client does not have
@@ -94,6 +106,8 @@ export function getScreenGui(layer: UiLayer): ScreenGui {
 		return fullScreenGui();
 	} else if (layer === "transition") {
 		return transitionGui();
+	} else if (layer === "splash") {
+		return splashGui();
 	}
 
 	return topbarHudGui();
@@ -113,6 +127,15 @@ function fullScreenGui(): ScreenGui {
 
 function transitionGui(): ScreenGui {
 	return configureGui("transition", TRANSITION_GUI_NAME, Enum.ScreenInsets.None, TRANSITION_DISPLAY_ORDER);
+}
+
+/**
+ * `CoreUISafeInsets`, not `None`: the splash is positioned as a share of this gui's height, so it has to agree with the
+ * HUD about where "26% from the top" is. `None` would place it relative to the physical screen and put it under the
+ * Roblox topbar on a phone, where the same code looks correct on a monitor.
+ */
+function splashGui(): ScreenGui {
+	return configureGui("splash", SPLASH_GUI_NAME, Enum.ScreenInsets.CoreUISafeInsets, SPLASH_DISPLAY_ORDER);
 }
 
 /**
