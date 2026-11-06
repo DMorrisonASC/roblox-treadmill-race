@@ -56,7 +56,12 @@ import {
 	robuxChestWeights,
 	STARTING_COINS,
 } from "shared/economy.config";
-import { FUSE_BALLS_REMOTE_NAME, OPEN_COIN_CHEST_REMOTE_NAME, REMOTES_FOLDER_NAME } from "shared/remotes";
+import {
+	FUSE_BALLS_REMOTE_NAME,
+	OPEN_COIN_CHEST_REMOTE_NAME,
+	PURCHASE_GRANTED_REMOTE_NAME,
+	REMOTES_FOLDER_NAME,
+} from "shared/remotes";
 import { PlayerDataStore, Profile } from "./player-data-store";
 
 /** What a chest press produced. */
@@ -117,6 +122,9 @@ export class EconomyService implements OnStart {
 	 */
 	private readonly chestCooldowns = new Map<Player, number>();
 	private readonly fusionCooldowns = new Map<Player, number>();
+
+	/** Tells one buyer a grant succeeded. See `PURCHASE_GRANTED_REMOTE_NAME` for why the Robux path needs it. */
+	private purchaseGrantedRemote?: RemoteEvent;
 
 	public onStart(): void {
 		this.store.start();
@@ -359,6 +367,9 @@ export class EconomyService implements OnStart {
 
 		if (outcome === "granted") {
 			this.publish(player, profile);
+			// The Robux path has no reply of its own — the receipt is server-to-server — so this is the buyer's only
+			// confirmation. `duplicate` deliberately does not reach it: the grant happened in an earlier session.
+			this.notifyGranted(player);
 		}
 
 		print(`[Economy] ${player.Name} robux chest ${outcome} purchase=${purchaseId}`);
@@ -389,6 +400,7 @@ export class EconomyService implements OnStart {
 
 		if (result.outcome === "granted") {
 			this.publish(player, profile);
+			this.notifyGranted(player);
 			print(
 				`[Economy] ${player.Name} robux bundle granted purchase=${purchaseId} count=${result.granted.size()} balls=${result.granted.join(",")}`,
 			);
@@ -740,6 +752,12 @@ export class EconomyService implements OnStart {
 			// for the literal number `1`; everything else goes to the bulk verb, whose validator produces the refusal.
 			const reply = count === 1 ? this.openCoinChest(player) : this.openChestsBulk(player, count);
 			chest.FireClient(player, reply);
+
+			// The reply is the result; this is the confirmation the buyer's client plays a sound for. Fired from the
+			// reply's own `ok` rather than from the verb, so a refusal cannot reach it by either route.
+			if (reply.ok) {
+				this.notifyGranted(player);
+			}
 		});
 
 		const fuse = new Instance("RemoteEvent");
@@ -756,8 +774,38 @@ export class EconomyService implements OnStart {
 				return;
 			}
 
-			fuse.FireClient(player, this.fuseBalls(player, ballId));
+			const reply = this.fuseBalls(player, ballId);
+			fuse.FireClient(player, reply);
+
+			// **Success only.** A fusion that rolled a failure consumed both materials and granted nothing, so it reports
+			// `ok: true` with `outcome: "fail"` — a granted ball is the only thing that makes a purchase noise.
+			if (reply.ok && reply.outcome === "success") {
+				this.notifyGranted(player);
+			}
 		});
+
+		// One player, no arguments: the sound is the same clip for every purchase and the client needs nothing else.
+		const purchaseGranted = new Instance("RemoteEvent");
+		purchaseGranted.Name = PURCHASE_GRANTED_REMOTE_NAME;
+		purchaseGranted.Parent = folder;
+		this.purchaseGrantedRemote = purchaseGranted;
+	}
+
+	/**
+	 * Tells one buyer that a purchase was granted.
+	 *
+	 * Called only where the outcome is known to be a grant: the chest reply's `ok`, the fusion reply's
+	 * `outcome === "success"`, and a Robux receipt's `granted`. A `duplicate` receipt is a redelivery of a purchase that
+	 * was already granted in an earlier session — the player heard the sound then, and replaying it on the retry would
+	 * tell them they had just bought something they had not.
+	 */
+	private notifyGranted(player: Player): void {
+		const remote = this.purchaseGrantedRemote;
+		if (remote === undefined) {
+			return;
+		}
+
+		remote.FireClient(player);
 	}
 
 	/**

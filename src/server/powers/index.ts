@@ -20,12 +20,13 @@
  *
  * ## What is deliberately absent
  *
- * No VFX: no aura, no tint, no particle, no trail, no tween. The badge is the only thing this module puts in the world that
- * is not a body. No player→ball mapping — the badge names the power, not the owner. No periodic `ghost` toggle; the
+ * No VFX **built here**: no aura, no tint, no trail, no tween. The hit effect added in item 84 is fired from this module
+ * as a position on a remote and built by each client, so the badge is still the only thing this module puts in the world
+ * that is not a body. No player→ball mapping — the badge names the power, not the owner. No periodic `ghost` toggle; the
  * intended nerf is recorded here and not built.
  */
 import { PhysicsService } from "@rbxts/services";
-import { BALL_SPEED_ATTRIBUTE, POWER_ATTRIBUTE } from "shared/attributes";
+import { BALL_SPEED_ATTRIBUTE, OWNER_USER_ID_ATTRIBUTE, POWER_ATTRIBUTE } from "shared/attributes";
 import {
 	BULLY_KEEP_SHARE,
 	BULLY_STEAL_SHARE,
@@ -53,6 +54,7 @@ import {
 } from "shared/powers.config";
 import { TAGS } from "shared/tags";
 import { BALL_SPEED_DECAY_RATE, BALL_SPEED_MAX, BALL_SPEED_MIN, BOOST_TARGET_BALL_SPEED } from "shared/tuning";
+import { shouldRecordTouch } from "../elimination-sound";
 
 // #region pure rules
 
@@ -479,15 +481,15 @@ export function setPower(ball: BasePart, power: string, radius: number): void {
 		eclipseBalls.add(ball);
 	}
 
-	// **Only a colliding power gets a connection.** The brief asks for one `Touched` connection per ball filtered inside
-	// the handler; attaching it only to the two balls that can act on a collision is the same behaviour for a tenth of
-	// the per-contact work, and this file already pays two handlers per ball for backspin and wall assist.
-	if (isColliding(power)) {
-		collisionConnections.set(
-			ball,
-			ball.Touched.Connect((other) => onBallCollision(ball, other)),
-		);
-	}
+	// **Every body connects, not only the two colliding powers.** The brief for item 84 attached this only to `bully` and
+	// `heavy` — the powers that can transfer speed — which left a plain-vs-ghost contact invisible to the server. The
+	// last-touch record (item 87, the elimination sound's input) needs a touch for *every* pair, because the body that
+	// gets knocked off the belt is usually not the colliding one. The transfer stays where it was: the handler's own gates
+	// still require `isColliding`, so the extra connections change who is *recorded*, not who is *acted on*.
+	collisionConnections.set(
+		ball,
+		ball.Touched.Connect((other) => onBallCollision(ball, other)),
+	);
 }
 
 function isColliding(power: string): boolean {
@@ -508,6 +510,24 @@ export function forgetBall(ball: BasePart): void {
 	eclipseBalls.delete(ball);
 	collisionConnections.get(ball)?.Disconnect();
 	collisionConnections.delete(ball);
+
+	// The last-touch record, **from both ends**. Dropping only the key would leave every entry that names this body as
+	// the toucher pointing at a destroyed part, which `lastToucherOf` then has to reject one entry at a time — and this
+	// map, like the three above it, has to be cleared on every death path or it grows by one entry per ball for the
+	// length of a session. Removals are collected first because deleting while iterating a `Map` is not a contract worth
+	// relying on across Luau versions.
+	lastTouchedBy.delete(ball);
+	const staleKeys = new Array<BasePart>();
+
+	for (const [touched, toucher] of lastTouchedBy) {
+		if (toucher === ball) {
+			staleKeys.push(touched);
+		}
+	}
+
+	for (const touched of staleKeys) {
+		lastTouchedBy.delete(touched);
+	}
 }
 
 /**
@@ -653,6 +673,160 @@ let powersActive = false;
 /** Called from `BallSpawnerService.setRoundActive`, once per phase change. */
 export function setRoundActive(active: boolean): void {
 	powersActive = active;
+
+	if (!active) {
+		// **The round is over, so every record in here is a fact about a round that has ended.** Nothing reads the map
+		// outside `Playing` — the sound it feeds is gated on the phase — so the only thing keeping the entries would buy
+		// is that the next round's bodies inherit a contact from the previous one. A body re-spawned into the same slot
+		// is a *different* body with the same coordinates, and crediting its next elimination to last round's attacker is
+		// exactly the kind of stale answer this map exists to avoid giving.
+		const dropped = lastTouchedBy.size();
+		lastTouchedBy.clear();
+
+		// **One line per round, and only when there was something to drop.** The map's growth is otherwise invisible:
+		// a missing deletion in a death path would show up as a count that climbs round after round, and this is the one
+		// moment the map is emptied, so this is where the number is cheap to print and meaningful to compare.
+		if (dropped > 0) {
+			print(`[Powers] last-touch records cleared: ${dropped}`);
+		}
+	}
+}
+
+/**
+ * Who last touched each body, so an elimination can name the player who caused it.
+ *
+ * ## Why this lives here rather than in `RoundService`
+ *
+ * The fact is a **collision** fact. The only code that ever sees two bodies in contact is `onBallCollision` below, and
+ * `RoundService` never sees a touch at all — it sees a body leave the belt. A record kept anywhere else would be a second
+ * and staler answer to a question this module is already answering, and this tree has refused that shape twice (the
+ * phase flag, the hit-effect remote).
+ *
+ * ## Keyed by the touched body, valued by the toucher's *body*, not its user id
+ *
+ * The key is the body being hit, so the map answers exactly the question the elimination asks: "who hit *this* body,
+ * last?" — one lookup, no scan. The value is a `BasePart` rather than a number because the owner attribute on that part
+ * is the only source of truth for who owns a body; copying the id at write time would create a second place for the
+ * decoy rule, the synthetic-owner rule and the write path to disagree.
+ *
+ * **One entry per body, not one per pair.** A contact between two competitors stores two records, one in each direction,
+ * because "who touched A last" and "who touched B last" are separate facts that go stale at different times — A may be
+ * eliminated and B survive, and B must keep its attacker. A pair-keyed map would have to be deleted from both ends and
+ * would still not answer the single-body question for a body that has been touched by three others.
+ */
+const lastTouchedBy = new Map<BasePart, BasePart>();
+
+/**
+ * One body's `OwnerUserId`, or `undefined` when it carries none.
+ *
+ * `typeIs` rather than a cast, matching `hasOwnerIdentity` in `shared/attributes`: `GetAttribute` returns
+ * `AttributeValue`, a missing attribute reads as `undefined`, and a cast would let that `undefined` travel onwards as a
+ * number.
+ */
+function ownerIdOf(ball: BasePart): number | undefined {
+	const value = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);
+	return typeIs(value, "number") ? value : undefined;
+}
+
+/**
+ * Records that `toucher` touched `touched`, when both ends are owned by a real player.
+ *
+ * The filter is `shouldRecordTouch`, in `server/elimination-sound.ts`, because the write and the read have to agree about
+ * what a decoy and a `Debug#N` body are — a record that can only ever answer "no sound" is not worth the memory, and the
+ * map's size stays bounded by the number of *competitors* rather than by the number of contacts.
+ *
+ * ## Why this runs above the power gates in `onBallCollision`
+ *
+ * A touch is a touch whether or not it transfers speed. `ghost` sliding past a plain body is the pair that can kill
+ * silently, and it is exactly the pair a transfer-gated record would miss. So the record sits immediately after "the
+ * other thing is a ball" and above every guard that decides whether the *transfer* happens.
+ */
+function rememberTouch(touched: BasePart, toucher: BasePart): void {
+	if (!shouldRecordTouch(ownerIdOf(touched), ownerIdOf(toucher))) {
+		return;
+	}
+
+	lastTouchedBy.set(touched, toucher);
+}
+
+/**
+ * The body that last touched `body`, if that body is still in the world.
+ *
+ * **Read before the destroy at every call site**, because a destroyed part reports its defaults and the answer would
+ * silently become "nobody". The parent check here covers the other order: the ball that knocked a body off the belt can
+ * itself be culled first, and a destroyed toucher is a stale answer rather than a missing one — saying so here is
+ * cheaper than making each caller remember it.
+ */
+export function lastToucherOf(body: BasePart): BasePart | undefined {
+	const toucher = lastTouchedBy.get(body);
+
+	if (toucher === undefined || toucher.Parent === undefined) {
+		return undefined;
+	}
+
+	return toucher;
+}
+
+/**
+ * The broadcast remote the hit effect is fired through, handed in by `RoundService` at start.
+ *
+ * ## Why it is fed in rather than looked up
+ *
+ * A `ReplicatedStorage.FindFirstChild` inside the collision handler is the alternative, and this tree has refused that
+ * shape before (item 22 chose a boolean over a phase read for the same reason): a lookup in a handler that runs per
+ * contact is paid at the worst rate in the game. Creating the remote here at `require` time is not possible either — a
+ * module that touches the DataModel during `require` runs in the Jest runtime, which has no instances, the wall item 74
+ * hit with `PhysicsService`.
+ *
+ * `undefined` until `RoundService` has started. A collision cannot arrive before that: the handler's first gate is
+ * `powersActive`, which is only true inside `Playing`. The `undefined` branch is a guard, not a state.
+ */
+let hitEffectRemote: RemoteEvent | undefined;
+
+/** Called from `RoundService` once, after the `Remotes` folder exists. */
+export function setHitEffectRemote(remote: RemoteEvent): void {
+	hitEffectRemote = remote;
+}
+
+/**
+ * Three decimals, no `string.format`, matching the formatters in `treadmill-service` and `ball-spawner-service`.
+ *
+ * Kept local rather than shared: those two already carry their own copy, and a shared helper would be a fourth module for
+ * a function this one calls in a single log line. The numbers here are world positions, where three decimals is enough to
+ * tell two bodies apart and not so many that float noise obscures the value.
+ */
+function formatVector(value: Vector3): string {
+	const round = (n: number) => tostring(math.round(n * 1000) / 1000);
+	return `(${round(value.X)}, ${round(value.Y)}, ${round(value.Z)})`;
+}
+
+/**
+ * Tells every client where two balls hit, so each plays one burst there.
+ *
+ * ## The midpoint is a position, not a contact
+ *
+ * `BindToCollisionSummaries` would give the real contact point and cannot be used: it is not callable from `Touched`, it
+ * does not replicate, and network ownership here flaps between the server and players. Two 1-stud spheres put their
+ * midpoint within half a stud of the contact, which is smaller than the burst the client draws, so the difference is not
+ * something a player can see.
+ *
+ * ## Why the log line exists
+ *
+ * One line per fire, countable against the `[Ball] backspin:` line the spawner prints for the same contact. **The counts
+ * will not match, and that is the point of printing it:** backspin fires for every ball pair that is actually moving,
+ * while this fires only when one body of the pair has a colliding power and there is speed to transfer. A pair with
+ * neither colliding power touches and produces no burst at all, so the line is also the measurement of how much of the
+ * field's collisions are covered.
+ */
+function broadcastHit(ball: BasePart, other: BasePart): void {
+	const remote = hitEffectRemote;
+	if (remote === undefined) {
+		return;
+	}
+
+	const midpoint = ball.Position.Lerp(other.Position, 0.5);
+	remote.FireAllClients(midpoint);
+	print(`[Powers] hit: ball=${ball.GetFullName()} other=${other.GetFullName()} midpoint=${formatVector(midpoint)}`);
 }
 
 /**
@@ -682,6 +856,23 @@ export function setRoundActive(active: boolean): void {
  * `Touched` fires on both parts, so a bully-vs-heavy contact runs each side's handler once. That is correct rather than
  * doubled: each handler speaks for its own ball, and the exchange is genuinely two transfers in opposite directions. The
  * asymmetry of `heavy` is what makes the pair net out in its favour, not a suppressed handler.
+ *
+ * ## The gates the hit effect passes, in order
+ *
+ * `powersActive` (1) → `other` carries the `Ball` tag (2) → this body has state and a colliding power (3) → the per-ball
+ * `POWER_COLLISION_COOLDOWN` (4) → the transfer has somewhere to go (5). The burst is fired **after (5)**, and it shares
+ * (4) rather than adding a second timer, because (4) is the only thing standing between a resting pair and one burst per
+ * physics step. It is not fired for a contact the cooldown refused, and not for one that transfers nothing, for the same
+ * reason — see the fire site's own note.
+ *
+ * **Above all five sits the last-touch record, and it is deliberately not a gate.** It runs between (1)/(2) and (3): every
+ * ball-touching-ball contact between two owned bodies is remembered, whatever the powers involved, because the
+ * elimination sound (item 87) is about who *caused* a body to leave the belt and `ghost`-vs-plain is exactly the pair that
+ * can do it with no transfer at all. It is a write, not a decision — it changes nothing about the transfer.
+ *
+ * **Gate (3) is why a pair with no colliding power produces no burst.** That is now a property of this handler alone: since
+ * item 87 every body carries a `Touched` connection (see `setPower`), and the colliding-power check moved from the
+ * connection to here.
  */
 export function onBallCollision(ball: BasePart, other: BasePart): void {
 	if (!powersActive) {
@@ -691,6 +882,10 @@ export function onBallCollision(ball: BasePart, other: BasePart): void {
 	if (!other.HasTag(TAGS.ball)) {
 		return;
 	}
+
+	// The last-touch record, above every gate that is about the *transfer* and below the one that says "the other thing
+	// is a ball". See `rememberTouch` for why it is here and not beside the fire.
+	rememberTouch(ball, other);
 
 	const state = states.get(ball);
 	if (state === undefined || !isColliding(state.power)) {
@@ -708,6 +903,13 @@ export function onBallCollision(ball: BasePart, other: BasePart): void {
 	}
 
 	state.lastCollisionAt = now;
+
+	// **The hit effect fires here, after the cooldown was consumed, and not a line earlier.** The cooldown is stamped only
+	// when a transfer actually happens, so a contact with nothing to transfer — a pair resting at `BALL_SPEED_MIN`, where
+	// `drain` is 0 — never consumes it. Firing above the `amounts` check would therefore emit on every `Touched` re-fire
+	// of a resting pair, and `Touched` re-fires on essentially every physics step while two bodies stay in contact. That
+	// is the stutter the shared cooldown exists to prevent, so the fire goes where the stamp is.
+	broadcastHit(ball, other);
 
 	other.SetAttribute(BALL_SPEED_ATTRIBUTE, math.max(BALL_SPEED_MIN, readSpeed(other) - amounts.drain));
 	ball.SetAttribute(BALL_SPEED_ATTRIBUTE, math.min(BALL_SPEED_MAX, readSpeed(ball) + amounts.gain));

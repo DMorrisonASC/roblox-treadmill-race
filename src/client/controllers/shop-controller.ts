@@ -28,6 +28,7 @@ import { ChestOdd, chestOdds, robuxChestOdds } from "shared/odds";
 import {
 	FUSE_BALLS_REMOTE_NAME,
 	OPEN_COIN_CHEST_REMOTE_NAME,
+	PURCHASE_GRANTED_REMOTE_NAME,
 	REMOTES_FOLDER_NAME,
 	ROUND_STATE_VALUE_NAME,
 } from "shared/remotes";
@@ -39,6 +40,7 @@ import { getScreenGui } from "shared/ui/layers";
 import { Panel, PanelFooter, PANEL_FOOTER_HEIGHT, PANEL_HEADER_HEIGHT, PanelHeader } from "shared/ui/panel";
 import { TabStrip, TAB_STRIP_HEIGHT } from "shared/ui/tabs";
 import { attachPressFeedback } from "shared/ui/press";
+import { attachClickSound, playPurchaseSound } from "shared/ui/sounds";
 import { capToViewport } from "shared/ui/viewport";
 import { ballName as displayName, rarityLabel as tierName } from "shared/ball-name";
 
@@ -441,7 +443,7 @@ export class ShopController implements OnStart {
 	}
 
 	/**
-	 * Finds the two economy remotes and subscribes to their replies.
+	 * Finds the economy remotes and subscribes to their replies.
 	 *
 	 * Bounded waits, for the reason `PhaseBannerController` states: an unbounded `WaitForChild` turns "the server never
 	 * made it" into a client that hangs with no error. A missing remote is a warning and a dead button, not a failed
@@ -468,6 +470,18 @@ export class ShopController implements OnStart {
 			fusion.OnClientEvent.Connect((result: unknown) => this.onFusionResult(result));
 		} else {
 			warn(`[Shop] no ${FUSE_BALLS_REMOTE_NAME} remote — fusion will do nothing.`);
+		}
+
+		// **The purchase sound's only trigger, and the reason it is a third remote rather than a branch in the two
+		// handlers above.** The Robux chest's grant happens inside `ProcessReceipt`, server to server, and never answers a
+		// client request — so without this signal the one purchase that costs real money would be the only silent one.
+		// Nothing here listens to `PromptProductPurchaseFinished`: that reports a dialog closing, and the file's own note
+		// beside `connectPurchasePrompt` explains why the client may not treat it as a grant.
+		const purchaseGranted = folder.WaitForChild(PURCHASE_GRANTED_REMOTE_NAME, 10);
+		if (purchaseGranted !== undefined && purchaseGranted.IsA("RemoteEvent")) {
+			purchaseGranted.OnClientEvent.Connect(() => playPurchaseSound());
+		} else {
+			warn(`[Shop] no ${PURCHASE_GRANTED_REMOTE_NAME} remote — a granted purchase will be silent.`);
 		}
 	}
 
@@ -693,6 +707,7 @@ export class ShopController implements OnStart {
 		stroke.Parent = button;
 
 		attachPressFeedback(button);
+		attachClickSound(button);
 		button.Activated.Connect(() => this.toggle(id));
 
 		this.railButtons.set(id, button);
@@ -1024,6 +1039,7 @@ export class ShopController implements OnStart {
 		});
 
 		attachPressFeedback(close);
+		attachClickSound(close);
 		close.Activated.Connect(() => this.setOpen("none"));
 	}
 
@@ -1455,6 +1471,7 @@ export class ShopController implements OnStart {
 
 		this.corners(scope, button, SPACING.sm);
 		attachPressFeedback(button);
+		attachClickSound(button);
 
 		Fusion.New(
 			scope,
@@ -1900,6 +1917,7 @@ export class ShopController implements OnStart {
 
 		this.corners(scope, button, SPACING.sm);
 		attachPressFeedback(button);
+		attachClickSound(button);
 		button.Activated.Connect(() => this.fireChest(count));
 
 		// The two lines are children of the button, in a vertical list, so the pair stays centred as one block rather
@@ -2245,6 +2263,7 @@ export class ShopController implements OnStart {
 		countLabel.Parent = art;
 
 		attachPressFeedback(card);
+		attachClickSound(card);
 		card.Activated.Connect(() => {
 			this.inspectBallId = ball.id;
 			this.refreshOwned();
@@ -2329,6 +2348,7 @@ export class ShopController implements OnStart {
 		countLabel.Parent = row;
 
 		attachPressFeedback(row);
+		attachClickSound(row);
 		row.Activated.Connect(() => {
 			this.fusionMaterialId = ball.id;
 			this.refreshOwned();
@@ -3045,6 +3065,7 @@ export class ShopController implements OnStart {
 
 		this.corners(factsScope, this.fusionButton, SPACING.sm);
 		attachPressFeedback(this.fusionButton);
+		attachClickSound(this.fusionButton);
 		this.fusionButton.Activated.Connect(() => this.pressFusion());
 		this.fusionButton.Active = false;
 		this.fusionButton.TextTransparency = 0.45;

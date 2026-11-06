@@ -1,7 +1,7 @@
 import { CollectionService, ReplicatedStorage, Workspace } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
 import { BALL_SPEED_ATTRIBUTE } from "shared/attributes";
-import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
+import { PICKUP_SOUND_REMOTE_NAME, REMOTES_FOLDER_NAME, ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import { TAGS } from "shared/tags";
 import {
 	BELT_SURFACE_THICKNESS,
@@ -76,7 +76,30 @@ export class PickupService implements OnStart {
 	 */
 	private generation = 0;
 
+	/**
+	 * The broadcast a real boost fires, created in `onStart`.
+	 *
+	 * A field rather than a lookup in the handler, for the reason item 84 recorded for the hit effect: a `FindFirstChild`
+	 * inside a `Touched` callback is a lookup paid at the worst rate in the game. `undefined` only in the window before
+	 * `onStart` runs or after a failed remote creation, and the fire site treats that as "no sound" rather than an error.
+	 */
+	private pickupSoundRemote?: RemoteEvent;
+
 	public onStart(): void {
+		// **The remote is created here, by this service, rather than handed over by `RoundService`.**
+		//
+		// `RoundService` owns the `Remotes` folder and creates the hit-effect remote beside this one, so the first
+		// instinct is a `setPickupSoundRemote` hand-over. That would have to inject this service into `RoundService`, and
+		// this file's own docblock argues the opposite direction: the dependency points one way precisely so that "a future
+		// change to the phase machine cannot forget to call a pickup hook because there is no call to forget". The
+		// `EconomyService` precedent is the other half of the answer — it creates `OpenCoinChest` and `FuseBalls` in the
+		// same shared folder for the same reason, and `ReplicatedStorage.Remotes` is docblocked there as "created by
+		// whichever service starts first, so neither owns the folder".
+		//
+		// Created before the `RoundState` wait, and find-or-create rather than find, so it does not matter which service
+		// starts first: this one creates the folder if it is early, and `RoundService` finds it if this one was.
+		this.pickupSoundRemote = this.createPickupSoundRemote();
+
 		// **The phase is read from `RoundState`, not injected from `RoundService`.**
 		//
 		// `RoundState` is the server's own broadcast of the phase (item 34), written on every transition and
@@ -98,6 +121,31 @@ export class PickupService implements OnStart {
 
 		roundState.GetPropertyChangedSignal("Value").Connect(() => this.onPhaseChanged(roundState.Value));
 		this.onPhaseChanged(roundState.Value);
+	}
+
+	/**
+	 * Creates the pickup-sound broadcast in `ReplicatedStorage.Remotes` and returns it.
+	 *
+	 * Find-or-create on the folder, matching `RoundService.createHitEffectRemote` and `EconomyService`'s own creation:
+	 * whichever server service starts first makes the folder and the rest find it, so no start order is load-bearing.
+	 *
+	 * The remote is created eagerly rather than on the first collection because the client connects its handler once at
+	 * boot: a remote that appeared mid-round would be one the client had already given up waiting for.
+	 */
+	private createPickupSoundRemote(): RemoteEvent {
+		let folder = ReplicatedStorage.FindFirstChild(REMOTES_FOLDER_NAME);
+		if (folder === undefined || !folder.IsA("Folder")) {
+			const created = new Instance("Folder");
+			created.Name = REMOTES_FOLDER_NAME;
+			created.Parent = ReplicatedStorage;
+			folder = created;
+		}
+
+		const remote = new Instance("RemoteEvent");
+		remote.Name = PICKUP_SOUND_REMOTE_NAME;
+		remote.Parent = folder;
+
+		return remote;
 	}
 
 	/**
@@ -341,12 +389,13 @@ export class PickupService implements OnStart {
 		// `BELT_SPEED` it makes `RELATIVE_SPEED` positive, which is the direction that carries the ball back
 		// toward the spawn end instead of toward elimination.
 		//
-		// **The power decides the numbers, and every power destroys the pad.** `sprinter` takes a larger boost; every other
-		// ball takes the standard one. See `powers.pickupDecision` for why `consume` is no longer a per-power decision — it
-		// is `true` for every ball, because a surviving pad re-fires this handler on the ball resting on it and the boost is
-		// then re-applied every frame, which stops the ball from ever decaying off the belt. Consuming is decided *here*
-		// because only this handler owns the instance: a power that wanted the pickup destroyed could not do it without
-		// reaching into a map it does not own.
+		// **The power decides the numbers, and `recycle` is the one power that leaves its pad in the world.** `sprinter`
+		// takes a larger boost; every other ball takes the standard one, and every ball except `recycle` destroys the pad it
+		// touched. `recycle` keeps it because the pad *is* the mechanic — "leave it for the next taker" — and the reason that
+		// exception does not re-create the 71-second held-ball defect is `speedAfterPickup`: a ball parked on a surviving pad
+		// is raised to the boost once, and every later touch computes the same value and writes nothing. Consuming is decided
+		// *here* because only this handler owns the instance: a power that wanted the pickup destroyed could not do it
+		// without reaching into a map it does not own.
 		const decision = pickupDecision(powerOf(other));
 		const before = this.readBallSpeed(other);
 
@@ -355,6 +404,18 @@ export class PickupService implements OnStart {
 		const after = speedAfterPickup(before, decision.boost);
 		if (after !== before) {
 			other.SetAttribute(BALL_SPEED_ATTRIBUTE, after);
+
+			// **The sound is fired inside the write's own condition, not beside the log line and not above the write.**
+			//
+			// `after !== before` is the "the ball actually got faster" test — `speedAfterPickup` is `math.max`, so the value
+			// can change in one direction only. Firing here makes the sound and the speed change one decision instead of two
+			// that are supposed to agree: a fire placed above the write, or beside the `[Pickup] collected` line with its own
+			// `if`, would play on every `Touched` — including the no-op re-touch of a `recycle` pad under a resting ball,
+			// which is exactly the machine gun this sound has no throttle to survive.
+			//
+			// One site, one condition. The `else` branch below reconnects rather than firing, so a surviving pad cannot
+			// announce the same collection twice.
+			this.pickupSoundRemote?.FireAllClients();
 		}
 
 		if (decision.consume) {
@@ -363,10 +424,13 @@ export class PickupService implements OnStart {
 			this.remove(pickup);
 			pickup.Destroy();
 		} else {
-			// **Unreachable today, kept deliberately.** Every decision consumes, so this branch cannot run — but the service
-			// obeys the decision rather than assuming it, and deleting the branch would put the rule in two places: the
-			// `else` here and the return value there. If a future power wants to leave a pad in the world, this is the code
-			// that already handles it.
+			// **This is the `recycle` branch, and it is live.** `pickupDecision` returns `consume: false` for `recycle` and
+			// `true` for everything else, so a recycle ball re-arms its own pad instead of consuming it. The branch is the
+			// code the decision contract asks for rather than a special case written here: the handler obeys `consume` rather
+			// than assuming it, so a future power that wants to leave a pad behind needs no change in this file.
+			//
+			// No sound is fired here. The fire lives inside the `after !== before` guard above, which is where "the ball got
+			// faster" is decided — a re-touch that changes nothing is silent, and a re-arm is not a collection at all.
 			this.reconnect(pickup);
 		}
 

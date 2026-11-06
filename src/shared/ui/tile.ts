@@ -1,6 +1,7 @@
 import { SPACING, TYPOGRAPHY, FONT } from "./scale";
 import { Theme } from "./theme";
 import { attachPressFeedback } from "./press";
+import { attachClickSound } from "./sounds";
 
 /**
  * **Placeholder.** Corner radius of a tile. Smaller than `PANEL_CORNER_RADIUS` so a tile reads as content lying on
@@ -116,6 +117,7 @@ export function Tile(options: TileOptions): TextButton {
 	subtitle.Parent = button;
 
 	attachPressFeedback(button);
+	attachClickSound(button);
 	button.Activated.Connect(onClick);
 
 	return button;

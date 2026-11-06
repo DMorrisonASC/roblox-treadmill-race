@@ -308,6 +308,11 @@ describe("the collision phase gate", () => {
 	 * `onBallCollision` with the gate closed must return **before** it touches the instance in any way, so a fake that
 	 * records the tag test is enough to prove it — and it is the only way to assert this without a real `BasePart`, which
 	 * the spec runtime cannot make.
+	 *
+	 * **The `false` below carries more weight since item 87.** The tag gate is now followed by the last-touch record,
+	 * which reads `OwnerUserId` off both bodies, so a fake that returned `true` here would need `GetAttribute` as well.
+	 * These two tests are about *where the handler stops*, not about how far it can go, and a fake that answered `true`
+	 * would be asserting the second thing by accident.
 	 */
 	function countingBody(counter: { calls: number }): BasePart {
 		const fake = {

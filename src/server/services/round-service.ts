@@ -14,6 +14,8 @@ import {
 	DEBUG_WAITING_REMOTE_NAME,
 	DECOY_OUTLINE_REMOTE_NAME,
 	ELIMINATION_REMOTE_NAME,
+	ELIMINATION_SOUND_REMOTE_NAME,
+	HIT_EFFECT_REMOTE_NAME,
 	PICKER_OFFER_REMOTE_NAME,
 	PICKER_PICK_REMOTE_NAME,
 	PICKER_REROLL_REMOTE_NAME,
@@ -24,7 +26,7 @@ import {
 import { PickerOfferMessage, PickerResult, REROLL_COST_COINS } from "shared/picker";
 import { ECONOMY_ACTION_COOLDOWN_MS } from "shared/economy.config";
 import { powerForBallId } from "shared/powers.config";
-import { setPower } from "server/powers";
+import { lastToucherOf, setHitEffectRemote, setPower } from "server/powers";
 import { TAGS } from "shared/tags";
 import { ROUND_TRANSITION_ATTRIBUTE, TRANSITION_NETWORK_STEP } from "shared/constants";
 import { TRANSITION_CONFIG, coverSeconds, holdSeconds, openSeconds } from "shared/config/transition.config";
@@ -41,6 +43,7 @@ import { EconomyService } from "./economy-service";
 import { decideRoundOutcome } from "../round-outcome";
 import { decideDecoyOutline } from "../decoy-outline";
 import { EliminationCause, splashTargetUserId } from "../elimination-signal";
+import { shouldPlayEliminationSound } from "../elimination-sound";
 import { applyReroll, buildOffer, isPickAllowed, ownedIdsFrom, rollPremium, StoredOffer } from "../picker";
 import { pickDistinctBallIds } from "../debug-balls";
 import { TreadmillService } from "./treadmill-service";
@@ -205,6 +208,8 @@ export class RoundService implements OnStart {
 	private pickRemote?: RemoteEvent;
 	private rerollRemote?: RemoteEvent;
 	private eliminationRemote?: RemoteEvent;
+	/** Broadcast — every client hears an elimination, and each one throttles its own playback. See `ELIMINATION_SOUND_REMOTE_NAME`. */
+	private eliminationSoundRemote?: RemoteEvent;
 
 	// #endregion
 
@@ -222,6 +227,7 @@ export class RoundService implements OnStart {
 		this.createDebugRemotes();
 		this.createPickerRemotes();
 		this.createDecoyOutlineRemote();
+		this.createHitEffectRemote();
 		this.createRoundStateValue();
 
 		// The first `[Round]` line a fresh server prints must name the phase it is in, not the one it is
@@ -1152,12 +1158,21 @@ export class RoundService implements OnStart {
 			// makes this line a result rather than a position: `live=` says how many are left, `owner=` says
 			// which competitor just lost.
 			const owner = readOwner(ball);
+			// The toucher is read here, before the destroy, for the same reason as the owner: the last-touch record is
+			// cleared when a body dies (`powers.forgetBall`), and a destroyed body would report no owner at all.
+			const toucher = lastToucherOf(ball);
 			this.forgetBall(ball);
 			ball.Destroy();
 
 			// Leaving the belt is *losing*, so the owner is told. Read before the destroy, and dispatched through the pure
 			// rule so "synthetic owners are not told" has one definition rather than one `if` per removal site.
 			this.notifyEliminated(owner, "left-belt");
+
+			// **The sound is a second event at the same place, not a second call site.** A body leaving the belt is what
+			// an elimination *is*, so the sound sits beside the splash rather than in `destroyBall` or in the end
+			// condition — those are about a body dying and a round ending, which are different facts. It is targeted at
+			// the player whose ball landed the last touch, not broadcast: see `playEliminationSound`.
+			this.playEliminationSound(owner, toucher);
 
 			// **Every elimination restarts the idle clock.** The warning it guards exists to say "nothing has
 			// happened for 60 s", and a round that is shedding a competitor every few seconds is the exact
@@ -1435,6 +1450,10 @@ export class RoundService implements OnStart {
 		// instance: a destroyed part returns its defaults, so a post-destroy read would report `userId 0` and the rule would
 		// quietly treat a real player as synthetic and tell nobody.
 		const owner = readOwner(ball);
+		// **The powers map still holds this body's toucher at this point, and that is why `destroyBall` calls
+		// `forgetBallPower` *after* `Destroy()`.** This method runs from inside that `Destroy()`, so clearing the record
+		// first — the natural reading of "clean up, then destroy" — would make every cull silent.
+		const toucher = lastToucherOf(ball);
 
 		this.forgetBall(ball);
 
@@ -1443,6 +1462,10 @@ export class RoundService implements OnStart {
 		// forgets each body before destroying it, so the membership check above returns early — which is what keeps a
 		// phase change from splashing every player at once.
 		this.notifyEliminated(owner, "culled");
+
+		// The same sound, for the same reason: a body culled by `KillY` or the cap left the round, whether or not
+		// anybody owned it — and the player who last touched it is the one who hears it.
+		this.playEliminationSound(owner, toucher);
 
 		// A body lost to the kill plane or a future path is still a change in the round's state, so it
 		// restarts the idle clock for the same reason a zone elimination does — see `warnIfIdle`.
@@ -1473,6 +1496,72 @@ export class RoundService implements OnStart {
 		// No arguments: the splash is one fixed word and the client needs nothing to render it. A payload would be a
 		// second source of truth for text the controller already owns.
 		remote.FireClient(player);
+	}
+
+	/**
+	 * Plays the elimination sound for **the one player whose ball landed the last touch on the eliminated body**.
+	 *
+	 * ## Why this is not a broadcast any more
+	 *
+	 * It was one: every client played the sound whenever any body left the round, which told four players "somebody was
+	 * eliminated" as news the arena already shows. The sound now means "*you* put that body out", and that is a claim only
+	 * one client can check — so the remote is fired at the toucher's owner and nobody else. The rule lives in
+	 * `shouldPlayEliminationSound`, not here, because there are two removal paths and a rule written at both is a rule
+	 * that will disagree with itself the third time.
+	 *
+	 * ## The two reads that must happen before the destroy
+	 *
+	 * `owner` and `toucher` both arrive as values. `owner` because a destroyed body reports its default attributes;
+	 * `toucher` because `powers.forgetBall` drops the last-touch record on death, and because that *body* may itself
+	 * already be gone — the ball that knocked a competitor off the belt can be culled first. This method therefore never
+	 * reads the world; it is handed the facts the call site read at the last moment they were true.
+	 *
+	 * ## The phase gate reads this service's own field, not the powers flag
+	 *
+	 * `setRoundActive` carries the same boolean one indirection away (`BallSpawnerService` → `server/powers`), and
+	 * reading it back here would be asking another service for a fact this service just told it. `this.phase` is the
+	 * value the gate is actually about, and it is the same value `enterPlaying` and `enterIntermission` write.
+	 *
+	 * ## Why the gate is not redundant
+	 *
+	 * Both call sites only run for a genuine elimination today: `settleEliminations` is reached from the `Playing` tick,
+	 * and `handleExternalDestruction` returns early for a teardown because `clearAllBodies` forgets each body before
+	 * destroying it. That is *how the bookkeeping happens to work*, not a rule — a future removal path that ran during
+	 * `PostGame` would otherwise make the belt whistle while the winner is still on screen. The gate states the rule.
+	 *
+	 * ## One signal per elimination, not one per burst
+	 *
+	 * `settleEliminations` can eliminate four bodies in one pass, and this fires up to four times — at up to four
+	 * different players. Coalescing here would put a second throttle on the wrong side of the wire: `canPlay` is per sound
+	 * id and per playback, and the client is the only side that knows when the previous start really was. Four signals in
+	 * one frame arrive together and cost one `RemoteEvent` message each; each recipient plays one sound. A client whose
+	 * own ball put four bodies out in one tick hears one sound, which is the client's throttle doing its job.
+	 */
+	private playEliminationSound(owner: BallOwner | undefined, toucher: BasePart | undefined): void {
+		if (this.phase !== "Playing") {
+			return;
+		}
+
+		const remote = this.eliminationSoundRemote;
+		if (remote === undefined || owner === undefined) {
+			return;
+		}
+
+		const toucherOwner = toucher !== undefined ? readOwner(toucher) : undefined;
+		if (!shouldPlayEliminationSound(owner.userId, toucherOwner?.userId)) {
+			return;
+		}
+
+		const player = Players.GetPlayerByUserId(owner.userId);
+		if (player === undefined) {
+			return;
+		}
+
+		// No arguments: the sound is one fixed asset and the client needs nothing to play it — the same reason the splash
+		// carries no payload. The line is here rather than at the call sites because it wants the *decision's* answer
+		// (`userId`), which only this method has after the rule has spoken.
+		remote.FireClient(player);
+		print(`[Round] elimination sound → ${player.Name} (toucherUserId=${owner.userId})`);
 	}
 
 	/**
@@ -1877,6 +1966,34 @@ export class RoundService implements OnStart {
 	}
 
 	/**
+	 * Creates the hit-effect broadcast and hands it to the powers module.
+	 *
+	 * ## Why the wire lives here and the fire lives there
+	 *
+	 * This service owns the `Remotes` folder (it is the first one to make it) and the powers module owns the collision
+	 * handler, so the two halves meet at one setter call rather than at an import in either direction — the cycle
+	 * `RoundService → BallSpawnerService → powers → RoundService` is the one item 22 and item 80 both refused to close.
+	 * `setHitEffectRemote` is the same shape as `setRoundActive`: a module-level fact the owning service feeds.
+	 *
+	 * The remote carries a **`Vector3` and nothing else**; the bodies are not named because the client attaches nothing to
+	 * them — it builds one temporary carrier at the point and destroys it there.
+	 */
+	private createHitEffectRemote(): void {
+		let folder = ReplicatedStorage.FindFirstChild(REMOTES_FOLDER_NAME);
+		if (folder === undefined || !folder.IsA("Folder")) {
+			const created = new Instance("Folder");
+			created.Name = REMOTES_FOLDER_NAME;
+			created.Parent = ReplicatedStorage;
+			folder = created;
+		}
+
+		const remote = new Instance("RemoteEvent");
+		remote.Name = HIT_EFFECT_REMOTE_NAME;
+		remote.Parent = folder;
+		setHitEffectRemote(remote);
+	}
+
+	/**
 	 * Answers "which body is my twin" for one caller, or refuses with a reason.
 	 *
 	 * The order is `decideDecoyOutline`'s, and every refusal is logged with its reason because a client's `nil` cannot say
@@ -1969,6 +2086,13 @@ export class RoundService implements OnStart {
 		elimination.Name = ELIMINATION_REMOTE_NAME;
 		elimination.Parent = folder;
 		this.eliminationRemote = elimination;
+
+		// The sound is the same event with a different audience: every player sees a body leave the belt, so every player
+		// hears it. Server to client only, and no arguments — the clip is fixed and the client owns the throttle.
+		const eliminationSound = new Instance("RemoteEvent");
+		eliminationSound.Name = ELIMINATION_SOUND_REMOTE_NAME;
+		eliminationSound.Parent = folder;
+		this.eliminationSoundRemote = eliminationSound;
 
 		const spawn = new Instance("RemoteEvent");
 		spawn.Name = DEBUG_SPAWN_REMOTE_NAME;

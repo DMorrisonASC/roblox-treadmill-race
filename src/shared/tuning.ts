@@ -814,3 +814,12 @@ export const LATERAL_BOUND_MIN = 1;
 
 /** **Placeholder.** The folder `PickupService` parents its triangles into, created on demand. */
 export const PICKUPS_FOLDER_NAME = "SpawnedPickups";
+
+/**
+ * The folder the **client** parents its temporary hit-effect carriers into, created on demand.
+ *
+ * Client-side and per-client on purpose: the carrier and the clone exist for one burst on one machine, are never
+ * replicated, and are destroyed by `Debris` a fraction of a second later. The folder is never emptied because it never
+ * holds anything — its members destroy themselves.
+ */
+export const HIT_EFFECTS_FOLDER_NAME = "SpawnedHitEffects";

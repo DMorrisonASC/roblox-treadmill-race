@@ -14,6 +14,7 @@ import {
 import { FONT, SPACING, TYPOGRAPHY } from "shared/ui/scale";
 import { surfaceOpaqueTheme, Theme } from "shared/ui/theme";
 import { getScreenGui } from "shared/ui/layers";
+import { attachClickSound } from "shared/ui/sounds";
 import { capToViewport } from "shared/ui/viewport";
 
 /** The one phase the picker belongs to. A client cannot import the server's `RoundPhase`. */
@@ -308,6 +309,10 @@ export class PickerController implements OnStart {
 		button.Text = "";
 		button.LayoutOrder = order;
 		button.Parent = parent;
+
+		// A card is a button, so it clicks like one. Attached here rather than at the call site because the cards are
+		// built in a loop: one call covers every card in every offer, including the nine-card premium set.
+		attachClickSound(button);
 
 		const buttonCorner = new Instance("UICorner");
 		buttonCorner.CornerRadius = new UDim(0, SPACING.sm);
@@ -787,6 +792,9 @@ export class PickerController implements OnStart {
 		button.Text = "";
 		button.LayoutOrder = order;
 		button.Parent = parent;
+
+		// Both footer buttons — `All Balls` and `Reroll` — come through here, so one call covers the pair.
+		attachClickSound(button);
 
 		const corner = new Instance("UICorner");
 		corner.CornerRadius = new UDim(0, SPACING.sm);

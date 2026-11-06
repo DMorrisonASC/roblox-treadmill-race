@@ -20,6 +20,22 @@ export interface OwnedBody {
 }
 
 /**
+ * Whether a user id belongs to a real player, as opposed to nobody at all.
+ *
+ * The three sentinels this repo already carries are `undefined` (no owner), `0` (a destroyed body's default attribute
+ * read) and a negative id (a synthetic `Debug#N` competitor). All three mean "there is no player behind this", and every
+ * rule that turns a body into a recipient has to agree about that or the disagreements show up as one path splashing a
+ * debug press and another staying quiet.
+ *
+ * **Exported so the elimination-sound rule (item 87) reuses this test rather than writing a second `> 0`.** Two copies of
+ * a boundary is one copy that gets changed; the boundary here is `<= 0` and the fail-closed direction is not obvious from
+ * a call site.
+ */
+export function isRealOwner(userId: number): boolean {
+	return userId > 0;
+}
+
+/**
  * The `UserId` to notify, or `undefined` when nobody should be.
  *
  * - **`teardown`** → nobody. The phase is changing and every body goes at once; a splash per body would read as a mass
@@ -36,7 +52,7 @@ export function splashTargetUserId(owner: OwnedBody | undefined, cause: Eliminat
 		return undefined;
 	}
 
-	if (owner.userId <= 0) {
+	if (!isRealOwner(owner.userId)) {
 		return undefined;
 	}
 

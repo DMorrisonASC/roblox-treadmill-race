@@ -1,6 +1,7 @@
 import { SPACING, TYPOGRAPHY, FONT } from "./scale";
 import { Theme } from "./theme";
 import { attachPressFeedback } from "./press";
+import { attachClickSound } from "./sounds";
 
 /**
  * **Placeholder.** Corner radius of a panel's sheet, in pixels.
@@ -207,6 +208,7 @@ export function PanelHeader(options: PanelHeaderOptions): Frame {
 	closeCorner.Parent = close;
 
 	attachPressFeedback(close);
+	attachClickSound(close);
 	close.Activated.Connect(onClose);
 
 	return band;

@@ -1760,7 +1760,6 @@ export class BallSpawnerService implements OnStart {
 		// while placing `forgetBall` in this block, which is the same bug for a third map.
 		this.lateral.delete(ball);
 		this.startSpeeds.delete(ball);
-		forgetBallPower(ball);
 		this.forgetDecoy(ball);
 		this.releaseBackspin(ball);
 		this.releaseWallAssist(ball);
@@ -1769,6 +1768,13 @@ export class BallSpawnerService implements OnStart {
 			this.liveBalls.remove(index);
 		}
 		ball.Destroy();
+
+		// **After `Destroy()`, not before it.** `Destroying` runs synchronously inside that call, and `RoundService`'s
+		// handler for it reads the powers module's last-touch record to decide who hears the elimination sound (item 87).
+		// Clearing before the destroy would erase the answer before the question is asked — and every cull by `KillY` or
+		// the live-ball cap would be silent, with nothing in the log to say why. Nothing else in this block depends on the
+		// order: the maps above are keyed on the body itself and the handler never reads them.
+		forgetBallPower(ball);
 	}
 
 	/**

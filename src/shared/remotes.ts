@@ -69,6 +69,74 @@ export const DEBUG_SPAWN_REMOTE_NAME = "DebugSpawn";
 export const ELIMINATION_REMOTE_NAME = "Elimination";
 
 /**
+ * The elimination **sound**, fired to **one player**: the one whose ball landed the last touch on the body that left.
+ *
+ * A second remote rather than a second argument on `Elimination`, because the two events have different audiences. The
+ * splash is *"your body is out"* and goes to the body's owner; the sound is *"you put that body out"* and goes to the
+ * attacker, who in the ordinary case is somebody else. Firing `Elimination` to the attacker would splash them for a kill
+ * they did not suffer, and firing this one to everybody would make the two cues indistinguishable.
+ *
+ * **The audience used to be everybody** (items 82-86) and is now one client: a broadcast told four players "somebody was
+ * eliminated", which is news the arena and the HUD already deliver. Who counts as the attacker is decided by
+ * `shouldPlayEliminationSound` in `server/elimination-sound.ts` — the server owns that rule because only the server sees
+ * touches.
+ *
+ * The throttle is **not** here. The server sends one signal per elimination — four bodies leaving in one tick is four
+ * signals — and the receiving client's `shared/ui/sounds` collapses them into one start, because the rule is "this sound
+ * may not restart within half a second" and only the client knows when it actually started.
+ */
+export const ELIMINATION_SOUND_REMOTE_NAME = "EliminationSound";
+
+/**
+ * A ball-ball **hit**, fired to **every player** with the contact midpoint: one argument, a `Vector3`.
+ *
+ * The midpoint and nothing else. `BindToCollisionSummaries` would give a real contact point and cannot be used here — it
+ * is not callable from `Touched`, it does not replicate, and network ownership in this tree flaps between the server and
+ * players — so the midpoint of the two bodies' positions is the number that is always available. For two 1-stud spheres
+ * it is within half a stud of the contact, which is smaller than the burst.
+ *
+ * Why a remote rather than a server-side clone: cloning on the server would replicate every instance of every burst to
+ * every player. The same argument moved the elimination sound to the client in item 82, and it is stronger here because a
+ * burst is a whole hierarchy (a part, an attachment and one or more emitters) rather than one `Sound`.
+ */
+export const HIT_EFFECT_REMOTE_NAME = "HitEffect";
+
+/**
+ * A ball **actually got faster** from a pickup, fired to every player with no arguments.
+ *
+ * ## Why no arguments
+ *
+ * The sound is non-positional and identical for every collection — the client's `playPickupSound` takes no input at all.
+ * A `Vector3` would be the burst's shape, not this one's: the hit effect needs a place because it *draws* there, and this
+ * needs nothing because it only plays. Sending a position the client ignores is a second source of truth for a fact
+ * nobody reads.
+ *
+ * ## Why the fire condition is the server's, and why the sound is still throttled
+ *
+ * `PickupService` fires this **inside** the same `after !== before` guard that writes `BALL_SPEED`, so the sound and the
+ * speed change are one decision rather than two that agree. That condition is necessary and it is **not sufficient**: a
+ * `recycle` ball resting on its surviving pad is re-raised from about `11.98` back to `12` on every re-touch — the tick
+ * loop decays the speed between them — so the guard passes every 14–24 ms and fired nineteen times in one rest (item 91's
+ * log). The *interval* is therefore the client's, as it is for the other two burst-shaped sounds: `playPickupSound` uses
+ * `PICKUP_SOUND_MIN_INTERVAL_SECONDS` (0.3 s). The server keeps firing per raise, which is honest — the ball really is
+ * being re-boosted — and each client collapses the rest into at most three starts a second.
+ */
+export const PICKUP_SOUND_REMOTE_NAME = "PickupSound";
+
+/**
+ * A purchase that the server actually granted, fired to the buyer alone.
+ *
+ * The coin chest and the fusion verb already answer on their own remotes with a result the client reads, but the Robux
+ * chest does not: its grant runs inside `ProcessReceipt`, which is server-to-server, and the client deliberately ignores
+ * `PromptProductPurchaseFinished` because a client cannot be trusted about whether a purchase happened. Without this
+ * signal the one purchase that spends real money would be the only one with no confirmation the client can read.
+ *
+ * Fired **only** on `granted` — never for `duplicate`, `save-failed` or `no-profile` — and with no arguments: the sound
+ * is one fixed clip, and a payload would be a second source of truth for a fact the server has already decided.
+ */
+export const PURCHASE_GRANTED_REMOTE_NAME = "PurchaseGranted";
+
+/**
  * The economy remotes. Both are **requests for a state change**, not commands: the client asks, the server
  * decides, and the answer comes back on the same remote so the caller can render a result.
  *

@@ -1,6 +1,7 @@
 import { ReplicatedStorage, TweenService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
-import { ELIMINATION_REMOTE_NAME, REMOTES_FOLDER_NAME } from "shared/remotes";
+import { ELIMINATION_REMOTE_NAME, ELIMINATION_SOUND_REMOTE_NAME, REMOTES_FOLDER_NAME } from "shared/remotes";
+import { playEliminationSound } from "shared/ui/sounds";
 import { FONT, TYPOGRAPHY } from "shared/ui/scale";
 import { getTheme, Theme } from "shared/ui/theme";
 import { getScreenGui } from "shared/ui/layers";
@@ -102,17 +103,31 @@ export class EliminationSplashController implements OnStart {
 	public onStart(): void {
 		const folder = ReplicatedStorage.WaitForChild(REMOTES_FOLDER_NAME, 10);
 		if (folder === undefined) {
-			warn(`[Splash] no ${REMOTES_FOLDER_NAME} folder — eliminations will not be shown.`);
+			warn(`[Splash] no ${REMOTES_FOLDER_NAME} folder — eliminations will be neither shown nor heard.`);
 			return;
 		}
 
+		// Two remotes, one event. The splash is fired to **one** player (their own result); the sound is fired to **one**
+		// player too, but usually a different one — the attacker whose ball landed the last touch (item 87). Neither falls
+		// back to the other: a missing splash remote must not silence the attacker's cue, and a missing sound remote must
+		// not stop this player being told they are out.
 		const remote = folder.WaitForChild(ELIMINATION_REMOTE_NAME, 10);
-		if (remote === undefined || !remote.IsA("RemoteEvent")) {
+		if (remote !== undefined && remote.IsA("RemoteEvent")) {
+			remote.OnClientEvent.Connect(() => this.splash());
+		} else {
 			warn(`[Splash] no ${ELIMINATION_REMOTE_NAME} remote — eliminations will not be shown.`);
-			return;
 		}
 
-		remote.OnClientEvent.Connect(() => this.splash());
+		// Connected here rather than in a controller of its own: this is the client half of the elimination signal, and
+		// the sound is that same signal rendered twice. The throttle that collapses four eliminations in one tick lives
+		// inside `playEliminationSound`, which is where the per-sound timestamp is.
+		const soundRemote = folder.WaitForChild(ELIMINATION_SOUND_REMOTE_NAME, 10);
+		if (soundRemote !== undefined && soundRemote.IsA("RemoteEvent")) {
+			soundRemote.OnClientEvent.Connect(() => playEliminationSound());
+		} else {
+			warn(`[Splash] no ${ELIMINATION_SOUND_REMOTE_NAME} remote — eliminations will be silent.`);
+		}
+
 		print(`[Splash] mounted on the splash layer`);
 	}
 

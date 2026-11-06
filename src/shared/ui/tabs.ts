@@ -1,6 +1,7 @@
 import { SPACING, TYPOGRAPHY, FONT } from "./scale";
 import { Theme } from "./theme";
 import { attachPressFeedback } from "./press";
+import { attachClickSound } from "./sounds";
 
 /** **Placeholder.** Height of the tab strip, in pixels. Fixed so the shelf below it never moves. */
 export const TAB_STRIP_HEIGHT = 36;
@@ -121,6 +122,9 @@ export function TabStrip(options: TabStripOptions): TabStripParts {
 		corner.Parent = button;
 
 		attachPressFeedback(button);
+		// Every tab in every strip: `TabStrip` is the only place a tab button is built, so this covers the inventory's
+		// `Balls`/`Fusion` pair and any strip added later without another call site.
+		attachClickSound(button);
 
 		button.Activated.Connect(() => {
 			if (current === name) {

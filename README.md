@@ -382,8 +382,19 @@ place with your own parts:
 No mesh or model support — every `model` in [`src/shared/models.config.ts`](src/shared/models.config.ts)
 is `undefined`, and a test fails if a ball id has no entry, so the swap fails the suite rather than
 drawing the same sphere. No client prediction: the server owns the velocity and every client sees the
-result a round trip later. No audio and no camera work. **No VFX beyond the power badge and the decoy
-outline** — no particle, trail or world aura for any power, because a `magnet` or `eclipse` aura is a
+result a round trip later. Audio is five UI sounds and nothing else — a button press, a granted purchase, a ball leaving
+the belt, a ball-ball hit, and a pickup that actually raised a ball's speed (`src/shared/sounds.config.ts`) — with no
+music, no ambience and nothing positional. The elimination sound is heard only by the player whose ball landed the last
+touch on the body that left (or by nobody, if nothing touched it), because the sound means *you* put that body out. The
+hit sound plays on every hit burst the client is told about. Three of them are throttled and with separate slots, so a
+hit right after an elimination is still heard: the elimination and the hit at one start per half second, and the pickup at
+one per 0.3 s — because a `recycle` ball resting on its surviving pad re-touches it every few milliseconds and re-raises
+its decayed speed each time, which without an interval is a buzz rather than a sound. A click and a grant play every time.
+Volume and pitch are per sound in `SOUND_TUNING` next to the ids — the hit is deliberately the quietest and the pickup sits
+just above it — and they are applied when each `Sound` is built, not per play. No camera work.
+**The only VFX are three:** the power badge, the decoy owner's outline, and
+a ball-ball hit burst — one clone of the Studio asset `ReplicatedStorage.hitEffect`, built on each client at the contact
+midpoint and destroyed by `Debris`. No trail or world aura for any power, because a `magnet` or `eclipse` aura is a
 radius in a server-side registry and draws nothing — and no periodic `ghost` toggle. No in-round coin
 earn path: coins start at 500, are spent by a chest or the picker's re-roll, and are granted only
 through `/dev`.
