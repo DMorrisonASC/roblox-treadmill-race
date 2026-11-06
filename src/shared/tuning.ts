@@ -187,108 +187,6 @@ export const BELT_SURFACE_THICKNESS = 0.1;
 export const BELT_SURFACE_LIP = 1;
 
 /**
- * **Placeholder.** Whether a ball-vs-ball collision adds angular velocity to the ball, producing
- * occasional backspin and a brief backward scoot against the belt.
- *
- * A single switch so the whole mechanic can be turned off without deleting the handler, the constants,
- * or the `Touched` connection it installs.
- */
-export const BALL_BACKSPIN_ENABLED = true;
-
-/**
- * **Placeholder.** How far ahead of the belt surface the ball's contact point is driven, in studs per
- * second, when a collision applies backspin.
- *
- * ## Why this replaced a rad/s impulse (`BALL_BACKSPIN_IMPULSE = 60`), which was wrong twice over
- *
- * The previous version *added* a fixed `60 rad/s` on every qualifying contact. A Studio log showed two
- * independent failures of that design:
- *
- *  1. **It accumulated without bound.** 20 balls produced **428 impulses**, and the measured
- *     `omega * r` climbed monotonically from `30` to **`56.6`** — a contact point moving 5.6x the belt
- *     speed. The 0.25 s cooldown spaces repeats out; it never stops them, so a ball resting against
- *     another gained another `+60 rad/s` every quarter second for the whole session.
- *  2. **Even one impulse was far too big.** The impulse does not translate into velocity one-for-one.
- *     Adding slip `s` to a rolling ball resolves to `dv = -s / 3.5` for a solid sphere (the `3.5` is
- *     `1 + m*r^2/I` with `I = (2/5)m*r^2`), so a single `60 rad/s` impulse is `s = 30` studs/s of
- *     overspeed and a `-8.6` studs/s kick. The log's exits at `-6.75`, `-7.07` and `-9.45` studs/s are
- *     exactly that, plus accumulation.
- *
- * Against a `u = 10` belt that threw 14 of 18 balls off the **back** edge, most within 0.6 s.
- *
- * ## Why a target rather than an impulse
- *
- * A collision cannot pump energy into a body that is already spinning faster than the collision can
- * justify, so repeated contact should *converge* to a limit, not compound. Targeting the contact-point
- * overspeed makes the operation idempotent: the handler computes the current slip, and adds only
- * enough angular velocity to reach the target — so the second, third and four-hundredth contact in a
- * sustained pile-up are no-ops instead of another full kick. It also puts the knob in physical units
- * (how fast the contact point outruns the belt) rather than in `rad/s`, which is the quantity the
- * effect is actually about.
- *
- * ## The arithmetic of 15
- *
- * `dv = -slip / 3.5`. At `slip = 15` the velocity change is `15 / 3.5 = 4.3` studs/s. From rolling
- * equilibrium on a `u = 10` belt (`v = 2u/7 = 2.86`) that lands the ball at `2.86 - 4.3 = -1.4`
- * studs/s: a slow, clearly visible backward roll, not a launch.
- *
- * Note that the backward motion is **persistent, not brief**, and that is correct physics rather than a
- * bug: once rolling is re-established with excess spin, the contact point is back at belt speed, friction
- * is zero again, and the ball keeps its `-1.4` studs/s until it reaches an edge. There is nothing to
- * stop it. Raising this to `30` would roughly double the backward speed to `-4`; lowering it to `8`
- * gives `-0.5`, a visible hesitation rather than travel.
- */
-export const BALL_BACKSPIN_TARGET_SLIP = 15;
-
-/**
- * **Placeholder.** Minimum seconds between backspin impulses on one ball.
- *
- * **Not optional.** `Touched` fires on contact-*state* changes, and a ball wedged against another
- * re-fires it on essentially every physics step. 0.25 s is ~15 physics steps: long enough that a
- * collision does not run the handler repeatedly within one impact.
- *
- * **It is no longer what bounds the effect.** With `BALL_BACKSPIN_TARGET_SLIP` the handler is
- * idempotent — a repeat call finds the slip already at target and does nothing — so the cooldown is now
- * purely a cost control, not a safety limit. The version that added a fixed impulse needed the cooldown
- * to bound accumulation and failed to: 428 impulses still drove `omega*r` from 30 to 56. See the target
- * constant's comment.
- */
-export const BALL_BACKSPIN_COOLDOWN = 0.25;
-
-/**
- * **Placeholder.** Minimum belt speed, in studs/s, before a ball-ball collision may add backspin.
- *
- * The arithmetic behind `5`: full belt speed is `BeltSpeed = 10` and `BELT_RAMP_SECONDS = 3`, so the
- * ramp crosses `5` at `1.5 s` into `Playing`. Below `5` the ball is not being carried forward strongly
- * enough for the spin to be recoverable — the belt cannot out-pull the backward velocity the spin
- * resolves to, so the spin only pushes the ball back. Above `5` the ball has enough belt momentum
- * behind it for the spin to read as a correction rather than a reversal.
- *
- * **Absolute, not relative to `BeltSpeed`.** That is deliberate — `5` is a claim about how much forward
- * carry makes backspin legible, which does not obviously scale with a top speed the designer might
- * raise — but it means this number must be re-derived if `BeltSpeed` changes. At `BeltSpeed = 20` the
- * gate would open a quarter of the way into the ramp instead of halfway, and the backspin would come
- * back earlier than it does now.
- *
- * ## The two gate mechanisms
- *
- * The gate compares belt speed, not round phase, and the alternative is worth naming because it is what
- * a reader will think of first:
- *
- * 1. **Belt speed alone** (chosen) — `TreadmillService.getEffectiveBeltSpeed()`, the *ramped* value.
- * 2. **Belt speed *and* `RoundService.getPhase() === "Playing"`** (rejected).
- *
- * The phase check was rejected because belt speed already covers it and covers more. `RoundService`
- * writes `setBeltSpeed(0)` on entering `Intermission`, `Waiting` and `PostGame` and once at server
- * start, so "not `Playing`" and "belt at zero" are the same state seen from two sides — but the ramp is
- * `Playing` with the belt *below* full speed, and only the speed check rejects that. The phase check
- * would additionally be a circular import (`RoundService` imports `BallSpawnerService`, so the reverse
- * import closes the cycle) bought for nothing. **If the belt-speed read ever stops being reachable, the
- * phase check is the fallback, and it is the weaker of the two.**
- */
-export const BALL_BACKSPIN_MIN_BELT_SPEED = 5;
-
-/**
  * **Placeholder.** Whether a ball touching a `TreadmillWall`-tagged part is pushed forward.
  *
  * Single switch so the assist can be turned off without deleting the handler or the constants.
@@ -298,14 +196,13 @@ export const WALL_ASSIST_ENABLED = true;
 /**
  * **Placeholder.** Forward velocity added per ball-wall contact event, in studs/s.
  *
- * ## This is the same shape as `BALL_BACKSPIN_TARGET_SLIP`, on purpose
+ * ## The shape this belongs to
  *
- * The wall assist is a copy of the ball-ball backspin handler: one `Touched` connection per ball, a
- * tag filter, a convergent check against a target, and a single velocity write. `applyBackspin` has
- * been the working mechanism for several rounds; the wall spent three rounds on bespoke designs (a
- * cooldown-gated impulse, then a `VectorForce`) and neither produced observable motion. Reusing the
- * proven shape is the decision, and the constant is deliberately the same *kind* of thing: a small
- * per-event nudge that the convergence check bounds, never a rate.
+ * One `Touched` connection per ball, a tag filter, a convergent check against a target, and a single velocity write, with
+ * no clock. That shape was borrowed from the ball-ball handler that used to sit above this one — the wall spent three
+ * rounds on bespoke designs (a cooldown-gated impulse, then a `VectorForce`) and neither produced observable motion — and it
+ * is kept now that the original is gone (item 92), because it is the shape that works on this kind of event, not because it
+ * has a parent. The constant is deliberately a small per-event nudge that the convergence check bounds, never a rate.
  *
  * ## The arithmetic of 1
  *
@@ -321,10 +218,9 @@ export const WALL_ASSIST_ENABLED = true;
  * is emergent. If the ride to target turns out too sharp, lower this rather than raising the target;
  * the target is the safety bound and the impulse is only the resolution.
  *
- * Contrast with `BALL_BACKSPIN_TARGET_SLIP = 15`: that handler adds the **whole** remaining deficit in
- * one event (`(target - slip) / radius`), so it converges in a single contact. This one deliberately
- * does not, because a linear velocity write is far larger per unit and a single-event jump to
- * `8` studs/s is exactly the "not a push" behaviour the force round was trying to fix.
+ * **A velocity write of this size is the reason the resolution is per-event rather than whole-deficit.** A linear
+ * velocity change is large per unit compared with the angular one the deleted handler wrote, and a single-event jump
+ * straight to `8` studs/s is exactly the "not a push" behaviour the force round was trying to fix.
  */
 export const WALL_ASSIST_IMPULSE = 1;
 
@@ -595,10 +491,9 @@ export const APPARENT_SPIN_SMOOTHING_SECONDS = 0.15;
  * `+X`), so one flip reverses the picture without making a rolling ball disagree with a sliding one.
  *
  * `yAxis:Cross(direction)` is **forward rolling**: for a body travelling `+X` it is `-Z`, the sign that
- * moves the top of the ball toward `+X`. That is the negation of `applyBackspin`'s axis
- * (`RightVector:Cross(yAxis)`, the *braking* spin), and the two must not be confused — reusing the
- * backspin axis would draw the markers turning against the travel direction, which reads as the ball
- * sliding backwards.
+ * moves the top of the ball toward `+X`. That is the negation of the *braking* axis
+ * (`RightVector:Cross(yAxis)`), and the two must not be confused — using the braking axis would draw the
+ * markers turning against the travel direction, which reads as the ball sliding backwards.
  *
  * A constant rather than a literal at the call site so the direction is a one-line edit to reverse,
  * which is what makes the direction criterion checkable by a single rerun rather than by reading the
@@ -613,9 +508,10 @@ export const APPARENT_SPIN_SMOOTHING_SECONDS = 0.15;
  * forward-rolling axis made the markers turn with the belt while the ball visibly crawled the other way, which
  * reads as the ball spinning backwards.
  *
- * The flip applies to the physical branch too. That branch only fires when the body has real spin of its own,
- * and backspin about `+Z` is the spin this scene actually produces, so the same sign is still the consistent
- * answer there.
+ * The flip applies to the physical branch too — and since item 92 that branch is unreachable in practice, because
+ * nothing in the tree writes `AssemblyAngularVelocity` on a ball any more. It is left signed consistently so that a
+ * future mechanism that does spin a body cannot produce markers turning the wrong way, which is the one failure this
+ * constant exists to prevent.
  */
 export const APPARENT_SPIN_SIGN = -1;
 

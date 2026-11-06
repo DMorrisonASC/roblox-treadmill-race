@@ -705,8 +705,8 @@ export class MarkerSpinController implements OnStart {
  * The forward-rolling axis implied by the belt, for a body that is neither spinning nor moving.
  *
  * `yAxis:Cross(belt.RightVector)` — for the observed belt (`RightVector = +X`) that is `-Z`, the axis
- * that moves the top of the ball toward `+X`. It is the negation of `applyBackspin`'s axis, which is
- * `belt.CFrame.RightVector:Cross(Vector3.yAxis)` in `BallSpawnerService`; the two differ by sign and
+ * that moves the top of the ball toward `+X`. It is the negation of the belt's *braking* axis
+ * (`belt.CFrame.RightVector:Cross(Vector3.yAxis)`), and the two differ by sign and
  * mean opposite things, so a reader who reuses one for the other gets markers turning backwards.
  *
  * The belt is found by tag (the only coupling between scene and code, per `shared/tags.ts`) and

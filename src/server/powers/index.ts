@@ -659,7 +659,7 @@ export function readSpeed(ball: BasePart): number {
  * ## Why this module keeps its own flag instead of asking `RoundService`
  *
  * Because asking would close a require cycle: `RoundService` -> `BallSpawnerService` -> this module, so an import of
- * `RoundService` from here is the edge the tree has avoided since the backspin gate (item 22) chose a number over a phase
+ * `RoundService` from here is the edge the tree has avoided since item 22 chose a number over a phase
  * read for exactly this reason. The second option — reading the `RoundState` `StringValue` out of `ReplicatedStorage` — was
  * also rejected, because it is a second source of truth for a fact the spawner is already told, and it would put a
  * `FindFirstChild` on a collision handler.
@@ -812,11 +812,11 @@ function formatVector(value: Vector3): string {
  *
  * ## Why the log line exists
  *
- * One line per fire, countable against the `[Ball] backspin:` line the spawner prints for the same contact. **The counts
- * will not match, and that is the point of printing it:** backspin fires for every ball pair that is actually moving,
- * while this fires only when one body of the pair has a colliding power and there is speed to transfer. A pair with
- * neither colliding power touches and produces no burst at all, so the line is also the measurement of how much of the
- * field's collisions are covered.
+ * One line per fire, and the count is the measurement of coverage: this fires only when one body of the pair has a
+ * colliding power **and** there is speed to transfer, so a pair with neither colliding power touches and produces no
+ * burst at all. There is no longer a per-contact line in the server log to compare it against — item 92 deleted the one
+ * that existed — so the count is read against `[Pickup] collected` and against the test run rather than against a sibling
+ * handler in the same file.
  */
 function broadcastHit(ball: BasePart, other: BasePart): void {
 	const remote = hitEffectRemote;

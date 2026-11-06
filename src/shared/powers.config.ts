@@ -123,9 +123,10 @@ export const MAX_STEAL_PER_CONTACT = 2;
 /**
  * **Placeholder.** Minimum seconds between two transfer impulses involving the same ball.
  *
- * **Not optional, for the reason `BALL_BACKSPIN_COOLDOWN` is not optional.** `Touched` re-fires on essentially every
- * physics step while two balls rest against each other, so without a cooldown the transfer runs at ~60/s and two
- * touching balls resolve in a fraction of a second — the round would be decided by which pair happened to meet.
+ * **Not optional.** `Touched` re-fires on essentially every physics step while two balls rest against each other, so
+ * without a cooldown the transfer runs at ~60/s and two touching balls resolve in a fraction of a second — the round
+ * would be decided by which pair happened to meet. (The deleted ball-ball handler used the same argument for the same
+ * interval; item 92 removed that handler and this one stayed, because a transfer is still a transfer.)
  */
 export const POWER_COLLISION_COOLDOWN = 0.25;
 

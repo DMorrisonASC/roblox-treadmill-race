@@ -35,10 +35,6 @@ import {
 } from "shared/shape-pool";
 import { TAGS } from "shared/tags";
 import {
-	BALL_BACKSPIN_COOLDOWN,
-	BALL_BACKSPIN_ENABLED,
-	BALL_BACKSPIN_MIN_BELT_SPEED,
-	BALL_BACKSPIN_TARGET_SLIP,
 	BALL_SPEED_DECAY_RATE,
 	BALL_SPEED_MAX,
 	BALL_SPEED_MIN,
@@ -404,14 +400,18 @@ interface SpawnerFailure {
 @Service()
 export class BallSpawnerService implements OnStart {
 	/**
-	 * Injected for one read: the effective belt speed, which is what the backspin gate compares.
+	 * Injected for the belt readings the reference-speed model needs, and for nothing else now.
 	 *
-	 * The belt is otherwise reached through the tag (`nearestBeltTo`, `resolveBeltFor`), and that
-	 * stays — those lookups answer "where is the surface under this ball", which is per-ball and
-	 * positional. Speed is different: `setBeltSpeed` writes one number on `TreadmillService` that
-	 * covers every bound belt, so a tag lookup could only ever recover the designer's attribute, never
-	 * the value the ramp has driven the constraint to. This is the smallest way to read that number,
-	 * and `TreadmillService` does not import this file, so there is no cycle.
+	 * `getReferenceBeltSpeed`, `getBeltRightVector` and `getBeltFrame` are the three reads `stepBallSpeeds` makes. The
+	 * belt is otherwise reached through the tag (`nearestBeltTo`, `resolveBeltFor`), and that stays — those lookups answer
+	 * "where is the surface under this ball", which is per-ball and positional. Speed is different: `setBeltSpeed` writes
+	 * one number on `TreadmillService` that covers every bound belt, so a tag lookup could only ever recover the
+	 * designer's attribute, never the value the ramp has driven the constraint to. This is the smallest way to read that
+	 * number, and `TreadmillService` does not import this file, so there is no cycle.
+	 *
+	 * **`getEffectiveBeltSpeed` used to be the fourth read, and both were deleted in item 92** along with the handler that
+	 * was their only caller. Nothing in this file asks for the ramped speed any more: the model reads the *reference*
+	 * number on purpose, so a ball's `RELATIVE_SPEED` is a fact about the round rather than about the ramp.
 	 */
 	constructor(private readonly treadmill: TreadmillService) {}
 
@@ -484,29 +484,15 @@ export class BallSpawnerService implements OnStart {
 	private readonly startSpeeds = new Map<BasePart, number>();
 
 	/**
-	 * Backspin bookkeeping, one entry per live ball.
-	 *
-	 * `backspinConnections` exists because `Touched` connections on a destroyed part do not need to be
-	 * explicitly disconnected for the *handler* to stop firing — a destroyed instance fires nothing — but
-	 * holding the connection object in a map would leak one entry per ball forever if nothing removed it,
-	 * and a destroyed `RBXScriptConnection` is cheap to disconnect but not free to keep. Both maps are
-	 * cleared in the two places a ball can die, so their size tracks the live set.
-	 *
-	 * `lastBackspinAt` is the cooldown clock, per ball rather than global: a global clock would let one
-	 * ball's collision suppress another ball's, which would make the variety depend on which lane
-	 * happened to be touched first.
-	 */
-	private readonly backspinConnections = new Map<BasePart, RBXScriptConnection>();
-	private readonly lastBackspinAt = new Map<BasePart, number>();
-
-	/**
 	 * The separate `Touched` connection each ball holds for wall contacts.
 	 *
-	 * A second map rather than a second slot in `backspinConnections`, because the two handlers are
-	 * independent: either can be disabled without the other, and folding them into one array would make
-	 * every reader work out which entry is which. The cost is that `releaseBackspin` and
-	 * `releaseWallAssist` are both called on death — two lines in each of the two death paths, which is
-	 * cheaper to read than a tagged union.
+	 * One map, one handler. A ball's `Touched` signal is shared by three independent listeners in this tree — the powers'
+	 * collision handler in `server/powers`, this wall assist, and the temporary observation probe — and each holds its own
+	 * connection so any one of them can be removed without touching the others; item 92 removed a fourth and
+	 * needed no change to the rest.
+	 *
+	 * The cost is that `releaseWallAssist` is called in each of the two death paths, which is cheaper to read than a
+	 * tagged union of handlers in one map.
 	 */
 	private readonly wallAssistConnections = new Map<BasePart, RBXScriptConnection>();
 
@@ -1099,15 +1085,9 @@ export class BallSpawnerService implements OnStart {
 		// parts per spawn that is acceptable, and correctness wins.
 		this.attachBallMarkers(ball, entry);
 
-		// Backspin-on-collision. After the markers so the marker welds exist first (they are visual only
-		// and non-colliding, so order does not affect them), and after `Parent` so the ball is in the
-		// DataModel when its `Touched` connection is made.
-		this.attachBackspin(ball);
-
-		// Second connection, separate concern. Both handlers fire on every `Touched` and return early
-		// when the tag does not match, so a ball-ball event costs one extra `HasTag` on the wall handler
-		// and vice versa. That is cheaper than a shared handler that has to branch on two tags, and it
-		// keeps the two features independently switchable.
+		// The wall assist, and the only remaining per-ball `Touched` connection this service owns. It is a separate
+		// connection from the powers' collision handler on purpose: the two answer different tags, and either can be
+		// removed without the other — item 92 deleted a third and needed no change here.
 		this.attachWallAssist(ball);
 
 		// TEMPORARY INSTRUMENTATION. Before `liveBalls.push`, so the spawn line always precedes any
@@ -1397,195 +1377,26 @@ export class BallSpawnerService implements OnStart {
 
 	// #endregion
 
-	// #region backspin on collision
-
-	/**
-	 * Adds angular velocity to a ball when another ball strikes it, producing occasional backspin.
-	 *
-	 * ## Why this is triggered by a collision and not by spawn
-	 *
-	 * A spawn-time spin would be the code choosing an outcome: every ball would get the same treatment,
-	 * every round would look the same, and the player could not learn anything from it. A collision is
-	 * the honest source — one fruit physically knocking another off-centre genuinely converts linear
-	 * momentum into angular momentum, and **which** balls get struck is decided by where the bodies
-	 * happen to meet. A ball alone in its lane is never struck and simply rides at equilibrium; a ball in
-	 * a busy lane may be struck repeatedly. That spread is the variety, and it is a consequence of the
-	 * scene, not of a random number in this file.
-	 *
-	 * ## Why the impulse lands only on the ball running this handler
-	 *
-	 * `Touched` fires on *both* parts of a contact, so a collision between A and B runs A's handler with
-	 * B as the argument and B's handler with A. Applying the impulse to `self` in each means both balls
-	 * receive exactly one impulse per collision — symmetric, as physics wants — without the double-count
-	 * that applying to both here would create.
-	 *
-	 * ## Cleanup
-	 *
-	 * The connection is stored in `backspinConnections` and disconnected in `destroyBall` and
-	 * `pruneDestroyedBalls`, so nothing outlives the ball. Strictly, a destroyed instance stops raising
-	 * `Touched` whether or not the connection is disconnected, but leaving the connection object in the
-	 * map would leak one entry per ball for the whole session — see the field's comment.
-	 */
-	private attachBackspin(ball: BasePart): void {
-		// Gated at attach rather than inside the handler: with the feature off there is no reason to hold
-		// a connection per ball at all, and the check is paid once per spawn instead of once per contact.
-		// The emitted Luau keeps this as a real `if` — roblox-ts does not fold the constant away — but a
-		// per-spawn branch against a boolean is not worth avoiding, and putting the gate here rather than
-		// in the handler means a disabled feature costs zero connections and zero handler invocations.
-		if (!BALL_BACKSPIN_ENABLED) {
-			return;
-		}
-
-		const connection = ball.Touched.Connect((other) => this.applyBackspin(ball, other));
-		this.backspinConnections.set(ball, connection);
-	}
-
-	private applyBackspin(ball: BasePart, other: BasePart): void {
-		// **The belt must actually be carrying the ball before a collision is allowed to spin it.**
-		//
-		// Backspin is a response to a collision *on a moving surface*: the spin means something only
-		// because belt friction then has something to resolve it against, and the contact point
-		// outrunning the belt is what converts the spin into a backward velocity change. Over a
-		// stationary surface there is nothing to resolve, so the ball just rolls, which is what a Studio
-		// log showed — the handler firing at `t = 1.067 s` while the round was still in its pre-`Playing`
-		// phase with `v = 0`, `omega*r` going `0 -> 25`, and `u = 10` printed because `u` was read from the
-		// `BeltSpeed` attribute, not from the belt's actual speed. The `10` in that line was never the
-		// surface the ball was on.
-		//
-		// ## Why belt speed and not round phase
-		//
-		// Two checks could gate this and they are not the same check: belt speed alone, or belt speed
-		// plus `RoundService.getPhase() === "Playing"`. **Belt speed alone is used, and it is the
-		// stricter of the two rather than a weaker substitute.** `RoundService` writes
-		// `setBeltSpeed(0)` on entering `Intermission`, `Waiting` and `PostGame`, and once at server start,
-		// so "not `Playing`" and "belt at zero" are the same state seen from two sides — the speed test
-		// implies the phase test. It also rejects the ramp, which the phase test would not: a collision
-		// at `0.4 s` into `Playing` is `Playing` and still not being carried. The reverse does not hold,
-		// so belt speed is the check that covers the whole requirement.
-		//
-		// The phase check on top was rejected because reaching it means this file importing
-		// `RoundService` while `RoundService` imports this file — a require cycle bought for a redundant
-		// second opinion on a number the belt already states.
-		//
-		// **`getEffectiveBeltSpeed`, not `getBeltSpeed`.** The former returns the override the ramp
-		// writes; the latter returns the attribute, which stays at the designer's `10` for the entire
-		// round. Reading the attribute here would leave the gate permanently open and change nothing.
-		//
-		// A rejected call is a normal skip, not an error, so it is silent — `[Ball] backspin:` printing
-		// per applied impulse is the only instrumentation this feature has, and a second line for "did
-		// nothing" would bury it.
-		//
-		// Known and deliberate: the slip below still measures against the attribute (`u`), not the ramped
-		// speed. Between this threshold and full speed the two differ, so the applied spin is smaller
-		// than the true slip would justify for up to `1.5 s` of each round. Closing that means changing
-		// the slip calculation, which this change does not do.
-		if (this.treadmill.getEffectiveBeltSpeed() < BALL_BACKSPIN_MIN_BELT_SPEED) {
-			return;
-		}
-
-		// Another ball, or nothing. The slab, the belt, the welded markers, players and the wedge all
-		// reach this handler and must not spin the ball.
-		if (!other.HasTag(TAGS.ball)) {
-			return;
-		}
-
-		// A ball wedged against another re-fires `Touched` on essentially every physics step; without the
-		// cooldown the impulse would accumulate at ~60/s instead of once per collision.
-		const now = os.clock();
-		const last = this.lastBackspinAt.get(ball);
-		if (last !== undefined && now - last < BALL_BACKSPIN_COOLDOWN) {
-			return;
-		}
-
-		const belt = this.nearestBeltTo(ball.Position);
-		if (belt === undefined) {
-			// No belt means no meaningful rolling axis, and no surface whose speed the slip can be measured
-			// against. Skipping is better than guessing an axis from world X, which would be wrong for any
-			// rotated belt.
-			return;
-		}
-
-		// **The rolling axis, derived rather than assumed.** `RightVector` is the belt's travel direction
-		// and `yAxis` is up; their cross product is horizontal and perpendicular to travel, which is
-		// exactly the axis a body rolling along the belt turns about. For the observed belt
-		// (`RightVector = (1, 0, 0)`) that is `(0, 0, 1)` — **`+Z`**, not `-Z`.
-		//
-		// The sign question is not "does the ball spin forward or backward", it is "which sign makes the
-		// contact point move faster than the belt". The contact point's velocity is `v + w*r` along
-		// `RightVector`, so **adding** angular velocity along `+Z` increases it. At rolling equilibrium the
-		// contact point already moves at belt speed, so any increase puts it *ahead* of the belt and
-		// reverses friction. `+Z` is therefore the backspin direction, and it is what `Cross` returns.
-		//
-		// `.Unit` because a tilted belt's `RightVector` is not perpendicular to world up, so the raw cross
-		// product would not be unit length; the magnitude guard catches the degenerate case of a belt stood
-		// on its end, where the axis is undefined.
-		const axisRaw = belt.CFrame.RightVector.Cross(Vector3.yAxis);
-		if (axisRaw.Magnitude < 1e-3) {
-			return;
-		}
-		const axis = axisRaw.Unit;
-
-		const radius = ball.Size.Y / 2;
-		const beltSpeed = this.readNumber(belt, BELT_SPEED_ATTRIBUTE, DEFAULT_BELT_SPEED);
-		const ballSpeed = ball.AssemblyLinearVelocity.Dot(belt.CFrame.RightVector);
-		const omegaBefore = ball.AssemblyAngularVelocity.Dot(axis);
-		const slipBefore = ballSpeed + omegaBefore * radius - beltSpeed;
-
-		// **Converge to the target, do not add to it.** The previous version added a constant `60 rad/s`
-		// on every qualifying contact, which compounded: a Studio log showed `omega * r` climbing from 30
-		// to 56.6 over one session because a ball resting against another re-fires `Touched` indefinitely.
-		// Computing the deficit and adding only that makes this idempotent — the second and four-hundredth
-		// contact in a pile-up find the slip already at target and add nothing.
-		//
-		// The guard is `>=` rather than an equality test: a ball can arrive here already spinning faster
-		// than the target (two simultaneous collisions, or a target lowered between builds), and this must
-		// never *reduce* spin — that would be the code undoing a physical collision it did not cause.
-		if (slipBefore >= BALL_BACKSPIN_TARGET_SLIP) {
-			return;
-		}
-
-		const addedOmega = (BALL_BACKSPIN_TARGET_SLIP - slipBefore) / radius;
-		ball.AssemblyAngularVelocity = ball.AssemblyAngularVelocity.add(axis.mul(addedOmega));
-
-		this.lastBackspinAt.set(ball, now);
-
-		// One line per applied impulse, and the only diagnostic in this feature. It exists to settle the
-		// one thing source cannot: whether `+Z` really is the direction that produces backspin in this
-		// engine. The sign of `slip` answers it — positive means the contact point is moving faster than
-		// the belt, so friction pushes the ball backward, which is the mechanic working. Negative means the
-		// applied sign sped the ball up instead and `axis` needs negating.
-		//
-		// `dv` is the velocity change that slip will resolve to once rolling re-establishes, `-slip/3.5`
-		// for a solid sphere. It is printed because it is the number to compare against the observed exit
-		// velocity, and because it makes the `3.5` factor visible rather than buried in a comment.
-		const slipAfter = slipBefore + addedOmega * radius;
-		print(
-			`[Ball] backspin: addedOmega=${formatNumber(addedOmega)} r=${formatNumber(radius)} v=${formatNumber(ballSpeed)} omegaR=${formatNumber(omegaBefore * radius)}->${formatNumber((omegaBefore + addedOmega) * radius)} u=${formatNumber(beltSpeed)} slip=${formatNumber(slipBefore)}->${formatNumber(slipAfter)} predictedDv=${formatNumber(-slipAfter / 3.5)} ${slipAfter > 0 ? "contact faster than belt -> friction pushes BACKWARD" : "contact slower than belt -> friction pushes FORWARD (sign inverted)"}`,
-		);
-	}
-
-	// #endregion
-
 	// #region wall assist
 
 	/**
 	 * Connects a ball's `Touched` signal to the wall-add speed handler.
 	 *
-	 * **This is a copy of `attachBackspin`/`applyBackspin` above, deliberately.** Three rounds of
-	 * bespoke wall mechanisms — a cooldown-gated impulse, then a `VectorForce` with `TouchEnded`
-	 * cleanup — produced no observable motion, while the ball-ball handler directly above has worked
-	 * for several rounds on the same kind of event (a tagged part touching a ball). The shape that
-	 * works is: one `Touched` connection per ball, a tag filter that returns early, a convergent check
-	 * against a target, one velocity write, no clock.
+	 * **The shape here is the one that worked, and it was borrowed from a handler that no longer exists.** Three rounds of
+	 * bespoke wall mechanisms — a cooldown-gated impulse, then a `VectorForce` with `TouchEnded` cleanup — produced no
+	 * observable motion, while the ball-ball handler that used to sit above this one had worked for several rounds on the
+	 * same kind of event (a tagged part touching a ball). The shape that works is: one `Touched` connection per ball, a tag
+	 * filter that returns early, a convergent check against a target, one velocity write, no clock. **The copy outlived the
+	 * original:** item 92 deleted the ball-ball handler because its premise had gone, and this one stays because its
+	 * premise — a wall that should give a shove — is still true.
 	 *
-	 * The only deliberate divergence is the convergence *rate*. `applyBackspin` adds the whole
-	 * remaining deficit in one event; this adds `min(WALL_ASSIST_IMPULSE, deficit)`, so a ball ramps
-	 * over several contacts instead of jumping. That is because the user's complaint about the previous
-	 * velocity write was specifically that a single-frame jump does not read as a push. See
-	 * `WALL_ASSIST_IMPULSE`.
+	 * The convergence *rate* is the deliberate divergence from what was copied: this adds
+	 * `min(WALL_ASSIST_IMPULSE, deficit)` per event, so a ball ramps over several contacts instead of jumping. That is
+	 * because the user's complaint about the previous velocity write was specifically that a single-frame jump does not
+	 * read as a push. See `WALL_ASSIST_IMPULSE`.
 	 *
-	 * Attached separately from the backspin connection rather than sharing it: the two handlers answer
-	 * to different tags and either constant can be switched off independently without the other.
+	 * It holds its own connection rather than sharing the powers' collision handler: the two answer to different tags, and
+	 * either can be removed without the other.
 	 */
 	private attachWallAssist(ball: BasePart): void {
 		if (!WALL_ASSIST_ENABLED) {
@@ -1599,9 +1410,9 @@ export class BallSpawnerService implements OnStart {
 	/**
 	 * Adds forward velocity to a ball that touched a `TreadmillWall`-tagged part.
 	 *
-	 * Convergent, per-event, and clockless — see `WALL_ASSIST_IMPULSE` and `WALL_ASSIST_TARGET_SPEED`
-	 * for the arithmetic. The structure mirrors `applyBackspin` line for line: filter, look up the
-	 * belt, read the current state, bail if already at target, apply one bounded write.
+	 * Convergent, per-event, and clockless — see `WALL_ASSIST_IMPULSE` and `WALL_ASSIST_TARGET_SPEED` for the arithmetic.
+	 * The structure is: filter, look up the belt, read the current state, bail if already at target, apply one bounded
+	 * write.
 	 */
 	private applyWallAssist(ball: BasePart, other: BasePart): void {
 		// A wall, or nothing. Balls, the slab, the belt, the welded markers and players all reach this
@@ -1610,10 +1421,9 @@ export class BallSpawnerService implements OnStart {
 			return;
 		}
 
-		// Same belt lookup the backspin handler uses — `nearestBeltTo` on the ball's position, resolved
-		// per event. Deliberately not a spawn-time capture: the backspin handler does not cache one, and
-		// two handlers in the same file disagreeing about where the belt reference comes from is how a
-		// bug gets planted. A ball with no belt nearby gets no push, because there is no forward.
+		// `nearestBeltTo` on the ball's position, resolved per event rather than captured at spawn: the belt under a ball
+		// is a positional fact, a ball can reach a second belt in a long round, and a stale capture would push along the
+		// wrong axis with no error to show for it. A ball with no belt nearby gets no push, because there is no forward.
 		const belt = this.nearestBeltTo(ball.Position);
 		if (belt === undefined) {
 			return;
@@ -1674,7 +1484,6 @@ export class BallSpawnerService implements OnStart {
 				this.ballKillY.delete(ball);
 				this.lateral.delete(ball);
 				this.startSpeeds.delete(ball);
-				this.releaseBackspin(ball);
 				this.releaseWallAssist(ball);
 				forgetBallPower(ball);
 				this.forgetDecoy(ball);
@@ -1686,21 +1495,12 @@ export class BallSpawnerService implements OnStart {
 	}
 
 	/**
-	 * Drops the backspin connection and its cooldown clock for one ball.
+	 * Drops the wall-assist connection for one ball.
 	 *
-	 * Called from both death paths. `Touched` on a destroyed instance stops firing on its own, so this is
-	 * not what keeps the handler from running — it is what keeps the two maps from growing by one entry
-	 * per ball for the lifetime of the server session.
-	 */
-	private releaseBackspin(ball: BasePart): void {
-		this.backspinConnections.get(ball)?.Disconnect();
-		this.backspinConnections.delete(ball);
-		this.lastBackspinAt.delete(ball);
-	}
-
-	/**
-	 * Drops the wall-assist connection for one ball. Same reasoning as `releaseBackspin`: a destroyed
-	 * instance raises nothing, so this exists to keep the map from growing by one entry per ball.
+	 * Called from both death paths. `Touched` on a destroyed instance stops firing on its own, so this is not what keeps
+	 * the handler from running — it is what keeps the map from growing by one entry per ball for the lifetime of a server
+	 * session. The same discipline retired a second such map in item 92: a map keyed on bodies has to be cleared wherever a
+	 * body dies, or its size silently tracks the session rather than the live set.
 	 */
 	private releaseWallAssist(ball: BasePart): void {
 		this.wallAssistConnections.get(ball)?.Disconnect();
@@ -1761,7 +1561,6 @@ export class BallSpawnerService implements OnStart {
 		this.lateral.delete(ball);
 		this.startSpeeds.delete(ball);
 		this.forgetDecoy(ball);
-		this.releaseBackspin(ball);
 		this.releaseWallAssist(ball);
 		const index = this.liveBalls.indexOf(ball);
 		if (index !== -1) {
@@ -2307,14 +2106,18 @@ export class BallSpawnerService implements OnStart {
 	 *
 	 * ## `contactSlip` and its sign
 	 *
-	 * `contactSlip = u - (ballSpeed + omega*r)` — the negation of the quantity `applyBackspin` calls
-	 * `slip`, and deliberately so: **positive here means the contact point is moving slower than the
-	 * belt**, i.e. friction is pushing the body forward and it has not reached rolling equilibrium.
-	 * Zero is rolling-without-slipping and negative means the contact is outrunning the belt. Reading
-	 * it as "how far from rolling is this body" is the whole point, and that reading only works with
-	 * this sign.
+	 * `contactSlip = u - (ballSpeed + omega*r)`: the contact point's speed relative to the surface it is on, with the
+	 * sign chosen so **positive means the contact point is moving slower than the belt**, i.e. friction is pushing the
+	 * body forward and it has not reached rolling equilibrium. Zero is rolling-without-slipping and negative means the
+	 * contact is outrunning the belt. Reading it as "how far from rolling is this body" is the whole point, and that
+	 * reading only works with this sign.
 	 *
-	 * `omega` is projected onto the same axis `applyBackspin` uses (`RightVector:Cross(yAxis)`), not
+	 * **Since item 92 nothing in the tree writes `AssemblyAngularVelocity`, so `omega` here is structurally zero** and
+	 * `contactSlip` reduces to `u - ballSpeed`. The fields are kept rather than simplified: this is temporary
+	 * instrumentation whose job is to report what the engine did, and a probe that computed its own answer from a
+	 * constant would stop being able to notice the day something started spinning a body again.
+	 *
+	 * `omega` is projected onto the rolling axis (`RightVector:Cross(yAxis)`), not
 	 * taken as `|AssemblyAngularVelocity|`, because a body spinning about a different axis is not
 	 * rolling along the belt and would otherwise be credited with spin it does not have in the
 	 * direction that matters. `|omega|` is printed alongside as the raw magnitude so the two can be

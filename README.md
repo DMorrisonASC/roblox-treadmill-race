@@ -20,7 +20,7 @@ repo describes it as one, that document is describing a previous version of the 
 | Path | What it is |
 | ---- | ---------- |
 | `src/server/services/` | Six services: `treadmill`, `ball-spawner`, `pickup`, `round`, `economy`, `player-data-store` |
-| `src/client/controllers/` | Ten controllers: belt scroll, marker spin, round state, transition wipe, phase banner, picker, store + inventory, debug keys, elimination splash, decoy outline |
+| `src/client/controllers/` | Twelve controllers: belt scroll, marker spin, round state, transition wipe, phase banner, picker, store + inventory, debug keys, elimination splash, decoy outline, hit effect, pickup sound |
 | `src/server/powers/` | The ten powers — pure rules plus one instance-level wrapper, deliberately a module rather than a service |
 | `src/server/{round-outcome,debug-balls,decoy-outline,elimination-signal,picker,admin}.ts` | Plain modules with specs beside the code; no Flamework, so a spec can import them |
 | `src/shared/` | Tag names, attribute names + defaults, remote names, gameplay constants, the economy / powers / models configs and the UI theme |

@@ -643,10 +643,11 @@ export class TreadmillService implements OnStart {
 	/**
 	 * The **reference** belt speed for the `BALL_SPEED` model: the designer's number, never the ramp.
 	 *
-	 * This is deliberately *not* `getEffectiveBeltSpeed()`. That one returns whatever the round's ramp has
-	 * driven the belt to this frame ? a value that exists only to animate the texture scroll. Feeding the ramp
-	 * into `RELATIVE_SPEED` would mean `BALL_SPEED - BELT_SPEED` starts at `10 - 0 = +10` on the first frame of
-	 * `Playing` and the ball would lurch *forward* for the whole three-second ramp, which is the opposite of a
+	 * This is deliberately *not* the ramped speed. That one is whatever the round's ramp has driven the belt to this frame
+	 * — a value that exists only to animate the texture scroll — and it used to be readable as a public method
+	 * (`getEffectiveBeltSpeed`), which item 92 deleted when its only caller went with its handler.
+	 * Feeding the ramp into `RELATIVE_SPEED` would mean `BALL_SPEED - BELT_SPEED` starts at `10 - 0 = +10` on the first
+	 * frame of `Playing` and the ball would lurch *forward* for the whole three-second ramp, which is the opposite of a
 	 * neutral start and has nothing to do with how fast the ball is going.
 	 *
 	 * The requirement is explicit: `BELT_SPEED = 10` from the first tick of `Playing`, `BALL_SPEED_START = 10`,
@@ -718,27 +719,6 @@ export class TreadmillService implements OnStart {
 		}
 
 		return DEFAULT_BELT_SPEED;
-	}
-
-	/**
-	 * The speed the belt is *actually* being driven at right now — override if one is set, attribute
-	 * otherwise.
-	 *
-	 * `getBeltSpeed` above deliberately reports the designer's number, because that is what a round
-	 * should ramp towards. This reports the number a ball cares about: is the surface under me moving,
-	 * and how fast. The difference is the whole ramp — `getBeltSpeed` answers `10` one millisecond into
-	 * `Playing`, while the constraint is still at `0`.
-	 *
-	 * A narrow no-argument read rather than making `readSpeed(part)` public: the override is one number
-	 * covering every bound belt, so exposing the per-part form would invite callers to pass a part and
-	 * believe the answer was per-part. The only caller is the backspin gate, which has no part to pass.
-	 */
-	public getEffectiveBeltSpeed(): number {
-		if (this.beltSpeedOverride !== undefined) {
-			return this.beltSpeedOverride;
-		}
-
-		return this.getBeltSpeed();
 	}
 }
 
