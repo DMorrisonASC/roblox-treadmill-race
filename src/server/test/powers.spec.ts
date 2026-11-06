@@ -511,8 +511,13 @@ describe("the model's bounds", () => {
 	});
 
 	it("decays at the rate the exchange arithmetic is reported against", () => {
-		// One point of BALL_SPEED is 1 / 0.3 = 3.3 seconds of ride; the report quotes magnitudes in those terms, so the
+		// One point of BALL_SPEED is 1 / 0.1 = 10 seconds of ride; the report quotes magnitudes in those terms, so the
 		// rate itself is asserted here rather than quoted in prose only.
-		expect(BALL_SPEED_DECAY_RATE).toBe(0.3);
+		//
+		// **Retuned from 0.3 to 0.1 outside a round, and this assertion follows the constant rather than the other way
+		// round.** The value is the designer's (it triples every ride, which is the point), and three docblocks that still
+		// quoted 0.3 were corrected with it — see `BALL_SPEED_DECAY_RATE` and `powers.config.ts`. If `0.1` was a slip rather
+		// than a decision, changing the constant back is a one-character edit and this line is the failure that says so.
+		expect(BALL_SPEED_DECAY_RATE).toBe(0.1);
 	});
 });

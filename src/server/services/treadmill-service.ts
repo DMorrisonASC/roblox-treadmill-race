@@ -81,23 +81,28 @@ function formatVector(value: Vector3): string {
  *
  * ## Axis convention
  *
- * `BeltSpeed` is applied along the part's `RightVector` (its local +X, the "right" face in
- * Studio's move tool). A positive speed drags toward the part's right; a negative speed drags
- * toward its left, so the belt can be reversed without re-rotating anything. Deriving the vector
- * from `CFrame` rather than a world axis is what makes a rotated belt drag in the rotated
- * direction. The prompt suggested `-RightVector`; its own parenthetical ("drags toward the part's
- * right") describes `+RightVector`, so `+RightVector` is what the parenthetical means and what is
- * implemented.
+ * **Along-belt is the part's `RightVector`, which is world X.** For a belt whose long axis is X — the only belt this scene
+ * has — `RightVector` is the **long** axis, not the lateral one; that naming trap is the single easiest way to write a ball
+ * that moves sideways, and it is spelled out in full at `BallSpawnerService.stepBallSpeeds`. Lateral is world Z, and the
+ * only thing in the tree that touches it is the decorative weave.
  *
- * The belt is deliberately passive about everything else: it never reskins, resizes, repositions
- * or re-anchors a part, and it ignores anything that is not tagged. It does write three things —
- * `BeltSpeed`, once and only when absent; `CanCollide = false`, because the moving slab is the
- * collision surface; and one child, the slab itself. The `BeltSpeed`-only-when-absent rule is
- * explained at the top of `shared/attributes.ts`.
+ * **The reference speed is applied nowhere** — there is no surface velocity, no constraint and no drag. `BeltSpeed` defines
+ * the comparison in `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED`, and `BallSpawnerService` turns the difference into motion:
+ * equal holds station, below drifts toward the **back** (`+X`, toward elimination), above drifts toward the **front**
+ * (`-X`, toward spawn). A **negative** `BeltSpeed` flips the comparison's sign, so every ball at rest drifts toward the
+ * front instead — the belt "reversed" without re-rotating the part.
  *
- * If the part is rotated at runtime the slab is not rebuilt and the constraint axis is not
- * recomputed — the brief defines this service as reacting to a tag and one attribute. Recomputing on
- * `CFrame` change would be one extra connection per belt if a later slice starts moving belts around.
+ * Deriving the axis from `CFrame` rather than a world axis is what makes a rotated belt work: the comparison and the
+ * motion both follow the part's own frame.
+ *
+ * The belt is deliberately passive about everything else: it never reskins, resizes, repositions or re-anchors a part, and
+ * it ignores anything that is not tagged. It does write three things — `BeltSpeed`, once and only when absent;
+ * `CanCollide = false`; and one child, the static floor slab the ball actually rests on. The `BeltSpeed`-only-when-absent
+ * rule is explained at the top of `shared/attributes.ts`.
+ *
+ * If the part is rotated at runtime the slab is not rebuilt and its own frame is not recomputed — the brief defines this
+ * service as reacting to a tag and one attribute. Recomputing on `CFrame` change would be one extra connection per belt if a
+ * later slice starts moving belts around.
  */
 /**
  * One moving collider's worth of state, so `unbind` can dismantle exactly what `bind` created and the
@@ -571,6 +576,11 @@ export class TreadmillService implements OnStart {
 		this.ensureSurface(part);
 		this.publishVisualSpeed(speed);
 
+		// **`origin` and `rightVector` are the two numbers a reader needs to orient everything else.** `origin` is the
+		// belt's **geometric centre**, not its front edge, so every `local=` field in the tree (which is
+		// `PointToObjectSpace` against this part) is measured from the middle: code-frame X runs `-28 .. +28` and Z runs
+		// `-6 .. +6` for this scene's belt, and user-frame is `+28` on X and `+6` on Z. `rightVector` is the **along-belt**
+		// axis — world `+X` here — not the lateral one; the naming trap is spelled out at `BallSpawnerService.stepBallSpeeds`.
 		print(
 			`[Treadmill] ${reason} "${part.GetFullName()}" size=${formatVector(part.Size)} origin=${formatVector(part.Position)} rightVector=${formatVector(part.CFrame.RightVector)} BELT_SPEED=${formatNumber(this.getReferenceBeltSpeed())} BELT_VISUAL_SPEED=${formatNumber(speed)} CanCollide=${tostring(part.CanCollide)}`,
 		);
@@ -681,6 +691,18 @@ export class TreadmillService implements OnStart {
 		return undefined;
 	}
 
+	/**
+	 * The belt's `RightVector`, which for this scene's belt is **world `+X` — the along-belt axis, not the lateral one.**
+	 *
+	 * The name is a trap and this is the second place it is warned about: `RightVector` is the part's local `+X`, and a
+	 * belt's long axis *is* `+X`, so "right" here means "down the belt toward the back edge", not "across the belt".
+	 * Writing `-relative` along it (see `stepBallSpeeds`, which carries the full statement) is what turns a boost into
+	 * motion toward the front and decay into motion toward the back.
+	 *
+	 * Callers: `BallSpawnerService.stepBallSpeeds` (the along-belt write) and every `BALL_SPEED` log field, which measures
+	 * a ball's along-belt velocity as a dot product with this vector. It is the only read of this getter in the tree, which
+	 * is why it survived item 94's deletion of the one handler that used it for something else.
+	 */
 	public getBeltRightVector(): Vector3 {
 		for (const [belt] of this.surfaces) {
 			if (belt.Parent !== undefined) {

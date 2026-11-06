@@ -187,62 +187,6 @@ export const BELT_SURFACE_THICKNESS = 0.1;
 export const BELT_SURFACE_LIP = 1;
 
 /**
- * **Placeholder.** Whether a ball touching a `TreadmillWall`-tagged part is pushed forward.
- *
- * Single switch so the assist can be turned off without deleting the handler or the constants.
- */
-export const WALL_ASSIST_ENABLED = true;
-
-/**
- * **Placeholder.** Forward velocity added per ball-wall contact event, in studs/s.
- *
- * ## The shape this belongs to
- *
- * One `Touched` connection per ball, a tag filter, a convergent check against a target, and a single velocity write, with
- * no clock. That shape was borrowed from the ball-ball handler that used to sit above this one — the wall spent three
- * rounds on bespoke designs (a cooldown-gated impulse, then a `VectorForce`) and neither produced observable motion — and it
- * is kept now that the original is gone (item 92), because it is the shape that works on this kind of event, not because it
- * has a parent. The constant is deliberately a small per-event nudge that the convergence check bounds, never a rate.
- *
- * ## The arithmetic of 1
- *
- * The per-event delta is `min(1, WALL_ASSIST_TARGET_SPEED - v)`, so from rest a ball needs 8 events to
- * reach the target. How much wall that is depends entirely on how often `Touched` re-fires during
- * sustained contact, and that rate is **not under this code's control**:
- *  - at ~10 events/s (one per physics-decimated contact step) that is `10` studs/s^2, reaching 8 in
- *    `0.8 s` of contact
- *  - at ~60 events/s (one per physics step) it is `60` studs/s^2, reaching 8 in `0.13 s` ? fast enough
- *    to look like the impulse this replaced
- *
- * So `1` is a `Placeholder` in the honest sense: the *outcome* is fixed by the target, but the *rate*
- * is emergent. If the ride to target turns out too sharp, lower this rather than raising the target;
- * the target is the safety bound and the impulse is only the resolution.
- *
- * **A velocity write of this size is the reason the resolution is per-event rather than whole-deficit.** A linear
- * velocity change is large per unit compared with the angular one the deleted handler wrote, and a single-event jump
- * straight to `8` studs/s is exactly the "not a push" behaviour the force round was trying to fix.
- */
-export const WALL_ASSIST_IMPULSE = 1;
-
-/**
- * **Placeholder.** Forward speed the wall will not push a ball past, in studs/s.
- *
- * **Below `BeltSpeed = 10`, deliberately.** A wall cannot plausibly explain a ball outrunning the
- * surface carrying it, and anything above belt speed would make the wall a motor.
- *
- * This is the constant that makes the assist bounded, and it is what allowed the cooldown to be
- * deleted. The check runs per contact event: once `v >= 8` the handler returns without writing, so a
- * ball pressed against a wall forever produces zero further change. The bound is on the *outcome*, not
- * on the event rate, which is why an unknown `Touched` frequency cannot produce a runaway.
- *
- * History, kept because it explains why the number survived two mechanism changes: it was introduced
- * to bound a per-firing impulse, deleted by the round that tried a constant `VectorForce` (which has no
- * ceiling of its own and would have reached `50` studs/s in ten seconds), and reinstated here because
- * the convergent velocity delta needs exactly the same bound.
- */
-export const WALL_ASSIST_TARGET_SPEED = 8;
-
-/**
  * **Placeholder.** Seconds between round ticks.
  *
  * This is the cadence of `RoundService.onTick` and of the elimination check, and it is the API future
@@ -533,16 +477,17 @@ export const PICKUP_SIZE = new Vector3(2, 1, 2);
  *
  * ## Why each bound exists
  *
- * `-18` is the far side, and it sits **5 studs in front of where a ball spawns** (local `-23`). Balls drift
- * toward `+X`, so a pickup behind the spawn line would be behind every ball for its whole life ? a marker that
- * can never be touched is worse than no marker, because it looks like content.
+ * `-18` is the far side, and it sits **5 studs in front of where a ball spawns** (code-frame `-23`, user-X `5`). Balls
+ * drift toward `+X` — toward the back, i.e. toward elimination — so a pickup behind the spawn line would be behind every
+ * ball for its whole life: a marker that can never be touched is worse than no marker, because it looks like content.
  *
- * `+23` is the near side, chosen to stop well short of the exit at local `+28`. A ball's drift accelerates as
- * `BALL_SPEED` decays, so a pickup in the last few studs would only be collected after the ball had already
+ * `+23` is the near side, chosen to stop well short of the exit at code-frame `+28` (user-X `56`). A ball's drift
+ * accelerates as `BALL_SPEED` decays, so a pickup in the last few studs would only be collected after the ball had already
  * committed to leaving the belt.
  *
- * Both ends are inside the belt's own `-28 .. +28`, so a triangle is always on the surface rather than floating
- * past an end. The lane (`Z`) is not random: it is read from the bound spawner parts, so every round covers
+ * **Both numbers are code-frame X**, from `PointToObjectSpace` with the belt's centre as origin; user-frame they are `10`
+ * and `51`. Both ends are inside the belt's own code-frame `-28 .. +28`, so a triangle is always on the surface rather than
+ * floating past an end. The lane (`Z`) is not random: it is read from the bound spawner parts, so every round covers
  * every lane a ball can spawn in.
  */
 export const PICKUP_X_MIN = -18;
@@ -589,38 +534,63 @@ export const BALL_SPEED_START = DEFAULT_BELT_SPEED;
  * - `BALL_SPEED > BELT_SPEED` -> positive -> the ball drifts **forward**, toward the spawn edge, i.e. away
  *   from the exit.
  *
- * Because every ball starts at the reference speed and only ever decays, the drift is always backward and
- * every ball is eventually eliminated unless a pickup tops it up. A rate of `0.3` means the 10 studs/s of
- * headroom takes about 33 s to spend, and the drift is quadratic (`v = RATE * t`), so most of the travel
- * happens late ? the ball hangs near the spawn end for the first half of its life and then accelerates away.
+ * Because every ball starts at or above the reference speed and only ever decays, the drift is always backward and
+ * every ball is eventually eliminated unless a pickup tops it up. A rate of `0.1` means the 10 studs/s of headroom takes
+ * about 100 s to spend, and the drift is quadratic (`v = RATE * t`), so most of the travel happens late — the ball hangs
+ * near the spawn end for the first half of its life and then accelerates away.
  *
  * Decay toward **zero**, not toward some terminal value: a terminal value would be an equilibrium a ball could
  * sit at forever, and a race where a ball can survive indefinitely is not a race. Zero is the floor that makes
  * every ride finite.
  */
-export const BALL_SPEED_DECAY_RATE = 0.3;
+export const BALL_SPEED_DECAY_RATE = 0.1;
 
 /**
- * **Placeholder.** How far a ball's own starting speed may vary from `BALL_SPEED_START`, in studs/second.
+ * **Placeholder.** How far a ball's own starting speed may vary **above** `BALL_SPEED_START`, in studs/second.
  *
  * ## Why the start needs to differ at all
  *
  * Every ball shared one curve: `BALL_SPEED` decayed from the same `BALL_SPEED_START` at the same
- * `BALL_SPEED_DECAY_RATE`, and the only per-ball randomness was the lateral weave - which does not change *when*
+ * `BALL_SPEED_DECAY_RATE`, and the only per-ball randomness was the lateral weave — which does not change *when*
  * a ball reaches the exit edge. A round therefore resolved as a stampede: sixteen balls spawned together crossed
  * the edge inside two seconds of each other and the round ended on the first wave, so the winner was decided by
  * spawn order rather than by anything that happened during the ride.
  *
- * `1` against `BALL_SPEED_START = 10` gives each ball a start in `9 .. 11`, i.e. an initial `RELATIVE_SPEED` in
- * `-1 .. +1` against a belt at `10`. That is a ~2 stud/s spread across the field, which at
- * `BALL_SPEED_DECAY_RATE = 0.3` is roughly a 7 s spread in exit time - enough for the field to string out and for
- * a pickup to matter.
+ * `1` against `BALL_SPEED_START = 10` gives each ball a start in `10 .. 12`, i.e. an initial `RELATIVE_SPEED` in
+ * `0 .. +2` against a belt at `10`. That is the same 2 stud/s spread the two-sided draw used to give, which at
+ * `BALL_SPEED_DECAY_RATE = 0.1` is a 20 s spread in exit time — enough for the field to string out and for a pickup to
+ * matter.
  *
- * **The cost, stated:** `RELATIVE_SPEED` is no longer exactly `0` on the first `Playing` tick for every ball;
- * only the ball that drew `10` gets a neutral start. That was a requirement of an earlier round, and it is
- * deliberately traded here for a race that is not a tie.
+ * ## Why the spread is now one-sided
+ *
+ * It used to be `10 +- 1`, so half the field launched *below* the reference and drifted toward the exit from the first
+ * frame. That cost nothing mechanically, but it meant a ball could be losing ground for its whole life without ever being
+ * at the speed the wind-boost effect represents — the effect would simply never play for that half of the field. Drawing
+ * upward instead keeps the spread and guarantees every ball **launches at or above the reference**, so `Boosted` is
+ * `true` at spawn for the whole field and the effect has a state to show from the green light.
+ *
+ * **The cost, stated:** `RELATIVE_SPEED` is never negative at spawn, so no ball starts by sliding backward; the losing
+ * half of a ride now always begins *after* a boosted opening rather than for part of the field at `t = 0`.
  */
 export const BALL_SPEED_START_JITTER = 1;
+
+/**
+ * **Placeholder.** How far below the reference a ball must fall before `Boosted` is cleared, in studs/second.
+ *
+ * The attribute has two edges and they are deliberately not the same number. A ball is `Boosted` at
+ * `BALL_SPEED >= BELT_SPEED` and stops being `Boosted` once it is more than this far below; the gap is what keeps a
+ * ball that decays *through* the reference from flipping the flag on every frame as it crosses — the effect it drives
+ * would strobe. Inside the band the flag keeps whatever it had.
+ *
+ * **The arithmetic at the current decay rate.** `BALL_SPEED_DECAY_RATE = 0.1`, so the band is `0.5 / 0.1 = 5 s` of tail
+ * after a ball crosses the reference, and the boosted window runs from the launch speed: a ball that drew `12` plays the
+ * effect from `12` down to `9.5`, i.e. `(12 - 9.5) / 0.1 = 25 s`; one that drew the minimum `10` plays for `5 s`. Both
+ * are a substantial fraction of a ride and neither is a flicker, which is what the number is choosing.
+ *
+ * `0.5` is five ticks' worth of decay (the loop runs on `Heartbeat`), which is enough that a single stalled frame cannot
+ * cross the band, and small enough that the flag still tracks the ball rather than lagging the ride.
+ */
+export const BOOST_HYSTERESIS = 0.5;
 
 /** **Placeholder.** The floor `BALL_SPEED` decays to. Zero, because a negative ball speed is meaningless. */
 export const BALL_SPEED_MIN = 0;
@@ -671,40 +641,49 @@ export const BOOST_TARGET_BALL_SPEED = 12;
  *
  * ## Why this exists at all, and why it is decorative
  *
- * Under the reference-speed model a ball's motion is a straight line along the belt's `RightVector`: the
- * along-belt component is written from `BALL_SPEED` and nothing else acts on it. Correct, and visually dull -
- * a row of balls slides like beads on a rail. This adds a sideways weave so a ball "has some momentum of its
- * own", which is the impression the game wants and which nothing in the model provides.
+ * Under the reference-speed model a ball's motion is a straight line along the belt's `RightVector` (world X, the
+ * **along-belt** axis — `RightVector` is not lateral here, see `stepBallSpeeds`): the along-belt component is written from
+ * `BALL_SPEED` and nothing else acts on it. Correct, and visually dull — a row of balls slides like beads on a rail. This
+ * adds a sideways weave so a ball "has some momentum of its own", which is the impression the game wants and which nothing
+ * in the model provides.
  *
- * **It is a decoration, not physics.** There is no lateral force, no contact, no friction and no cause: the
- * term is written straight into the velocity every tick, exactly like the along-belt one. That has to be said
- * plainly because the belt is a reference number rather than a surface (item 18) - there is nothing here for a
- * sideways force to come from.
+ * **The weave is on world Z** — the belt's local `+Z`, which is `RightVector:Cross(UpVector)`. Positive Z is the viewer's
+ * right from the front looking toward the back (quad 1); negative Z is their left (quad 4).
  *
- * `0.5` studs/s across a ride of ~18 s is roughly 9 studs of lateral travel on a 12-stud belt, so a ball crosses
- * the middle several times per ride: visible, but slow enough not to look thrown.
+ * **It is a decoration, not physics.** There is no lateral force, no contact, no friction and no cause: the term is
+ * written straight into the velocity every tick, exactly like the along-belt one. That has to be said plainly because the
+ * belt is a reference number rather than a surface (item 18) — there is nothing here for a sideways force to come from.
+ *
+ * `0.05` studs/s across a ride of ~18 s is roughly `0.9` studs of lateral travel on a 12-stud belt — a slow drift rather
+ * than a visible crossing, corrected by the reversals `LATERAL_BOUND` forces. (This docblock said `0.5` and "9 studs"
+ * until item 93; the constant has been `0.05` for longer than either number was true.)
  */
 export const Z_DRIFT_SPEED = 0.05;
 
 /**
- * **Placeholder.** The furthest a ball's centre may wander from the belt's centreline, in the belt's local `Z`,
- * in studs.
+ * **Placeholder.** The furthest a ball's centre may wander from the belt's centreline, in studs of **code-frame Z**.
  *
- * The belt is 12 wide, so local `Z` runs `-6 .. +6` and a ball of radius 0.5 is fully on the surface within
- * `+-5.5`. `4` leaves 1.5 studs of margin on each side - far more than one tick of overshoot at 0.5 studs/s.
- * The reversal is a logic test, not a physical wall, so the bound has to sit far enough inside the geometry that
- * the ball never looks like it should have fallen off.
+ * Code-frame Z is belt-local `Z` from `PointToObjectSpace`, centred on the belt: the belt is 12 wide, so it runs `-6` to
+ * `+6` and a ball of radius 0.5 is fully on the surface within `+-5.5`. In the **user frame** that is `0 .. 12`, so this
+ * bound keeps a ball between user-Z `4` and `8` — never within 4 studs of either side edge. `2` leaves 3.5 studs of
+ * margin on each side, far more than one tick of overshoot at 0.05 studs/s.
+ *
+ * **Positive code-frame Z is the viewer's right** from the front looking toward the back (quad 1); negative is their left
+ * (quad 4). The bound is symmetric about the centreline, so a ball weaves into both quads.
+ *
+ * The reversal is a logic test, not a physical wall, so the bound has to sit far enough inside the geometry that the ball
+ * never looks like it should have fallen off.
  */
 export const LATERAL_BOUND = 2;
 
 /**
- * **Placeholder.** The smallest distance from the centreline the weave can reverse at, in studs.
+ * **Placeholder.** The smallest distance from the centreline the weave can reverse at, in studs (code-frame Z).
  *
- * **Without this the weave degenerates.** A bound sampled uniformly from `-4 .. +4` lands near zero often enough
- * to matter, and a ball reversing at `0.02` studs flips direction almost every tick - it vibrates in place
- * instead of weaving. Sampling the *magnitude* from `LATERAL_BOUND_MIN .. LATERAL_BOUND` and giving it the sign
- * of the current direction removes that case entirely, and an asymmetric weave (crossing from `+3.2` to `-1.6`)
- * reads as more natural than a symmetric one anyway.
+ * **Without this the weave degenerates.** A bound sampled uniformly from `0 .. LATERAL_BOUND` lands near zero often enough
+ * to matter, and a ball reversing at `0.02` studs flips direction almost every tick — it vibrates in place instead of
+ * weaving. Sampling the *magnitude* from `LATERAL_BOUND_MIN .. LATERAL_BOUND` and giving it the sign of the current
+ * direction removes that case entirely, and an asymmetric weave (crossing from `+2` to `-1`) reads as more natural than a
+ * symmetric one anyway.
  */
 export const LATERAL_BOUND_MIN = 1;
 

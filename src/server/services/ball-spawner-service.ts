@@ -5,6 +5,7 @@ import {
 	BELT_SPEED_ATTRIBUTE,
 	DEFAULT_BELT_SPEED,
 	DEFAULT_MAX_LIVE_BALLS,
+	BOOSTED_ATTRIBUTE,
 	MARKER_LOCAL_POSITION_ATTRIBUTE,
 	MARKER_LOCAL_RIGHT_ATTRIBUTE,
 	MARKER_LOCAL_UP_ATTRIBUTE,
@@ -43,11 +44,9 @@ import {
 	BALL_TEXTURE_ASSET,
 	BALL_TEXTURE_OFFSET_RANGE,
 	BALL_TEXTURE_OFFSET_RANGE_V,
+	BOOST_HYSTERESIS,
 	LATERAL_BOUND,
 	LATERAL_BOUND_MIN,
-	WALL_ASSIST_ENABLED,
-	WALL_ASSIST_IMPULSE,
-	WALL_ASSIST_TARGET_SPEED,
 	Z_DRIFT_SPEED,
 } from "shared/tuning";
 import { TreadmillService } from "./treadmill-service";
@@ -484,19 +483,6 @@ export class BallSpawnerService implements OnStart {
 	private readonly startSpeeds = new Map<BasePart, number>();
 
 	/**
-	 * The separate `Touched` connection each ball holds for wall contacts.
-	 *
-	 * One map, one handler. A ball's `Touched` signal is shared by three independent listeners in this tree — the powers'
-	 * collision handler in `server/powers`, this wall assist, and the temporary observation probe — and each holds its own
-	 * connection so any one of them can be removed without touching the others; item 92 removed a fourth and
-	 * needed no change to the rest.
-	 *
-	 * The cost is that `releaseWallAssist` is called in each of the two death paths, which is cheaper to read than a
-	 * tagged union of handlers in one map.
-	 */
-	private readonly wallAssistConnections = new Map<BasePart, RBXScriptConnection>();
-
-	/**
 	 * Whether a round is in progress, and therefore whether the manual `1` path is live.
 	 *
 	 * Set only by `RoundService`. Defaults to `false` so a server that never sees a round cannot be
@@ -687,7 +673,7 @@ export class BallSpawnerService implements OnStart {
 			}
 
 			print(
-				`[Spawner] round start: ${seeded} ball(s) at BALL_SPEED=${formatNumber(BALL_SPEED_START)}+-${formatNumber(BALL_SPEED_START_JITTER)}`,
+				`[Spawner] round start: ${seeded} ball(s) at BALL_SPEED=${formatNumber(BALL_SPEED_START)}+0..${formatNumber(2 * BALL_SPEED_START_JITTER)}`,
 			);
 			return;
 		}
@@ -697,9 +683,17 @@ export class BallSpawnerService implements OnStart {
 		// as "still racing, just not moving" in any log line or future consumer. Zeroing it makes the stopped
 		// state explicit, which is the same reason `Waiting` sets the belt to zero. `setRoundActive(true)`
 		// restores it, so this is a pause rather than a one-way reset.
+		//
+		// **`Boosted` is re-evaluated by the same function the tick uses, not written a second way.** The loop that
+		// normally settles it stops the moment the round does, so a ball frozen at `Boosted = true` would keep its wind
+		// trail for the whole of `PostGame` — the effect outliving the state it reports. Calling `writeBoosted` with the
+		// speed being written (`BALL_SPEED_MIN`) and the *reference* belt speed is the same question asked once more, and
+		// it answers `false`, which keeps the attribute to one writer with two callers.
+		const referenceBeltSpeed = this.treadmill.getReferenceBeltSpeed();
 		for (const ball of this.liveBalls) {
 			if (ball.Parent !== undefined) {
 				ball.SetAttribute(BALL_SPEED_ATTRIBUTE, BALL_SPEED_MIN);
+				this.writeBoosted(ball, BALL_SPEED_MIN, referenceBeltSpeed);
 			}
 		}
 	}
@@ -1063,14 +1057,18 @@ export class BallSpawnerService implements OnStart {
 		// "how many entries are in an array this service happens to remember".
 		CollectionService.AddTag(ball, TAGS.ball);
 
-		// **Each ball starts at its own speed.** Without this every ball followed one curve from one constant and
-		// the whole field crossed the exit edge in a single wave, so the round was decided by spawn order rather
-		// than by the ride. See `BALL_SPEED_START_JITTER` for the arithmetic and for the cost: `RELATIVE_SPEED` is
-		// no longer exactly zero at the green light for every ball.
+		// **Each ball starts at its own speed, drawn upward only.** Without a per-ball start every ball followed one curve
+		// from one constant and the whole field crossed the exit edge in a single wave, so the round was decided by spawn
+		// order rather than by the ride. See `BALL_SPEED_START_JITTER` for the arithmetic.
+		//
+		// **The draw is one-sided on purpose** (`10 .. 12`, not `10 +- 1`): a ball that launched below the reference would
+		// be losing ground from its first frame, which is not wrong mechanically but leaves the wind-boost effect with
+		// nothing to show for that ball at all. Launched at or above the reference, every body sets `Boosted` on its first
+		// tick and the effect has a state to represent from the green light.
 		//
 		// The value is remembered in `startSpeeds` because `setRoundActive(true)` restores it at `Playing` entry,
 		// and re-drawing there would hand a ball a different start from the one it was born with.
-		const startSpeed = BALL_SPEED_START + (math.random() * 2 - 1) * BALL_SPEED_START_JITTER;
+		const startSpeed = BALL_SPEED_START + math.random() * 2 * BALL_SPEED_START_JITTER;
 		this.startSpeeds.set(ball, startSpeed);
 		ball.SetAttribute(BALL_SPEED_ATTRIBUTE, startSpeed);
 
@@ -1084,11 +1082,6 @@ export class BallSpawnerService implements OnStart {
 		// markers replicate as separate child-creation events rather than arriving with the ball; at three
 		// parts per spawn that is acceptable, and correctness wins.
 		this.attachBallMarkers(ball, entry);
-
-		// The wall assist, and the only remaining per-ball `Touched` connection this service owns. It is a separate
-		// connection from the powers' collision handler on purpose: the two answer different tags, and either can be
-		// removed without the other — item 92 deleted a third and needed no change here.
-		this.attachWallAssist(ball);
 
 		// TEMPORARY INSTRUMENTATION. Before `liveBalls.push`, so the spawn line always precedes any
 		// observation of this ball; the observation loop only ever sees balls that already logged.
@@ -1254,38 +1247,6 @@ export class BallSpawnerService implements OnStart {
 	// #region the reference-speed model
 
 	/**
-	 * Decays every ball's speed and hands the engine a velocity derived from it.
-	 *
-	 * ## The model, for a reader who has not seen the brief
-	 *
-	 * The belt is **not physical any more**. `BELT_SPEED` (`DEFAULT_BELT_SPEED`, 10) is a fixed reference
-	 * number. Each ball carries `BALL_SPEED` as an attribute, starts at `BALL_SPEED_START` (the same 10), and
-	 * decays toward `BALL_SPEED_MIN` at `BALL_SPEED_DECAY_RATE`.
-	 *
-	 * Every tick the ball's velocity **along the belt** is set to `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED`:
-	 * zero at the start (the ball holds station), negative once decay has begun (the ball slides toward the
-	 * exit edge), and positive only after a pickup (the ball drifts back toward the spawn edge, away from
-	 * elimination). The sign is the whole design: **negative loses ground, positive gains it.**
-	 *
-	 * ## Why the velocity is *set* and the other components are preserved
-	 *
-	 * `AssemblyLinearVelocity` is replaced only along `RightVector`. The vertical component is left to gravity
-	 * (the ball still has to land, bounce and settle), and the across-belt component is left to collisions, so
-	 * a ball knocked sideways keeps drifting sideways. Writing a full velocity vector every tick would flatten
-	 * both, and a ball that could not fall would never settle onto the floor slab.
-	 *
-	 * ## Why the attribute and not a service-side map
-	 *
-	 * The attribute is on the body, replicates with it, and dies with it ? no cleanup on any of the four death
-	 * paths, and a pickup (a different service) can raise it without an API call into this one.
-	 *
-	 * ## `playbackSpeed` clamp
-	 *
-	 * Only balls tagged `Ball` and still parented are touched. The live array already holds exactly those, and
-	 * the `Parent` test catches a body destroyed by `RoundService` between two frames, which would otherwise
-	 * have its velocity written after the engine had already removed it.
-	 */
-	/**
 	 * A fresh weave state: a direction, and a bound of that sign some way out from the centreline.
 	 *
 	 * The magnitude is drawn from `LATERAL_BOUND_MIN .. LATERAL_BOUND` rather than from `-BOUND .. +BOUND`, so a
@@ -1298,6 +1259,71 @@ export class BallSpawnerService implements OnStart {
 		return { direction, bound: direction * magnitude };
 	}
 
+	/**
+	 * Decays every ball's speed and hands the engine a velocity derived from it.
+	 *
+	 * ## The model, for a reader who has not seen the brief
+	 *
+	 * The belt is **not physical any more**. `BELT_SPEED` (`DEFAULT_BELT_SPEED`, 10) is a fixed reference
+	 * number. Each ball carries `BALL_SPEED` as an attribute, starts at `BALL_SPEED_START` (the same 10), and
+	 * decays toward `BALL_SPEED_MIN` at `BALL_SPEED_DECAY_RATE`.
+	 *
+	 * Every tick the ball's velocity **along the belt** is set to `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED`:
+	 * zero at the start (the ball holds station), negative once decay has begun (the ball slides toward the
+	 * back edge), and positive only after a pickup (the ball drifts back toward the front edge, away from
+	 * elimination). The sign is the whole design: **negative loses ground, positive gains it.**
+	 *
+	 * ## Which way is which — the axis, stated once
+	 *
+	 * **Along-belt is world X**, and in this scene the belt's `RightVector` is `+X`. That is the naming trap, and it
+	 * is worth the paragraph: `RightVector` *sounds* lateral and is not. For a part whose long axis is X, `RightVector`
+	 * is the **long** axis, and this tree uses it for exactly that everywhere — this loop, and every log field that
+	 * measures a ball's along-belt velocity as a dot product with it. A reader who assumes "right = lateral" gets the sign of
+	 * `relative` backwards and writes a ball that moves across the belt instead of along it. **Lateral is world Z**,
+	 * and the only code that touches it is the decorative weave below, on `RightVector:Cross(UpVector)` — which for
+	 * `RightVector = +X` is `+Z`.
+	 *
+	 * In this model **`+X` is toward the back** — the exit end, where a ball is eliminated — and **`-X` is toward the
+	 * front**, the spawn end. Decay therefore moves a ball toward the back and a boost moves it toward the front, which
+	 * is why the write below multiplies by `-relative`: a positive `RELATIVE_SPEED` must become motion toward `-X`.
+	 *
+	 * ## The two frames, and why every number here says which
+	 *
+	 * The belt's `Origin` is its **geometric centre**, so `PointToObjectSpace` — the frame behind every `local=` log
+	 * field and every footprint test — measures from the middle of the belt: **code-frame X runs `-28 .. +28` and
+	 * code-frame Z runs `-6 .. +6`** for this scene's 56x1x12 belt. The way a player and the design briefs think about
+	 * the same belt is the **user frame**, measured from the front edge and the left edge: **`user-X = code-X + 28`**
+	 * (so `0` is the very front edge and the belt runs `0 .. 56`) and **`user-Z = code-Z + 6`** (so the belt spans
+	 * `0 .. 12`). **The two offsets are 28 on X and 6 on Z.** A ball spawns at code-frame X `-23` (user-X `5`) and is
+	 * eliminated at code-frame X `+28` (user-X `56`).
+	 *
+	 * From the **front looking toward the back** — the fixed viewpoint these comments use — **positive Z is on the
+	 * viewer's right (quad 1) and negative Z on the viewer's left (quad 4)**. "The belt lives in quads 1 and 4" is that
+	 * statement once the origin is moved to the front-left corner in the user frame; in the code frame the same fact is
+	 * "Z is not centred on zero at the edges, it is centred on the belt".
+	 *
+	 * ## Why the velocity is *set* and the other components are preserved
+	 *
+	 * `AssemblyLinearVelocity` is replaced only along the along-belt axis — only the component on `RightVector`. The
+	 * vertical component is left to gravity (the ball still has to land, bounce and settle), and the lateral component is
+	 * left to collisions, so a ball knocked sideways keeps drifting sideways. Writing a full velocity vector every tick
+	 * would flatten both, and a ball that could not fall would never settle onto the floor slab.
+	 *
+	 * **This loop is the only writer of the along-belt component, and it runs on `Heartbeat`.** Anything else that writes
+	 * `AssemblyLinearVelocity` along `±X` between two ticks is overwritten here before it can accumulate, which is why the
+	 * `BALL_SPEED` attribute is the only lever any other module has over a ball's motion.
+	 *
+	 * ## Why the attribute and not a service-side map
+	 *
+	 * The attribute is on the body, replicates with it, and dies with it — no cleanup on any of the four death paths, and
+	 * a pickup (a different service) can raise it without an API call into this one.
+	 *
+	 * ## What it skips
+	 *
+	 * Only balls still parented are touched. The live array already holds exactly those, and the `Parent` test catches a
+	 * body destroyed by `RoundService` between two frames, which would otherwise have its velocity written after the
+	 * engine had already removed it.
+	 */
 	private stepBallSpeeds(dt: number): void {
 		if (!this.roundActive) {
 			return;
@@ -1332,15 +1358,21 @@ export class BallSpawnerService implements OnStart {
 			}
 
 			const relative = advanced - beltSpeed;
+			this.writeBoosted(ball, advanced, beltSpeed);
 			const velocity = ball.AssemblyLinearVelocity;
 			const along = velocity.Dot(right);
 
-			// ## The decorative weave
+			// ## The decorative weave — lateral, world Z
 			//
-			// Axis, and why it is not `LookVector`: a `CFrame`'s `LookVector` is its **-Z** axis, so the belt's
-			// local **+Z** is `RightVector:Cross(UpVector)`. Using `LookVector` would weave toward local -Z, which
-			// works but disagrees with every `localZ` in the log and with `PointToObjectSpace`, so the two would
-			// need negating against each other forever. `Cross` keeps the term and the measurement in one frame.
+			// Axis, and why it is not `LookVector`: a `CFrame`'s `LookVector` is its **-Z** axis, so the belt's local
+			// **+Z** is `RightVector:Cross(UpVector)` (for `RightVector = +X` that is world `+Z`). Using `LookVector`
+			// would weave toward local -Z, which works but disagrees with every `localZ` in the log and with
+			// `PointToObjectSpace`, so the two would need negating against each other forever. `Cross` keeps the term and
+			// the measurement in one frame.
+			//
+			// **Positive Z is the viewer's right from the front looking toward the back**, so `direction = +1` weaves
+			// toward quad 1 and `-1` toward quad 4. The bound below is compared in code-frame Z, which is centred on the
+			// belt: `localZ` runs `-6 .. +6`, and the weave stays within `LATERAL_BOUND` of the centreline.
 			const lateralState = this.lateral.get(ball);
 			if (lateralState !== undefined && beltFrame !== undefined) {
 				const localZ = beltFrame.PointToObjectSpace(ball.Position).Z;
@@ -1360,95 +1392,65 @@ export class BallSpawnerService implements OnStart {
 				continue;
 			}
 
-			// Replace only the along-belt component: `velocity - right*along` is everything else (gravity and
-			// sideways drift), and adding `right*relative` back in swaps the one component this model owns.
-			// **`-relative` because the belt's `RightVector` runs front to back.** `RightVector` is `+X`, and in this
-			// model `+X` is the *back* edge (local `+28`, furthest from the origin); `-X` is the front, where the
-			// ball spawns. A positive `RELATIVE_SPEED` means the ball is faster than the belt and must gain ground
-			// toward the **front**, which is `-RightVector` in world space. So the multiply is negated: the sign is
-			// the model's, not the world's.
+			// Replace only the along-belt component: `velocity - right*along` is everything else (gravity and lateral
+			// drift), and adding `right*relative` back in swaps the one component this model owns.
+			//
+			// **`-relative` because `RightVector` points toward the back.** `RightVector` is `+X`, and in this model `+X`
+			// is toward the back (code-frame `+28` at the edge, user-X `56`); `-X` is toward the front, where the ball
+			// spawns (code-frame `-23`, user-X `5`). A positive `RELATIVE_SPEED` means the ball is faster than the
+			// reference and must gain ground toward the **front**, which is `-RightVector` in world space. So the multiply
+			// is negated: the sign is the model's, not the world's. See this method's docblock for the full axis statement.
 			//
 			// Getting this wrong is visible and was: with `+relative`, a ball decaying below belt speed drifted to
-			// local `X = -28` and left the belt at the front after ~11 s, i.e. it exited at the edge it spawned
-			// beside. With the negation it drifts to `+28` and crosses the whole belt.
+			// code-frame `X = -28` and left the belt toward the front after ~11 s, i.e. it exited at the edge it spawned
+			// beside. With the negation it drifts to code-frame `+28` and crosses the whole belt.
 			ball.AssemblyLinearVelocity = velocity.sub(right.mul(along)).add(right.mul(-relative));
 		}
 	}
 
-	// #endregion
-
-	// #region wall assist
-
 	/**
-	 * Connects a ball's `Touched` signal to the wall-add speed handler.
+	 * Settles a ball's `Boosted` attribute from the two numbers this tick already computed.
 	 *
-	 * **The shape here is the one that worked, and it was borrowed from a handler that no longer exists.** Three rounds of
-	 * bespoke wall mechanisms — a cooldown-gated impulse, then a `VectorForce` with `TouchEnded` cleanup — produced no
-	 * observable motion, while the ball-ball handler that used to sit above this one had worked for several rounds on the
-	 * same kind of event (a tagged part touching a ball). The shape that works is: one `Touched` connection per ball, a tag
-	 * filter that returns early, a convergent check against a target, one velocity write, no clock. **The copy outlived the
-	 * original:** item 92 deleted the ball-ball handler because its premise had gone, and this one stays because its
-	 * premise — a wall that should give a shove — is still true.
+	 * ## Why the answer is an attribute rather than a server-side map
 	 *
-	 * The convergence *rate* is the deliberate divergence from what was copied: this adds
-	 * `min(WALL_ASSIST_IMPULSE, deficit)` per event, so a ball ramps over several contacts instead of jumping. That is
-	 * because the user's complaint about the previous velocity write was specifically that a single-frame jump does not
-	 * read as a push. See `WALL_ASSIST_IMPULSE`.
+	 * The effect it drives is built on each **client**, from a cloned asset parented to the ball — and a client cannot read
+	 * server-side state. The attribute replicates with the body, dies with it, and needs no cleanup on any of the four death
+	 * paths, which is the same argument `BALL_SPEED` itself is stored under.
 	 *
-	 * It holds its own connection rather than sharing the powers' collision handler: the two answer to different tags, and
-	 * either can be removed without the other.
+	 * ## Why two thresholds and not one
+	 *
+	 * A single `BALL_SPEED >= BELT_SPEED` test would flip the flag on and off on consecutive frames as a decaying ball
+	 * crossed the reference: `10.001` is boosted, `9.999` is not, and at `0.1` studs/s of decay the ball sits inside that
+	 * +/- one-frame margin for a fifth of a second — long enough to strobe the effect. The band
+	 * (`BOOST_HYSTERESIS`, 0.5 studs/s either side of nothing) means a ball becomes boosted on one confident edge and
+	 * stops on another, and in between it keeps what it had.
+	 *
+	 * ## Why it is written here, on this line, and only on a change
+	 *
+	 * This is the one place that reads `BALL_SPEED` *after* every contributor has landed — the decay, the powers' delta and
+	 * the clamp — so it is the only place that can answer the question correctly. It writes **only when the value actually
+	 * changes**: the attribute replicates, and re-writing the same boolean sixty times a second per ball would be traffic
+	 * carrying no information. The write happens in the same tick as the velocity write below it, so a client that reads
+	 * `Boosted` and the body's velocity in one frame cannot see them disagree.
 	 */
-	private attachWallAssist(ball: BasePart): void {
-		if (!WALL_ASSIST_ENABLED) {
-			return;
+	private writeBoosted(ball: BasePart, speed: number, beltSpeed: number): void {
+		// `undefined` is a body that has not ticked yet; it behaves as `false` until the first write, and inside the band it
+		// stays unset rather than being invented — the spawn draw guarantees the first tick is above the band anyway. The
+		// narrowing is explicit because `GetAttribute` returns `AttributeValue`, not `boolean | undefined`.
+		const raw = ball.GetAttribute(BOOSTED_ATTRIBUTE);
+		const current = typeIs(raw, "boolean") ? raw : undefined;
+
+		let settled = current;
+
+		if (speed >= beltSpeed) {
+			settled = true;
+		} else if (speed < beltSpeed - BOOST_HYSTERESIS) {
+			settled = false;
 		}
 
-		const connection = ball.Touched.Connect((other) => this.applyWallAssist(ball, other));
-		this.wallAssistConnections.set(ball, connection);
-	}
-
-	/**
-	 * Adds forward velocity to a ball that touched a `TreadmillWall`-tagged part.
-	 *
-	 * Convergent, per-event, and clockless — see `WALL_ASSIST_IMPULSE` and `WALL_ASSIST_TARGET_SPEED` for the arithmetic.
-	 * The structure is: filter, look up the belt, read the current state, bail if already at target, apply one bounded
-	 * write.
-	 */
-	private applyWallAssist(ball: BasePart, other: BasePart): void {
-		// A wall, or nothing. Balls, the slab, the belt, the welded markers and players all reach this
-		// handler and must not push the ball forward.
-		if (!other.HasTag(TAGS.treadmillWall)) {
-			return;
+		if (settled !== current && settled !== undefined) {
+			ball.SetAttribute(BOOSTED_ATTRIBUTE, settled);
 		}
-
-		// `nearestBeltTo` on the ball's position, resolved per event rather than captured at spawn: the belt under a ball
-		// is a positional fact, a ball can reach a second belt in a long round, and a stale capture would push along the
-		// wrong axis with no error to show for it. A ball with no belt nearby gets no push, because there is no forward.
-		const belt = this.nearestBeltTo(ball.Position);
-		if (belt === undefined) {
-			return;
-		}
-
-		const forward = belt.CFrame.RightVector;
-		const ballSpeed = ball.AssemblyLinearVelocity.Dot(forward);
-
-		// The convergence gate **is** the gate. There is no cooldown and no timestamp: a ball already at
-		// target produces a non-positive delta on every subsequent `Touched`, so repeated firings during
-		// one continuous contact are no-ops. That is the idempotence, and it is why the per-event
-		// frequency cannot cause a runaway — the bound is on the outcome, not on the event rate.
-		//
-		// `>=` rather than `===`: a ball can arrive already faster than target (a collision, or a target
-		// lowered between builds) and this must never *reduce* speed — that would be the code undoing
-		// motion it did not cause.
-		const delta = math.min(WALL_ASSIST_IMPULSE, WALL_ASSIST_TARGET_SPEED - ballSpeed);
-		if (delta <= 0) {
-			return;
-		}
-
-		// Along `+RightVector` only. No component along Z, which would be a shove into or away from the
-		// wall — the engine's collision response already handled that, and adding to it would turn a
-		// speed giver into an unrequested bounce.
-		ball.AssemblyLinearVelocity = ball.AssemblyLinearVelocity.add(forward.Unit.mul(delta));
 	}
 
 	// #endregion
@@ -1484,7 +1486,6 @@ export class BallSpawnerService implements OnStart {
 				this.ballKillY.delete(ball);
 				this.lateral.delete(ball);
 				this.startSpeeds.delete(ball);
-				this.releaseWallAssist(ball);
 				forgetBallPower(ball);
 				this.forgetDecoy(ball);
 			} else {
@@ -1492,19 +1493,6 @@ export class BallSpawnerService implements OnStart {
 			}
 		}
 		this.liveBalls = surviving;
-	}
-
-	/**
-	 * Drops the wall-assist connection for one ball.
-	 *
-	 * Called from both death paths. `Touched` on a destroyed instance stops firing on its own, so this is not what keeps
-	 * the handler from running — it is what keeps the map from growing by one entry per ball for the lifetime of a server
-	 * session. The same discipline retired a second such map in item 92: a map keyed on bodies has to be cleared wherever a
-	 * body dies, or its size silently tracks the session rather than the live set.
-	 */
-	private releaseWallAssist(ball: BasePart): void {
-		this.wallAssistConnections.get(ball)?.Disconnect();
-		this.wallAssistConnections.delete(ball);
 	}
 
 	private enforceCap(): void {
@@ -1561,7 +1549,6 @@ export class BallSpawnerService implements OnStart {
 		this.lateral.delete(ball);
 		this.startSpeeds.delete(ball);
 		this.forgetDecoy(ball);
-		this.releaseWallAssist(ball);
 		const index = this.liveBalls.indexOf(ball);
 		if (index !== -1) {
 			this.liveBalls.remove(index);
@@ -1608,6 +1595,10 @@ export class BallSpawnerService implements OnStart {
 			return;
 		}
 
+		// **`local=` in this line and every other `local=` field is `PointToObjectSpace`: the code frame, origin at the
+		// belt's centre.** `user-frame X = this.X + 28` (0 is the front edge, so the belt runs 0..56) and
+		// `user-frame Z = this.Z + 6` (0 is one side edge, so the belt runs 0..12). A log that says `local=(-23, _, 0)` is
+		// user `X = 5`, on the centreline. See `stepBallSpeeds` for the full axis statement.
 		const relative = belt.CFrame.PointToObjectSpace(ball.Position);
 		const halfX = belt.Size.X / 2;
 		const halfZ = belt.Size.Z / 2;

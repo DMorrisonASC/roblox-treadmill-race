@@ -22,7 +22,15 @@
  * designer can override any of them by hand without the override being reset on rebind.
  */
 
-/** Attribute on a `TreadmillBelt` part: drag speed in studs/second. Negative reverses the belt. */
+/**
+ * Attribute on a `TreadmillBelt` part: the **reference speed**, in studs/second, along the belt's `RightVector`
+ * (world X — the along-belt axis; `RightVector` is not lateral here, see `BallSpawnerService.stepBallSpeeds`).
+ *
+ * It is a number a ball's own `BALL_SPEED` is **compared against**, not a surface that moves: a ball whose `BALL_SPEED`
+ * equals it holds station, one below it drifts toward the **back** (toward elimination, `+X`), and one above it — after a
+ * pickup — drifts toward the **front** (`-X`, where it spawned). Negative reverses which direction is "with the belt":
+ * `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED` flips sign, so a negative reference sends a ball toward the front at rest.
+ */
 export const BELT_SPEED_ATTRIBUTE = "BeltSpeed";
 
 /** **Placeholder** belt speed in studs/second. A gameplay constant with no other config to derive it from. */
@@ -53,8 +61,27 @@ export const BELT_VISUAL_SPEED_ATTRIBUTE = "BeltSpeedActual";
  * Written by `BallSpawnerService` (seeded at spawn, decayed every tick, zeroed when the round stops) and by
  * `PickupService` (boost). Kept **on the ball** rather than in a service-side map for the same reason the owner
  * is: the body is what gets destroyed and replicated, so a map entry would need cleanup on every death path.
+ *
+ * **A scalar, not a direction.** It is compared against `BELT_SPEED` and the difference — `RELATIVE_SPEED`, along the
+ * belt's `RightVector`, which is world X — becomes the ball's velocity: negative moves it toward the **back** (toward
+ * elimination), zero holds station, positive moves it toward the **front** where it spawned. Nothing here says which way
+ * a ball is pointing; `stepBallSpeeds` derives that every tick from the comparison alone.
  */
 export const BALL_SPEED_ATTRIBUTE = "BALL_SPEED";
+
+/**
+ * Attribute on a ball: whether it is running at or above the belt's reference speed, with hysteresis.
+ *
+ * Written by `BallSpawnerService.stepBallSpeeds` — the one function that already reads both numbers — and by nothing
+ * else. **A client-side effect reads it** (`WindBoostController`) to play a wind trail while a ball is fast, so the
+ * attribute is a replicated fact rather than a second source of truth: the same tick that writes `BALL_SPEED` and the
+ * velocity also settles this flag, and a client reading both in one frame cannot see them disagree.
+ *
+ * `true` at or above the reference, `false` once the ball is more than `BOOST_HYSTERESIS` below it, unchanged in
+ * between. The band is what stops a ball decaying through the reference from strobing the effect on and off across
+ * consecutive frames.
+ */
+export const BOOSTED_ATTRIBUTE = "Boosted";
 
 /**
  * `Radius` is retired. There is deliberately no constant for it below.

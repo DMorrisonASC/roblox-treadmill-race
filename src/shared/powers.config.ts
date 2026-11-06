@@ -22,8 +22,8 @@
  *
  * ## The exchange rate the magnitudes are chosen against
  *
- * `BALL_SPEED` decays at `BALL_SPEED_DECAY_RATE` = 0.3 per second, so **one point of `BALL_SPEED` is about 3.3 seconds of
- * ride**. Every number below is reported against that: "steals 1.0" means "steals the better part of three seconds".
+ * `BALL_SPEED` decays at `BALL_SPEED_DECAY_RATE` = 0.1 per second, so **one point of `BALL_SPEED` is about 10 seconds of
+ * ride**. Every number below is reported against that: "steals 1.0" means "steals giving up ten seconds".
  *
  * ## Design notes — recorded, not enforced
  *
@@ -147,8 +147,8 @@ export const MAGNET_RADIUS = 6;
 /**
  * **Placeholder.** The multiplier applied to a victim's decay while it is inside a `magnet` aura.
  *
- * Two, so a magnet's neighbour loses speed twice as fast — 0.6 per second instead of 0.3, halving its ride from ~33 s
- * to ~17 s while it stays close. Stacking is deliberately not defined: the aura is a flag ("in at least one"), not a
+ * Two, so a magnet's neighbour loses speed twice as fast — 0.2 per second instead of 0.1, halving its ride from ~100 s
+ * to ~50 s while it stays close. Stacking is deliberately not defined: the aura is a flag ("in at least one"), not a
  * sum, because a sum makes magnet balls multiplicative with each other and the second magnet would be worth more than
  * the first.
  */

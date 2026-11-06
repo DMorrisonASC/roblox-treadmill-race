@@ -86,7 +86,7 @@ export type RoundPhase = "Intermission" | "Waiting" | "Playing" | "PostGame";
  * ## Elimination is positional, never event-driven
  *
  * A body is out when its centre leaves the `EliminationZone` part's box. Nothing about the test
- * involves `Touched`, and **`TreadmillWall` is never consulted** — a wall is a guard rail inside the
+ * involves `Touched`, and **no wall is consulted** — a wall is a guard rail inside the
  * play area and a body touching one is still racing. See `isInsideZone` and `settleEliminations`.
  *
  * ## Why the belt ramp is not on the tick

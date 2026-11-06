@@ -223,7 +223,8 @@ export class PickupService implements OnStart {
 			return;
 		}
 
-		// Lanes already occupied by a live pickup, by their belt-local Z. A pickup's lane is a *position*, so
+		// Lanes already occupied by a live pickup, by their **code-frame** belt-local `Z` (centred on the belt's centreline;
+		// user-Z = this + 6). A pickup's lane is a *position*, so
 		// "occupied" is a Z match rather than a slot index - there are no fixed slots any more.
 		const lanesTaken = new Set<number>();
 		for (const pickup of this.live) {
@@ -273,17 +274,17 @@ export class PickupService implements OnStart {
 	 *
 	 * ## Why `X` is random and bounded
 	 *
-	 * **`PICKUP_X_MIN` bounds the far side at the ball's spawn.** Balls spawn at belt-local `X = -23` and drift
-	 * toward `+X`, so a pickup behind `-18` would be behind every ball for its whole life and could never be
-	 * touched - the fixed `-15` cluster had exactly that problem in the other direction, sitting at one spot
-	 * every round.
+	 * **`PICKUP_X_MIN` bounds the far side at the ball's spawn.** Balls spawn at **code-frame** `X = -23` (user-X `5`) and
+	 * drift toward `+X` — toward the back, i.e. toward elimination — so a pickup behind `-18` would be behind every ball for
+	 * its whole life and could never be touched. The fixed `-15` cluster had exactly that problem in the other direction,
+	 * sitting at one spot every round.
 	 *
-	 * **`PICKUP_X_MAX` bounds the near side so a pickup is reachable well before the exit.** A ball's drift
-	 * accelerates as `BALL_SPEED` decays, and a pickup in the last few studs before local `+28` would be
-	 * collected after the ball had already committed to leaving.
+	 * **`PICKUP_X_MAX` bounds the near side so a pickup is reachable well before the exit.** A ball's drift accelerates as
+	 * `BALL_SPEED` decays, and a pickup in the last few studs before **code-frame** `+28` (user-X `56`) would be collected
+	 * after the ball had already committed to leaving.
 	 *
-	 * Both ends are inside the belt's own local `X` range of `-28 .. +28`, so the triangle is always on the
-	 * surface rather than floating past an end.
+	 * Both ends are inside the belt's own code-frame `X` range of `-28 .. +28` (user `0 .. 56`), so the triangle is always
+	 * on the surface rather than floating past an end.
 	 *
 	 * `Y` is the **floor's** top face, not the belt's: the floor is what a ball rests on, so a pickup placed on
 	 * the belt's face would sit inside the floor and below the ball's contact point, where `Touched` may never

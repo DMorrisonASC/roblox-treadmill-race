@@ -32,8 +32,9 @@ repo describes it as one, that document is describing a previous version of the 
 live-sync, so a project-defined belt or spawner would snap back to a hardcoded CFrame every time you
 moved it. Leaving `Workspace` childless means Rojo never touches your parts.
 
-Four things are hand-placed and tagged: a `TreadmillBelt`, a `BallSpawner` per lane, optional
-`TreadmillWall` parts, and an `EliminationZone` around the playable area. Everything else on the belt
+Four things are hand-placed and tagged: a `TreadmillBelt`, a `BallSpawner` per lane, an optional wall, and an
+`EliminationZone` around the playable area. **A wall needs no tag** — it blocks balls as ordinary scene geometry, and the
+only thing that ever looked for a wall tag (an inert "wall assist") was deleted in item 94. Everything else on the belt
 is created by code and destroyed with the round: the ball bodies, their welded markers, one
 frictionless floor just above each belt's top face, the pickup triangles, and the `decoy` twin. Do not
 place those by hand — no service would look for them.
@@ -96,12 +97,23 @@ Studio and it survives re-tagging.
 | `BeltSpeed`       | number, studs/second | **Placeholder** 10      |
 | `BeltSpeedActual` | number, studs/second | by the round, each frame |
 
-The part must be `Anchored` with `CanCollide = true`. **`BeltSpeed` is a reference number, not a
-surface velocity, and nothing is dragged along it.** Each ball sets its own along-belt velocity from
-its `BALL_SPEED` attribute every frame as `BALL_SPEED - BeltSpeed`: zero holds station, below zero
-loses ground toward the exit, above zero gains it back. A positive `BeltSpeed` aims that comparison
-along the part's right (+X), a negative one reverses it, so rotating the belt rotates the race and
-flipping the sign flips the direction — no rebuild needed.
+The part must be `Anchored` with `CanCollide = true`. **Axis semantics, once, for the whole project.** The belt's long
+axis is world **X** and its short axis is world **Z**, and the belt's `RightVector` is world `+X` — the along-belt axis,
+*not* the lateral one, which is the naming trap behind every direction comment in `src/`. Looking from the **front toward
+the back** (view direction `+X`, up `+Y`), **positive Z is on your right (quad 1) and negative Z on your left (quad 4)**;
+the belt spans both because its origin is its centreline in Z. Two frames are in use and every number in this repo says
+which: the **code frame** is `PointToObjectSpace` against the belt, measured from its **geometric centre** — a 56×1×12 belt
+gives code-frame X `-28 .. +28` and Z `-6 .. +6`, and every `local=` field in the logs is in it — while the **user frame**
+is measured from the front edge and one side edge, with **`user-X = code-X + 28`** (so `0` is the very front edge, the belt
+runs `0 .. 56`, and **reaching the back is elimination**) and **`user-Z = code-Z + 6`** (the belt runs `0 .. 12`). A ball
+spawns at code-X `-23` (user-X `5`) and leaves at code-X `+28` (user-X `56`). **Boost moves a ball toward the front
+(`-X`); decay moves it toward the back (`+X`, toward elimination).**
+
+**`BeltSpeed` is a reference number, not a surface velocity, and nothing is dragged along it.** Each ball sets
+its own along-belt velocity from its `BALL_SPEED` attribute every frame: `BALL_SPEED - BeltSpeed` is zero at the
+start (the ball holds station), negative once decay has begun (it slides toward the back), and positive after a
+pickup (it drifts toward the front). A negative `BeltSpeed` flips that comparison, so every ball at rest drifts
+toward the front instead — the belt reversed without re-rotating anything.
 
 `BeltSpeedActual` is the **visual** rate: `RoundService` ramps it from 0 to `BeltSpeed` over
 `BELT_RAMP_SECONDS`, and only `BeltScrollController` reads it. The two numbers were one for one

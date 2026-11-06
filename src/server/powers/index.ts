@@ -870,6 +870,18 @@ function broadcastHit(ball: BasePart, other: BasePart): void {
  * elimination sound (item 87) is about who *caused* a body to leave the belt and `ghost`-vs-plain is exactly the pair that
  * can do it with no transfer at all. It is a write, not a decision — it changes nothing about the transfer.
  *
+ * ## The transfer moves a number, not a direction
+ *
+ * A transfer writes each body's `BALL_SPEED` attribute — a **scalar** — and touches neither velocity nor position. Which
+ * way a ball then travels is decided entirely by `BallSpawnerService.stepBallSpeeds` on the next `Heartbeat`, from
+ * `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED` along the belt's `RightVector` (world X — the **along-belt** axis;
+ * `RightVector` is not lateral here). Toward `+X` is toward the **back**, where a ball is eliminated; toward `-X` is
+ * toward the **front**, where it spawned.
+ *
+ * So a drain *can* change a ball's direction of travel, but only indirectly: once its `BALL_SPEED` falls below the
+ * reference the model turns it around. There is no lateral component and no impulse here — two balls cannot knock each
+ * other sideways through this handler, and a `Vector3` written from here would be overwritten on the next tick.
+ *
  * **Gate (3) is why a pair with no colliding power produces no burst.** That is now a property of this handler alone: since
  * item 87 every body carries a `Touched` connection (see `setPower`), and the colliding-power check moved from the
  * connection to here.
