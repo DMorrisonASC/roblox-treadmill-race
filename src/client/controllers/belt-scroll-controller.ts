@@ -2,7 +2,7 @@ import { CollectionService, RunService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
 import { BELT_VISUAL_SPEED_ATTRIBUTE } from "shared/attributes";
 import { TAGS } from "shared/tags";
-import { BELT_TEXTURE_SCROLL_MULTIPLIER, BELT_TEXTURE_SCROLL_SIGN, BELT_TEXTURE_STUDS_PER_TILE } from "shared/tuning";
+import { BELT_TEXTURE_SCROLL_MULTIPLIER, BELT_TEXTURE_SCROLL_SIGN, BELT_TEXTURE_STUDS_PER_TILE_U } from "shared/tuning";
 
 /**
  * TEMPORARY INSTRUMENTATION. How long the controller waits for the server's `Texture` before giving up
@@ -85,7 +85,7 @@ export class BeltScrollController implements OnStart {
 				// expected result of the property being `NotReplicated`. Logging it distinguishes "no
 				// texture instance" from "texture instance with no image".
 				print(
-					`[BeltScroll] found ${found.GetFullName()} on "${instance.GetFullName()}" uri=${tostring(found.ColorMapContent.Uri)} face=${found.Face.Name} tileU=${found.StudsPerTileU} scrollScale=${BELT_TEXTURE_SCROLL_MULTIPLIER} sign=${BELT_TEXTURE_SCROLL_SIGN}`,
+					`[BeltScroll] found ${found.GetFullName()} on "${instance.GetFullName()}" uri=${tostring(found.ColorMapContent.Uri)} face=${found.Face.Name} tileU=${found.StudsPerTileU} tileV=${found.StudsPerTileV} scrollScale=${BELT_TEXTURE_SCROLL_MULTIPLIER} sign=${BELT_TEXTURE_SCROLL_SIGN}`,
 				);
 				textures.set(instance, found);
 			});
@@ -96,7 +96,7 @@ export class BeltScrollController implements OnStart {
 		}
 
 		print(
-			`[BeltScroll] controller started, belts tagged ${TAGS.treadmillBelt} found=${CollectionService.GetTagged(TAGS.treadmillBelt).size()}`,
+			`[BeltScroll] controller started, belts tagged ${TAGS.treadmillBelt} found=${CollectionService.GetTagged(TAGS.treadmillBelt).size()} scrollScale=${BELT_TEXTURE_SCROLL_MULTIPLIER} sign=${BELT_TEXTURE_SCROLL_SIGN} tileU=${BELT_TEXTURE_STUDS_PER_TILE_U}`,
 		);
 
 		CollectionService.GetInstanceAddedSignal(TAGS.treadmillBelt).Connect(track);
@@ -131,12 +131,16 @@ export class BeltScrollController implements OnStart {
 				let offset =
 					texture.OffsetStudsU + speed * BELT_TEXTURE_SCROLL_MULTIPLIER * BELT_TEXTURE_SCROLL_SIGN * dt;
 
+				// **Wrapped at the U period, because U is the axis being offset.** The tile is no longer square -
+				// `_U` and `_V` differ so the image maps once across the belt - and only the U extent is periodic
+				// along the direction `OffsetStudsU` moves, so `_V` has no business appearing in this arithmetic.
+				//
 				// Double modulo rather than a single one: `%` in Luau keeps the sign of the dividend, so a
 				// reversed belt would drift to a negative offset and the wrap would be wrong. Adding the
 				// period before the second modulo maps any value into `[0, tile)`.
-				offset = offset % BELT_TEXTURE_STUDS_PER_TILE;
+				offset = offset % BELT_TEXTURE_STUDS_PER_TILE_U;
 				if (offset < 0) {
-					offset += BELT_TEXTURE_STUDS_PER_TILE;
+					offset += BELT_TEXTURE_STUDS_PER_TILE_U;
 				}
 
 				texture.OffsetStudsU = offset;

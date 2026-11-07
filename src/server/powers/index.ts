@@ -45,6 +45,8 @@ import {
 	POWER_BADGE_OFFSET_STUDS,
 	POWER_BADGE_TEXT_SIZE,
 	POWER_BADGE_WIDTH,
+	HIT_EFFECT_COOLDOWN_SECONDS,
+	HIT_EFFECT_MIN_ROUND_AGE_SECONDS,
 	POWER_COLLISION_COOLDOWN,
 	powerLabel,
 	ROCKET_MAX_DELAY,
@@ -411,6 +413,55 @@ interface BallPowerState {
  */
 const states = new Map<BasePart, BallPowerState>();
 
+/**
+ * Every body's **hit-effect** bookkeeping: when it last drew a burst, and a monotone id used to order a pair.
+ *
+ * ## Why this is not part of `BallPowerState`
+ *
+ * A power state exists only for a body that *has* a power (`onRoundActive` returns early for a plain ball), and the burst
+ * is no longer the property of a power: since item 111 every contact between two bodies draws one. A plain body needs a
+ * cooldown clock and a serial exactly as much as a bully does, so this map is created lazily in `onBallCollision` for any
+ * body that touches another and is cleared in `forgetBall` like every other per-body map here.
+ *
+ * **`serial` carries no meaning** beyond "this body registered before that one". It exists so exactly one handler of a
+ * two-sided `Touched` speaks for the pair, rather than two bursts landing on the same point.
+ */
+interface ContactEffectState {
+	lastBurstAt: number;
+	readonly serial: number;
+}
+
+const contactEffects = new Map<BasePart, ContactEffectState>();
+
+/**
+ * The next `ContactEffectState.serial`.
+ *
+ * Never reset: it only has to be unique within a session and monotone, and a counter that restarted could hand two live
+ * bodies the same number across a round boundary, which would make the pair ordering below depend on iteration order.
+ */
+let nextBallSerial = 1;
+
+/**
+ * When this round's `Playing` phase began, by `os.clock`. Read only by the burst's age gate.
+ *
+ * A module-level stamp rather than a per-body one because the gate is about the **round**, and a plain body has no
+ * per-body state to hang it on. Set by `setRoundActive(true)` and left alone on exit, so a stale value can never be read:
+ * the gate is behind `powersActive`.
+ */
+let roundStartedAt = 0;
+
+/** Every body that touches another needs an entry; created on first contact, removed by `forgetBall`. */
+function contactEffectOf(ball: BasePart): ContactEffectState {
+	const existing = contactEffects.get(ball);
+	if (existing !== undefined) {
+		return existing;
+	}
+
+	const created: ContactEffectState = { lastBurstAt: -math.huge, serial: nextBallSerial++ };
+	contactEffects.set(ball, created);
+	return created;
+}
+
 /** Bodies whose `power` reaches another without touching it, so a victim can find them without walking every ball. */
 const magnetBalls = new Set<BasePart>();
 const eclipseBalls = new Set<BasePart>();
@@ -506,6 +557,7 @@ function isColliding(power: string): boolean {
  */
 export function forgetBall(ball: BasePart): void {
 	states.delete(ball);
+	contactEffects.delete(ball);
 	magnetBalls.delete(ball);
 	eclipseBalls.delete(ball);
 	collisionConnections.get(ball)?.Disconnect();
@@ -674,6 +726,10 @@ let powersActive = false;
 export function setRoundActive(active: boolean): void {
 	powersActive = active;
 
+	if (active) {
+		roundStartedAt = os.clock();
+	}
+
 	if (!active) {
 		// **The round is over, so every record in here is a fact about a round that has ended.** Nothing reads the map
 		// outside `Playing` — the sound it feeds is gated on the phase — so the only thing keeping the entries would buy
@@ -801,6 +857,47 @@ function formatVector(value: Vector3): string {
 }
 
 /**
+ * Decides whether this contact draws a burst, and if so fires it.
+ *
+ * ## Why this is no longer inside the transfer path
+ *
+ * It used to sit at the transfer's fire site, which quietly made the burst a property of `bully` and `heavy`: every other
+ * contact returned at the colliding-power gate and drew nothing, so a belt of plain bodies collided in silence. The burst
+ * now answers "two bodies touched", which is what a hit effect is for, and the transfer below is untouched - it still
+ * requires a colliding power and still runs on its own cooldown.
+ *
+ * ## The gates, in order
+ *
+ * `powersActive` sits above this in `onBallCollision`, as does the `Ball` tag. Here: **round age** (the spawn pile-up at
+ * the start of a round is not a hit, see `HIT_EFFECT_MIN_ROUND_AGE_SECONDS`) then **this body's burst clock**
+ * (`HIT_EFFECT_COOLDOWN_SECONDS`, not the transfer's) then **lower `serial` of the pair**. That last one exists because
+ * `Touched` fires on both parts and `ball.Position.Lerp(other.Position, 0.5)` is symmetric: without it, one contact draws
+ * two identical bursts on the same point.
+ *
+ * Only the body that fires stamps its clock, so a pair's rate is the firing body's rate. Short-circuiting at the serial
+ * gate therefore leaves the clock to the side that owns the pair, which is the side that would have fired.
+ */
+function maybeBurst(ball: BasePart, other: BasePart): void {
+	const now = os.clock();
+
+	if (now - roundStartedAt < HIT_EFFECT_MIN_ROUND_AGE_SECONDS) {
+		return;
+	}
+
+	const mine = contactEffectOf(ball);
+	if (now - mine.lastBurstAt < HIT_EFFECT_COOLDOWN_SECONDS) {
+		return;
+	}
+
+	if (contactEffectOf(other).serial < mine.serial) {
+		return;
+	}
+
+	mine.lastBurstAt = now;
+	broadcastHit(ball, other);
+}
+
+/**
  * Tells every client where two balls hit, so each plays one burst there.
  *
  * ## The midpoint is a position, not a contact
@@ -812,11 +909,10 @@ function formatVector(value: Vector3): string {
  *
  * ## Why the log line exists
  *
- * One line per fire, and the count is the measurement of coverage: this fires only when one body of the pair has a
- * colliding power **and** there is speed to transfer, so a pair with neither colliding power touches and produces no
- * burst at all. There is no longer a per-contact line in the server log to compare it against — item 92 deleted the one
- * that existed — so the count is read against `[Pickup] collected` and against the test run rather than against a sibling
- * handler in the same file.
+ * One line per burst drawn, which since item 111 is one line per qualifying **contact**: `maybeBurst` decides and this
+ * function only draws. The count is therefore the burst rate rather than the transfer rate - a pair with no colliding power
+ * still draws, and a pair with one still draws only once per `HIT_EFFECT_COOLDOWN_SECONDS`. A contact that leaves no line
+ * is one the firing body had burst from recently, not one that "was not fast enough".
  */
 function broadcastHit(ball: BasePart, other: BasePart): void {
 	const remote = hitEffectRemote;
@@ -851,24 +947,25 @@ function broadcastHit(ball: BasePart, other: BasePart): void {
  * is derived from. A force or an `AssemblyLinearVelocity` written here would be gone in the same frame, which is the one
  * mistake this whole design exists to avoid repeating.
  *
- * ## Why both handlers firing is not double counting
+ * ## Why both handlers firing is right for the transfer and wrong for the effect
  *
- * `Touched` fires on both parts, so a bully-vs-heavy contact runs each side's handler once. That is correct rather than
- * doubled: each handler speaks for its own ball, and the exchange is genuinely two transfers in opposite directions. The
- * asymmetry of `heavy` is what makes the pair net out in its favour, not a suppressed handler.
+ * `Touched` fires on both parts, so a bully-vs-heavy contact runs each side's handler once. For the **transfer** that is
+ * correct rather than doubled: each handler speaks for its own ball, and the exchange is genuinely two transfers in
+ * opposite directions. The asymmetry of `heavy` is what makes the pair net out in its favour, not a suppressed handler.
  *
- * ## The gates the hit effect passes, in order
+ * For the **effect** there is no such argument, and it used to draw two bursts. `broadcastHit` sends
+ * `ball.Position.Lerp(other.Position, 0.5)`, which is symmetric, so the second call fired a second burst at exactly the
+ * same point in the same millisecond - visible in the log as two `[Powers] hit` lines with an identical midpoint followed
+ * by two identical `[HitEffect] burst` lines. The burst is now fired from one deterministic side of the pair, by
+ * `serial`, and both transfers are left alone.
  *
- * `powersActive` (1) → `other` carries the `Ball` tag (2) → this body has state and a colliding power (3) → the per-ball
- * `POWER_COLLISION_COOLDOWN` (4) → the transfer has somewhere to go (5). The burst is fired **after (5)**, and it shares
- * (4) rather than adding a second timer, because (4) is the only thing standing between a resting pair and one burst per
- * physics step. It is not fired for a contact the cooldown refused, and not for one that transfers nothing, for the same
- * reason — see the fire site's own note.
+ * ## The gates the transfer passes, in order
  *
- * **Above all five sits the last-touch record, and it is deliberately not a gate.** It runs between (1)/(2) and (3): every
- * ball-touching-ball contact between two owned bodies is remembered, whatever the powers involved, because the
- * elimination sound (item 87) is about who *caused* a body to leave the belt and `ghost`-vs-plain is exactly the pair that
- * can do it with no transfer at all. It is a write, not a decision — it changes nothing about the transfer.
+ * `powersActive` (1) → `other` carries the `Ball` tag (2) → this body has state and a colliding power (3) → the
+ * per-ball `POWER_COLLISION_COOLDOWN` (4) → the transfer has somewhere to go (5).
+ *
+ * **The burst is not in that chain any more** (item 111). It is decided by `maybeBurst` above gate (3), on its own clock,
+ * for every contact - see there for its gates and for why the two clocks are separate constants.
  *
  * ## The transfer moves a number, not a direction
  *
@@ -899,6 +996,12 @@ export function onBallCollision(ball: BasePart, other: BasePart): void {
 	// is a ball". See `rememberTouch` for why it is here and not beside the fire.
 	rememberTouch(ball, other);
 
+	// **The burst is decided here, above every transfer gate.** It used to sit at the fire site below, which made it a
+	// property of `bully` and `heavy` only - so a belt of plain bodies collided in silence. It is now a property of
+	// *contact*: any body touching another draws one, throttled by `HIT_EFFECT_COOLDOWN_SECONDS` rather than by the
+	// transfer's cooldown. Nothing about the transfer moved; it is still gated on a colliding power below.
+	maybeBurst(ball, other);
+
 	const state = states.get(ball);
 	if (state === undefined || !isColliding(state.power)) {
 		return;
@@ -915,13 +1018,6 @@ export function onBallCollision(ball: BasePart, other: BasePart): void {
 	}
 
 	state.lastCollisionAt = now;
-
-	// **The hit effect fires here, after the cooldown was consumed, and not a line earlier.** The cooldown is stamped only
-	// when a transfer actually happens, so a contact with nothing to transfer — a pair resting at `BALL_SPEED_MIN`, where
-	// `drain` is 0 — never consumes it. Firing above the `amounts` check would therefore emit on every `Touched` re-fire
-	// of a resting pair, and `Touched` re-fires on essentially every physics step while two bodies stay in contact. That
-	// is the stutter the shared cooldown exists to prevent, so the fire goes where the stamp is.
-	broadcastHit(ball, other);
 
 	other.SetAttribute(BALL_SPEED_ATTRIBUTE, math.max(BALL_SPEED_MIN, readSpeed(other) - amounts.drain));
 	ball.SetAttribute(BALL_SPEED_ATTRIBUTE, math.min(BALL_SPEED_MAX, readSpeed(ball) + amounts.gain));

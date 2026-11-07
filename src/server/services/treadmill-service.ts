@@ -11,7 +11,8 @@ import {
 	BELT_SURFACE_LIP,
 	BELT_SURFACE_THICKNESS,
 	BELT_TEXTURE_ASSET,
-	BELT_TEXTURE_STUDS_PER_TILE,
+	BELT_TEXTURE_STUDS_PER_TILE_U,
+	BELT_TEXTURE_STUDS_PER_TILE_V,
 } from "shared/tuning";
 
 /**
@@ -399,14 +400,17 @@ export class TreadmillService implements OnStart {
 		texture.ColorMapContent = Content.fromUri(BELT_TEXTURE_ASSET);
 		texture.Texture = BELT_TEXTURE_ASSET;
 
-		texture.StudsPerTileU = BELT_TEXTURE_STUDS_PER_TILE;
-		texture.StudsPerTileV = BELT_TEXTURE_STUDS_PER_TILE;
+		// **Per axis, not one square value.** `U` runs along the belt's length, `V` across its width, and the
+		// asset is a wide figure: a single square tile squeezed it and repeated it three times across the
+		// belt. See the constants for the arithmetic on both axes.
+		texture.StudsPerTileU = BELT_TEXTURE_STUDS_PER_TILE_U;
+		texture.StudsPerTileV = BELT_TEXTURE_STUDS_PER_TILE_V;
 
 		// Every image slot is read back, plus the part's own render state. The part-side values matter
 		// because a `Texture` on a `Transparency = 1` part is invisible for a reason that has nothing to
 		// do with the texture, and nothing so far has logged them.
 		print(
-			`[Treadmill] texture: properties applied Face=${texture.Face.Name} colorMapContentUri=${tostring(texture.ColorMapContent.Uri)} legacyTexture=${texture.Texture} colorMap=${texture.ColorMap} transparency=${texture.Transparency} | partTransparency=${part.Transparency} partMaterial=${tostring(part.Material)} topSurface=${tostring(part.TopSurface)}`,
+			`[Treadmill] texture: properties applied Face=${texture.Face.Name} colorMapContentUri=${tostring(texture.ColorMapContent.Uri)} legacyTexture=${texture.Texture} colorMap=${texture.ColorMap} studsPerTileU=${texture.StudsPerTileU} studsPerTileV=${texture.StudsPerTileV} transparency=${texture.Transparency} | partTransparency=${part.Transparency} partMaterial=${tostring(part.Material)} topSurface=${tostring(part.TopSurface)}`,
 		);
 
 		texture.Parent = part;

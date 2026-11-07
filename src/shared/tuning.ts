@@ -31,30 +31,49 @@ import { DEFAULT_BELT_SPEED } from "./attributes";
  * **Not verified from here.** Nothing in code can detect a bad asset: a missing id renders as a plain surface, an image that
  * does not tile renders as visible seams, and a tile whose *aspect* is not the aspect the diamonds were drawn at renders as
  * stretched diamonds, because `StudsPerTileU` and `StudsPerTileV` are independent. If the belt looks wrong, the id is one knob
- * and `BELT_TEXTURE_STUDS_PER_TILE` is the other; the code around both is asset-agnostic.
+ * and `BELT_TEXTURE_STUDS_PER_TILE_U` / `_V` are the others; the code around all three is asset-agnostic.
  */
 export const BELT_TEXTURE_ASSET = "rbxassetid://95297464580788";
 
 /**
- * **Placeholder.** Studs covered by one repeat of the belt texture, **on both axes**.
+ * **Placeholder.** Studs covered by one repeat of the belt texture, **per axis**: `_U` along the belt's length (56 studs),
+ * `_V` across its width (12 studs). Both are the belt's size divided by how many repeats the design wants on that axis.
  *
- * One constant feeds `StudsPerTileU` and `StudsPerTileV`, which keeps the tile **square**. That is deliberate rather than
- * lazy: the two are independent properties, and giving them different values stretches whatever image is loaded, so a square
- * tile is the only setting that cannot distort an asset whose aspect nothing here can measure. A design that wants a wide
- * repeating unit has to be drawn wide, and then this becomes two constants.
+ * ## Why these are two constants (item 105)
  *
- * Arithmetic on the length axis: the belt is 56 studs long in code-frame terms (`-28 .. +28`), so **4 studs per tile is 14
- * repeats** along it, and `BeltSpeed = 10` passes 2.5 tiles a second under a fixed point - dense enough to read as continuous
- * motion, slow enough not to shimmer.
+ * They were one square value - `4` - on the theory that a square tile is the only setting that cannot distort an image whose
+ * aspect nothing here can measure. The two-diamond asset settled it the other way. **It was drawn wide, 1920x768, an aspect of
+ * 2.5:1**, so a 4-stud square tile squeezed every diamond to 47% of its natural width *and* repeated the picture three times
+ * across the belt's 12-stud width - the columns a Studio run showed. That docblock ended by predicting this exact split
+ * ("a design that wants a wide repeating unit has to be drawn wide, and then this becomes two constants"), so this is the
+ * predicted move rather than a reversal.
  *
- * **What that means for the two-diamond asset, stated plainly:** with one left diamond and one right diamond per tile, a
- * 14-repeat belt shows **fourteen of each at any instant**. The alternation is a fine rhythm rather than a beat that can be
- * followed - the tread reads as texture rather than as a sequence of passing shapes. Making the beat legible means a larger
- * tile: `14` gives four repeats, `56` gives exactly one diamond of each across the whole belt. **Both stretch the image on the
- * length axis** (3.5x and 14x) unless the asset is drawn with that aspect, which is why this is a decision about the picture
- * rather than a number to guess here. Item 102 records the arithmetic so the choice can be made by eye in one run.
+ * ## The arithmetic, both axes
+ *
+ * - **`_V = 12`** is the belt's width, so the image maps **exactly once across it**: `12 / 12 = 1`. That is what turns the
+ *   figure's own horizontal banding into continuous stripes running the belt's length instead of three columns of stripes.
+ * - **`_U = 28`** gives **two repeats along the length**: `56 / 28 = 2`. With one left diamond and one right diamond per
+ *   tile, the belt shows **four diamonds at any instant**, one every 14 studs - large enough to follow as a beat, which is the
+ *   point of a two-diamond design.
+ *
+ * ## Why `28` and not `14`
+ *
+ * `14` also divides 56 exactly (four repeats, eight diamonds) and is the other obvious candidate. It loses on aspect: a
+ * `14 x 12` tile is 1.17:1 against the asset's 2.5:1, stretching the diamonds **about 2.1x across the belt** - squat, wide
+ * shapes rather than diamonds. `28 x 12` is 2.33:1 against 2.5:1, a **7% squeeze on the length axis** that nothing on screen
+ * will show. The number that keeps the diamonds diamond-shaped is therefore also the number that keeps the repeats whole; the
+ * exact no-distortion value for `_V = 12` is `30`, which does not divide 56 and would leave partial diamonds at both ends.
+ *
+ * **Not verified from here.** Nothing in code can tell a correct aspect from a stretched one. Only a Studio run shows whether
+ * the diamonds read as diamonds at the game's camera angle: if they look stretched, `_U` is the knob and `30` is the
+ * arithmetic's answer; if columns reappear across the belt, `_V` is not the belt's width.
  */
-export const BELT_TEXTURE_STUDS_PER_TILE = 4;
+export const BELT_TEXTURE_STUDS_PER_TILE_U = 28;
+
+/**
+ * See `BELT_TEXTURE_STUDS_PER_TILE_U`. This one is the belt's width, so the image maps exactly once across it.
+ */
+export const BELT_TEXTURE_STUDS_PER_TILE_V = 12;
 
 /**
  * **Placeholder.** How fast the belt texture scrolls, as a multiple of the belt's own visual rate.
@@ -74,7 +93,7 @@ export const BELT_TEXTURE_STUDS_PER_TILE = 4;
  * - `2` - the tread reads twice as fast; the balls are untouched.
  * - `0.5` - the tread reads half as fast; the balls are untouched.
  *
- * ## Why not fold it into `BELT_TEXTURE_STUDS_PER_TILE`
+ * ## Why not fold it into `BELT_TEXTURE_STUDS_PER_TILE_U` / `_V`
  *
  * They are two different properties that happen to look similar in a formula. The tile size changes how **big** the pattern is
  * and how often it repeats; this changes how **fast** it slides past. Raising the tile size to make the motion legible is the
@@ -87,7 +106,7 @@ export const BELT_TEXTURE_STUDS_PER_TILE = 4;
  * reverse. A negative multiplier therefore works and composes with the sign: the two flips cancel. **Use the sign to choose a
  * direction and this to choose a speed**, and the combination is the product of two explicit numbers rather than a surprise.
  */
-export const BELT_TEXTURE_SCROLL_MULTIPLIER = 1;
+export const BELT_TEXTURE_SCROLL_MULTIPLIER = 12;
 
 /**
  * The sign applied to `OffsetStudsU` per second, x `BeltSpeed`: **`+1`**, so the tread travels the way the balls do.
@@ -375,72 +394,74 @@ export const INTERMISSION_SECONDS = 30;
 export const SPIN_DEADBAND_SPEED = 0.5;
 
 /**
- * **Placeholder.** Multiplier on `|v| / radius` — the sliding ball's drawn rate.
+ * **Placeholder.** Multiplier on `speed / radius` - the drawn rate, and the number that decides whether a ball looks like
+ * it is *rolling on the belt* or *sliding across it*.
  *
- * This is the branch that actually runs today: the `[Spawner] spin-probe` lines report
- * `|omega| = 0` and `contactSlip = 10` on every body, so physical spin is identically zero and the
- * physical branch below never fires until the belt is fixed. A ball sliding at `|v| = 4` with
- * `radius = 0.5` gives `4 x 4 / 0.5 = 32 rad/s`, clamped to `30` — i.e. the steady state sits at the
- * ceiling, which is what the user asked for when they asked for "more spin when moving".
+ * ## The formula, as it actually runs
  *
- * ## Re-purposed twice, and the current meaning is the third
+ * `apparentSpinRate` returns `min(APPARENT_SPIN_MAX_RAD_PER_SEC, APPARENT_SPIN_GAIN * speed / radius)` above
+ * `SPIN_DEADBAND_SPEED`, where `speed` is the body's `BALL_SPEED` attribute and `radius` its `Size.Y / 2`. At this game's
+ * `0.5`-stud radius that is `2 * GAIN * BALL_SPEED`, i.e. `20 rad/s` at spawn with `GAIN = 1`.
  *
- * It began as a multiplier on `|v| / radius` (model 1), became a multiplier on `|omega|` (model 2), and
- * is a multiplier on `|v| / radius` again (model 3). The name has survived all three because it has
- * always meant "how much faster than true rolling the markers are drawn"; what changed each time is
- * which quantity was being called "true rolling". The `|omega|` multiplier now lives separately in
- * `APPARENT_SPIN_GAIN_OMEGA`, because the two branches are in different units — one is `rad/s` per
- * `rad/s`, the other is `rad/s` per `(studs/s)/stud`, i.e. dimensionless against a *ratio* of geometry
- * and speed — so a single shared number would tie two unrelated scales together.
+ * ## Why the input is `BALL_SPEED` and **not** `RELATIVE_SPEED` (item 108)
+ *
+ * `BALL_SPEED` **is** the belt-relative speed in this model, by construction rather than by convention. `stepBallSpeeds`
+ * writes the along-belt velocity as `-(BALL_SPEED - BELT_SPEED)`, and `BALL_SPEED_START` is literally
+ * `DEFAULT_BELT_SPEED` - the ball starts at the belt's own speed so that it **holds station** (plus up to
+ * `BALL_SPEED_START_JITTER`, so a fresh ball is holding station or gaining slightly). A ball whose *world* velocity is zero
+ * on a moving belt is travelling at `BELT_SPEED` relative to the surface under it.
+ *
+ * `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED` is the world velocity (negated), so driving the roll from it would draw a
+ * ball that is motionless **and not rotating** while the tread streams past underneath - which is the definition of
+ * sliding, not the cure for it. Rolling speed equals world speed on static ground; on a treadmill it equals speed relative
+ * to the *belt*, and this game is a treadmill.
+ *
+ * ## Why `1`, and what `3` did
+ *
+ * `1` is the **no-slip** rate. The surface under the ball is drawn travelling at `BELT_SPEED` toward `+X` (the scroll
+ * sign, item 103), so for the contact point to keep up with it, its velocity must be `BALL_SPEED` toward `+X` - and that
+ * is `omega * radius`, exactly. `GAIN = 1` satisfies it; nothing else does.
+ *
+ * `3` shipped for one round and produced the very symptom it was meant to cure. At `BALL_SPEED = 10` it drew
+ * `3 * 10 / 0.5 = 60 rad/s`, which is **9.5 revolutions per second** - and at 60 Hz that is **`57` degrees of rotation
+ * between consecutive frames**. A sphere carrying six face textures only repeats every `90` degrees, so `57` degrees is
+ * more than half a symmetry period: neither the sign nor the rate is recoverable from two neighbouring frames, and the eye
+ * resolves it as a slow crawl, often backwards. `1` draws `20 rad/s` (`19` degrees per frame, `3.2` rev/s), which is
+ * unambiguous. The report that motivated this was "sliding forward while rotating far too slowly", which is exactly what
+ * that fold looks like.
+ *
+ * **The rest of the visual coupling lives in `BELT_TEXTURE_SCROLL_MULTIPLIER`.** No ball rotation can match a tread drawn
+ * faster than the belt model's `BELT_SPEED`; the two only agree at `1`.
  */
 export const APPARENT_SPIN_GAIN = 3;
 
 /**
- * ## Why 1.5, and why the input is `BALL_SPEED` rather than the world velocity
+ * **Placeholder, and not read by anything.** Kept as the placeholder for a multiplier on a body's *own*
+ * `AssemblyAngularVelocity`, which was one branch of an earlier three-branch rate model (physical spin, then translation,
+ * then deadband). That model is gone: `apparentSpinRate` is one formula over `BALL_SPEED`, and no code multiplies by this
+ * constant. It stays declared so the name is reserved rather than invented again, and so the units argument below is not
+ * lost.
  *
- * The rate is `GAIN x BALL_SPEED / radius`, so at `radius = 0.5` the drawn rate is `20 x GAIN` at spawn
- * (`BALL_SPEED = 10`) and proportionally less as the attribute decays. Two constraints fix the number:
- *
- * - **Spawn must not sit far above the clamp**, or the markers are pinned at `APPARENT_SPIN_MAX_RAD_PER_SEC`
- *   and the decay is invisible. At `1.5` the spawn rate is exactly `30`, i.e. at the ceiling.
- * - **The end of a ride must be visibly slower.** A ride lasts ~18 s at `BALL_SPEED_DECAY_RATE = 0.3`, by which
- *   point `BALL_SPEED` has fallen to ~4.6, so the drawn rate is `1.5 x 4.6 / 0.5 = 13.8 rad/s` (~2.2 rev/s) -
- *   less than half the spawn rate, clearly slower to the eye.
- *
- * At the previous values this could not work. With the input at `|v|` (the world velocity, i.e.
- * `RELATIVE_SPEED`) the ball spent most of a ride at 0.1-2 studs/s and read as stationary; doubling the gain to
- * 8 fixed the magnitude but, once the input became `BALL_SPEED`, put the clamp crossing at `BALL_SPEED = 1.875`
- * - 27 s into a ride that ends at ~18 s, so the markers would hold the same rate for the whole round.
- *
- * **The offset stays at zero.** A stationary ball must not spin, so there is no `SPIN_RATE_OFFSET` to carry the
- * rate when `BALL_SPEED` is zero; `SPIN_DEADBAND_SPEED` remains the only thing that holds the markers still.
- */
-
-/**
- * **Placeholder.** Multiplier on `|AssemblyAngularVelocity|` — the genuinely-rolling branch.
- *
- * Separate from `APPARENT_SPIN_GAIN` because the units differ (see its docblock). `3` is a legibility
- * multiplier: true rolling at `|omega| = 12.4` (the theoretical `2u/7` equilibrium for `u = 10`,
- * `r = 0.5`) would draw at `37 rad/s` and clamp to `30`.
- *
- * **This branch is dead in the current build, and that is expected.** Every probe reports `|omega| = 0`,
- * so it would compute `0` and the model falls through to the velocity branch. It exists first in the
- * chain so that the day the belt actually imparts spin, the markers become physical with no code
- * change — and so that a body that *is* spinning is never drawn from its translation instead.
+ * **Its units genuinely differ from `APPARENT_SPIN_GAIN`**, which is why it was never merged into it: `rad/s` per `(studs/s)
+ * per stud` is a gain on a *ratio*, while `rad/s` per `rad/s` is dimensionless. A single shared number would tie two
+ * unrelated scales together. Anything that starts reading this must also decide what a *physical* spin should look like on
+ * a belt that is itself moving, which is not the same question as the one `APPARENT_SPIN_GAIN` answers.
  */
 export const APPARENT_SPIN_GAIN_OMEGA = 3;
 
 /**
  * **Placeholder.** Ceiling on the drawn angular rate, radians/second.
  *
- * **Kept at 30, deliberately.** The clamp is the only thing standing between the velocity branch and
- * visible strobing: 30 rad/s is ~4.8 revolutions/second, and beyond roughly 5 rev/s a three-marker ball
- * on a 60 Hz display aliases — consecutive frames land the markers more than half a revolution apart
- * and the eye reads them as turning backwards.
+ * **A safety net now, not a rate.** With `APPARENT_SPIN_GAIN = 1` and a `0.5`-stud radius the drawn rate is
+ * `2 * BALL_SPEED`, so this value is only reached at `BALL_SPEED = 45` - above `BALL_SPEED_MAX` (`20`), i.e. never. It
+ * stays because a future gain, radius or speed range must not be able to produce an `inf` or a meaningless number, and
+ * because `apparentSpinRate` reads it on every call.
  *
- * Under the current gain the clamp is reached at `BALL_SPEED = 30 x 0.5 / 1.5 = 10`, i.e. exactly at spawn, and
- * a pickup (`BALL_SPEED = 12`) sits above it. That is intended — the ceiling is the legibility limit, and beyond
- * ~4.8 rev/s three markers on a 60 Hz display alias into a backwards read.
+ * **It does not police legibility, deliberately.** Past roughly `5` revolutions a second (about `31 rad/s`) a textured
+ * ball on a 60 Hz display aliases - consecutive frames land features more than half a symmetry period apart and the eye
+ * reads the ball as turning backwards. That is `BALL_SPEED ~ 15.7` at this radius. Clamping *at* that point would make a
+ * fast ball stop matching the tread while it kept moving, which looks worse than the alias; the earlier `60 rad/s`
+ * problem came from the gain (`3`), not from this ceiling being absent.
  */
 export const APPARENT_SPIN_MAX_RAD_PER_SEC = 90;
 
@@ -707,55 +728,91 @@ export const BALL_SPEED_MAX = 20;
 export const BOOST_TARGET_BALL_SPEED = 12;
 
 /**
- * **Placeholder.** Lateral speed of the decorative weave, in studs/second.
+ * **Placeholder.** How often a ball sways across the belt: **full left-right cycles per second**.
  *
- * ## Why this exists at all, and why it is decorative
+ * ## What the lateral motion is now (item 107)
  *
- * Under the reference-speed model a ball's motion is a straight line along the belt's `RightVector` (world X, the
- * **along-belt** axis — `RightVector` is not lateral here, see `stepBallSpeeds`): the along-belt component is written from
- * `BALL_SPEED` and nothing else acts on it. Correct, and visually dull — a row of balls slides like beads on a rail. This
- * adds a sideways weave so a ball "has some momentum of its own", which is the impression the game wants and which nothing
- * in the model provides.
+ * Each ball's lateral offset is a sine wave in code-frame Z:
  *
- * **The weave is on world Z** — the belt's local `+Z`, which is `RightVector:Cross(UpVector)`. Positive Z is the viewer's
- * right from the front looking toward the back (quad 1); negative Z is their left (quad 4).
+ * `z(t) = SWAY_AMPLITUDE * sin(2 * pi * SWAY_FREQUENCY_HZ * t + phase)`
  *
- * **It is a decoration, not physics.** There is no lateral force, no contact, no friction and no cause: the term is
- * written straight into the velocity every tick, exactly like the along-belt one. That has to be said plainly because the
- * belt is a reference number rather than a surface (item 18) — there is nothing here for a sideways force to come from.
+ * where `t` is that ball's own time since it spawned and `phase` is its random start - see `SWAY_PHASE_JITTER`. The tick
+ * loop writes the **derivative** of that position, `SWAY_AMPLITUDE * omega * cos(omega * t + phase)` with
+ * `omega = 2 * pi * SWAY_FREQUENCY_HZ`, because physics integrates velocity and the derivative is the only thing that
+ * makes the position follow the wave. Plus a correction toward the wave's position, explained on `SWAY_TRACK_SECONDS`.
  *
- * `0.05` studs/s across a ride of ~18 s is roughly `0.9` studs of lateral travel on a 12-stud belt — a slow drift rather
- * than a visible crossing, corrected by the reversals `LATERAL_BOUND` forces. (This docblock said `0.5` and "9 studs"
- * until item 93; the constant has been `0.05` for longer than either number was true.)
+ * **Frequency and amplitude are independent, which is the point of the rewrite.** `0.1` here is one full cycle every
+ * `1 / 0.1 = 10` seconds; change it alone and a ball sways more or less often and nothing else moves. Change
+ * `SWAY_AMPLITUDE` alone and it covers more or less ground per sway at the same rhythm.
+ *
+ * The model this replaced was a **bounce**: a ball drifted at `Z_DRIFT_SPEED` (0.05 studs/s) and reversed when it reached
+ * a random bound between `LATERAL_BOUND_MIN` and `LATERAL_BOUND` (1..2 studs from the centreline), so one full cycle took
+ * `4 * bound / speed` - **40 to 80 seconds** - and the only way to sway more often was to speed up the drift or shrink the
+ * bound, which changed how far it travelled. All three of those constants are gone; this pair replaces them.
+ *
+ * ## The numbers
+ *
+ * At `0.1` Hz with `SWAY_AMPLITUDE = 2`, peak lateral speed is `A * omega = 1.26` studs/s against an along-belt speed of
+ * up to 10 - a slow drift with a rhythm rather than a strafe. A ride of about 18 seconds shows **1.8 full cycles**, which
+ * is roughly the most that still reads as swaying rather than vibrating; much past `0.5` Hz the decoration starts to cost
+ * the player the ability to track their own ball.
+ *
+ * **The axis.** Lateral is world Z - the belt's local `+Z`, which is `RightVector:Cross(UpVector)`. Positive Z is the
+ * viewer's right from the front looking toward the back (quad 1); negative is their left (quad 4).
  */
-export const Z_DRIFT_SPEED = 0.05;
+export const SWAY_FREQUENCY_HZ = 0.1;
 
 /**
- * **Placeholder.** The furthest a ball's centre may wander from the belt's centreline, in studs of **code-frame Z**.
+ * **Placeholder.** How far from the belt's centreline a swaying ball reaches, in studs of **code-frame Z**.
  *
- * Code-frame Z is belt-local `Z` from `PointToObjectSpace`, centred on the belt: the belt is 12 wide, so it runs `-6` to
- * `+6` and a ball of radius 0.5 is fully on the surface within `+-5.5`. In the **user frame** that is `0 .. 12`, so this
- * bound keeps a ball between user-Z `4` and `8` — never within 4 studs of either side edge. `2` leaves 3.5 studs of
- * margin on each side, far more than one tick of overshoot at 0.05 studs/s.
+ * Code-frame Z is belt-local `Z` from `PointToObjectSpace`, centred on the belt: the belt is 12 wide, so it runs `-6 .. +6`
+ * and a ball of radius 0.5 sits fully on the surface within `+-5.5`. `2` keeps a ball between `-2` and `+2` - user-frame
+ * Z `4` to `8` - leaving **3.5 studs of margin on each side**. That margin is the point of the number: the sway is
+ * decorative, so it must never look as though a ball is being pushed off the belt.
  *
- * **Positive code-frame Z is the viewer's right** from the front looking toward the back (quad 1); negative is their left
- * (quad 4). The bound is symmetric about the centreline, so a ball weaves into both quads.
+ * **This is a distance, not a speed**, and separating the two is the rewrite. The old model's travel was
+ * `Z_DRIFT_SPEED * time`, so how far a ball went depended on how long it had been drifting; here it reaches exactly
+ * `+-SWAY_AMPLITUDE` regardless of how fast or slow the wave runs.
  *
- * The reversal is a logic test, not a physical wall, so the bound has to sit far enough inside the geometry that the ball
- * never looks like it should have fallen off.
+ * Changing this does **not** change the rhythm, and changing `SWAY_FREQUENCY_HZ` does **not** change this distance.
  */
-export const LATERAL_BOUND = 2;
+export const SWAY_AMPLITUDE = 2;
 
 /**
- * **Placeholder.** The smallest distance from the centreline the weave can reverse at, in studs (code-frame Z).
+ * **Placeholder.** The largest random offset applied to a ball's starting phase, in radians.
  *
- * **Without this the weave degenerates.** A bound sampled uniformly from `0 .. LATERAL_BOUND` lands near zero often enough
- * to matter, and a ball reversing at `0.02` studs flips direction almost every tick — it vibrates in place instead of
- * weaving. Sampling the *magnitude* from `LATERAL_BOUND_MIN .. LATERAL_BOUND` and giving it the sign of the current
- * direction removes that case entirely, and an asymmetric weave (crossing from `+2` to `-1`) reads as more natural than a
- * symmetric one anyway.
+ * Every ball draws its own phase from `0 .. SWAY_PHASE_JITTER`, which is the knob that decides whether a field of balls
+ * sways as one body or as a crowd. `math.pi` (180 degrees) is **fully out of phase**: no two balls stay pinned to the same
+ * point of the wave, which is what a belt full of balls needs. `0` makes them start together and sway in lockstep - a whole
+ * belt breathing side to side in unison, worth knowing before setting it.
+ *
+ * **`math.pi` is enough, even though a full circle is `2 * math.pi`.** `sin(x + pi) = -sin(x)`, so the half circle
+ * `0 .. pi` already produces both branches of the wave once; drawing from the other half would only re-create phases that
+ * are exact negatives of ones already possible. A designer who wants the full circle wants a random **sign**, not a wider
+ * range.
  */
-export const LATERAL_BOUND_MIN = 1;
+export const SWAY_PHASE_JITTER = math.pi;
+
+/**
+ * **Placeholder.** Time constant, in seconds, of the correction that holds a swaying ball on the wave's position.
+ *
+ * ## Why the derivative alone is not enough
+ *
+ * The tick loop writes velocity and physics integrates it. Integrating `A * omega * cos(omega * t + phase)` returns the wave
+ * **plus a constant**: `A * sin(...) - A * sin(phase)` added to wherever the ball already was. So a ball spawned in a `+-3`
+ * lane would sway `+-2` around *its lane*, reaching `+-5` of the `+-5.5` the surface allows, and `SWAY_AMPLITUDE` would stop
+ * meaning "from the centreline". The correction is `(target - localZ) / this`, so the offset decays with this time constant
+ * and nothing else: `e' = -e / SWAY_TRACK_SECONDS`.
+ *
+ * **It is a separate constant from the wave on purpose.** A gain scaled by the wave's own angular rate would correct faster
+ * as the frequency rose, which re-couples the two numbers this rewrite exists to separate. A fixed time constant means a
+ * frequency change alters only the rhythm and an amplitude change alters only the distance.
+ *
+ * Small values converge faster and push harder: at `1.5` the worst spawn error (`SWAY_AMPLITUDE` plus a `+-3` lane, five
+ * studs) leaves at about 3.3 studs/s and is gone in roughly four time constants - about 6 seconds of an 18-second ride.
+ * Large values are gentler but let a ball spend most of its life finding the wave. `0` is invalid: division by zero.
+ */
+export const SWAY_TRACK_SECONDS = 1.5;
 
 /** **Placeholder.** The folder `PickupService` parents its triangles into, created on demand. */
 export const PICKUPS_FOLDER_NAME = "SpawnedPickups";

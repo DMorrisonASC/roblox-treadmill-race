@@ -130,6 +130,43 @@ export const MAX_STEAL_PER_CONTACT = 2;
  */
 export const POWER_COLLISION_COOLDOWN = 0.25;
 
+/**
+ * **Placeholder.** Seconds of a body's round that must pass before a contact may draw a hit burst.
+ *
+ * ## What it suppresses, measured from the log (item 110)
+ *
+ * A round's first seconds are a **spawn pile-up**. Bodies spawn at the same along-belt position, two studs apart across
+ * the belt and sometimes onto an occupied lane (`occupants=2 nearest=#2`), so they spawn interpenetrating; physics
+ * separates them and `Touched` re-fires on essentially every step until they settle. The observed result was a burst
+ * every 100-200 ms for the first ~2.5 s, all of them at the spawn end, and roughly one a second afterwards.
+ *
+ * **It gates the burst, not the game.** The transfer below it still runs, at the same cooldown, so a bully spawning next
+ * to its victim loses nothing; what is suppressed is the visual of a collision nobody drove into. That asymmetry is the
+ * whole point - a threshold on speed was tried first and cannot work: `BALL_SPEED` spawns at `10..12` against a belt of
+ * `10`, so a fresh body already carries up to 2 studs/s of world speed, which is the same number a genuine slow contact
+ * produces.
+ *
+ * `2` is the pile's own settling time. Larger values start dropping real hits at the front of a round; smaller ones let
+ * the last of the pile through. Measured against `POWER_COLLISION_COOLDOWN = 0.25`, it removes up to eight bursts a
+ * second per colliding pair for the first two seconds.
+ */
+export const HIT_EFFECT_MIN_ROUND_AGE_SECONDS = 2;
+
+/**
+ * **Placeholder.** Minimum seconds between two hit bursts involving the same ball.
+ *
+ * **Separate from `POWER_COLLISION_COOLDOWN`, deliberately.** That constant gates a *speed transfer* and is `0.25`; this one
+ * gates a *picture* and is slower, because since item 111 every contact draws a burst rather than only a `bully` or `heavy`
+ * one. On a belt holding thirty bodies in contact, a shared clock would put the burst rate at the transfer rate and the
+ * screen would strobe; at `0.5` a single body can contribute at most two bursts a second however many neighbours it has,
+ * and a pair can still light up twice a second.
+ *
+ * It is stamped by whichever body of the pair fires (the lower `serial`), so the pair's rate is the rate of that one
+ * clock. A collision that draws nothing is one where the firing body had burst recently - not one that "was not fast
+ * enough", which is the reading this constant exists to make obvious.
+ */
+export const HIT_EFFECT_COOLDOWN_SECONDS = 0.5;
+
 // #endregion
 
 // #region magnet / eclipse — the decay multipliers

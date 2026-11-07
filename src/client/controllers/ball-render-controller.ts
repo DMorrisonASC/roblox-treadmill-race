@@ -207,6 +207,11 @@ export class BallRenderController implements OnStart {
 
 			const raw = ball.GetAttribute(BALL_SPEED_ATTRIBUTE);
 			const speed = typeIs(raw, "number") && raw === raw ? raw : 0;
+			// **`BALL_SPEED` is the belt-relative speed, not the world speed** - see `APPARENT_SPIN_GAIN`. The server
+			// writes the world velocity as `BELT_SPEED - BALL_SPEED`, and `BALL_SPEED_START` equals the belt speed so a
+			// fresh ball holds station: that identity only exists because `BALL_SPEED` measures travel *through the
+			// belt's reference* rather than across the ground. Subtracting the belt here as well would draw a ball that
+			// holds station as motionless *and unrotating* while the tread runs underneath it, which is sliding.
 			const omega = apparentSpinRate(speed, ball.Size.Y / 2);
 
 			if (omega !== 0) {

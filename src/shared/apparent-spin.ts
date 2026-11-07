@@ -45,10 +45,10 @@ export function apparentSpinRate(speed: number, radius: number): number {
  * The world-space axis a ball is drawn rolling about, given the belt's `RightVector`, with `APPARENT_SPIN_SIGN` applied.
  *
  * `yAxis:Cross(right)` is **forward rolling**: for `right = +X` it is `-Z`, the axis that moves the top of the ball toward
- * `+X`. `APPARENT_SPIN_SIGN` flips it, and the result for this scene is `+Z`, which moves the top of the ball toward
- * `-X` — the direction a ball gains ground under a boost, and the direction a treadmill's surface would carry its surface
- * texture. That is the sign the markers have always used and it is unchanged; the sign is applied **here** so a caller
- * cannot half-apply it.
+ * `+X`. `APPARENT_SPIN_SIGN` flips it, and the result for this scene is `+Z`, which moves the top of the ball toward `-X`
+ * and therefore its **contact point toward `+X`** - the direction the belt's surface is drawn travelling (item 103). That
+ * is what makes the drawn roll **no-slip** instead of a slip, and it is the sign the markers have always used: unchanged,
+ * and applied **here** so a caller cannot half-apply it.
  *
  * The degenerate case is a belt stood on its end, where the cross product is zero and there is no rolling axis. The
  * fallback is `(0, 0, -1)` before the sign — the same axis this scene's belt produces — so a client that has not received

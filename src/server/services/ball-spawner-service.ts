@@ -46,10 +46,11 @@ import {
 	BALL_TEXTURE_OFFSET_RANGE,
 	BALL_TEXTURE_OFFSET_RANGE_V,
 	BOOST_HYSTERESIS,
-	LATERAL_BOUND,
 	SPIN_DEADBAND_SPEED,
-	LATERAL_BOUND_MIN,
-	Z_DRIFT_SPEED,
+	SWAY_AMPLITUDE,
+	SWAY_FREQUENCY_HZ,
+	SWAY_PHASE_JITTER,
+	SWAY_TRACK_SECONDS,
 } from "shared/tuning";
 import { TreadmillService } from "./treadmill-service";
 
@@ -460,21 +461,26 @@ export class BallSpawnerService implements OnStart {
 	private readonly decoysByParent = new Map<BasePart, BasePart>();
 
 	/**
-	 * Each live ball's decorative weave state: which way it is currently drifting across the belt, and the
-	 * belt-local `Z` at which it turns around (signed, always the same sign as `direction`).
+	 * Each live ball's decorative sway state: the **phase** its sine wave starts at, and its **own clock**, in seconds
+	 * since it spawned.
+	 *
+	 * Both fields are needed and both are per ball. The phase is what stops a belt of balls swaying in lockstep - see
+	 * `SWAY_PHASE_JITTER` - and the clock is what makes the wave start on the ball's own first tick rather than on a
+	 * global time, so a ball spawning into a wave that is already running does not snap to an arbitrary point of it.
+	 * `elapsed` is advanced by the tick's own `dt` in `stepBallSpeeds`; nothing else writes it, and it is never < 0.
 	 *
 	 * ## Why a map and not two attributes on the body
 	 *
 	 * The state is a *tick-local* detail with no consumer outside this loop: no client draws it, no other service
-	 * reads it, and it dies with the ball. An attribute would replicate it to every client and cost two writes per
-	 * reversal for nothing. The map is cleaned in `forgetBall` alongside `ballKillY`, so its size tracks the live
-	 * set exactly like every other per-ball map in this file.
+	 * reads it, and it dies with the ball. An attribute would replicate it to every client and cost a write per tick
+	 * for nothing. The map is cleared in `forgetBall` and `pruneDestroyedBalls` alongside `ballKillY`, so its size
+	 * tracks the live set exactly like every other per-ball map in this file.
 	 *
-	 * `bound` is stored **signed and matched to `direction`** (`bound = direction * magnitude`), which makes the
-	 * reversal test one comparison: `localZ * direction >= math.abs(bound)`. A bound of the opposite sign would
-	 * mean the ball had already passed it on the first tick and would flip immediately.
+	 * **This is the same map the bounce model used** (item 107): it held `{ direction, bound }` and holds
+	 * `{ phase, elapsed }` now. Repurposed rather than replaced so the four call sites - two writes at spawn, two
+	 * deletes on the death paths - kept their shape and no stale map can be left behind.
 	 */
-	private readonly lateral = new Map<BasePart, { direction: number; bound: number }>();
+	private readonly lateral = new Map<BasePart, { phase: number; elapsed: number }>();
 
 	/**
 	 * Each ball's own starting speed, in studs/second, drawn once at spawn and reused at every `Playing` entry.
@@ -1075,9 +1081,9 @@ export class BallSpawnerService implements OnStart {
 		this.startSpeeds.set(ball, startSpeed);
 		ball.SetAttribute(BALL_SPEED_ATTRIBUTE, startSpeed);
 
-		// The weave starts here too, for the same reason: seeded at birth so the tick loop needs no fallback
-		// branch, and so the first tick already has a direction and a bound.
-		this.lateral.set(ball, this.newWeave());
+		// The sway starts here too, for the same reason: seeded at birth so the tick loop needs no fallback
+		// branch, and so the first tick already has a phase and a clock of zero.
+		this.lateral.set(ball, this.newSway());
 
 		// Visual only, and attached *after* `Parent` — unlike the textures above. The markers are anchored
 		// and carry their local offset as attributes, so they need the body to be in the DataModel before
@@ -1179,7 +1185,7 @@ export class BallSpawnerService implements OnStart {
 
 		this.startSpeeds.set(decoy, startSpeed);
 		decoy.SetAttribute(BALL_SPEED_ATTRIBUTE, startSpeed);
-		this.lateral.set(decoy, this.newWeave());
+		this.lateral.set(decoy, this.newSway());
 
 		// After `Parent`, for the reason the parent's markers are: the poles and the ring are anchored and carry their local
 		// offset as attributes, so they need the body to be in the DataModel before `CFrame.ToObjectSpace` has a meaningful
@@ -1250,16 +1256,14 @@ export class BallSpawnerService implements OnStart {
 	// #region the reference-speed model
 
 	/**
-	 * A fresh weave state: a direction, and a bound of that sign some way out from the centreline.
+	 * A fresh sway state: a random starting phase and a clock at zero.
 	 *
-	 * The magnitude is drawn from `LATERAL_BOUND_MIN .. LATERAL_BOUND` rather than from `-BOUND .. +BOUND`, so a
-	 * reversal can never land within `LATERAL_BOUND_MIN` of the centreline - see that constant for why a near-zero
-	 * bound would vibrate instead of weave.
+	 * `elapsed` starts at `0` rather than at an absolute time because the wave is the ball's own - see the `lateral`
+	 * map. The phase is drawn from `0 .. SWAY_PHASE_JITTER`, so `math.pi` gives a fully desynchronised field and `0`
+	 * would make every ball sway together.
 	 */
-	private newWeave(): { direction: number; bound: number } {
-		const direction = math.random() < 0.5 ? -1 : 1;
-		const magnitude = LATERAL_BOUND_MIN + math.random() * (LATERAL_BOUND - LATERAL_BOUND_MIN);
-		return { direction, bound: direction * magnitude };
+	private newSway(): { phase: number; elapsed: number } {
+		return { phase: math.random() * SWAY_PHASE_JITTER, elapsed: 0 };
 	}
 
 	/**
@@ -1283,7 +1287,7 @@ export class BallSpawnerService implements OnStart {
 	 * is the **long** axis, and this tree uses it for exactly that everywhere — this loop, and every log field that
 	 * measures a ball's along-belt velocity as a dot product with it. A reader who assumes "right = lateral" gets the sign of
 	 * `relative` backwards and writes a ball that moves across the belt instead of along it. **Lateral is world Z**,
-	 * and the only code that touches it is the decorative weave below, on `RightVector:Cross(UpVector)` — which for
+	 * and the only code that touches it is the decorative sway below, on `RightVector:Cross(UpVector)` — which for
 	 * `RightVector = +X` is `+Z`.
 	 *
 	 * In this model **`+X` is toward the back** — the exit end, where a ball is eliminated — and **`-X` is toward the
@@ -1308,9 +1312,14 @@ export class BallSpawnerService implements OnStart {
 	 * ## Why the velocity is *set* and the other components are preserved
 	 *
 	 * `AssemblyLinearVelocity` is replaced only along the along-belt axis — only the component on `RightVector`. The
-	 * vertical component is left to gravity (the ball still has to land, bounce and settle), and the lateral component is
-	 * left to collisions, so a ball knocked sideways keeps drifting sideways. Writing a full velocity vector every tick
-	 * would flatten both, and a ball that could not fall would never settle onto the floor slab.
+	 * vertical component is left to gravity (the ball still has to land, bounce and settle), so writing a full
+	 * velocity vector every tick would flatten it and a ball that could not fall would never settle onto the floor slab.
+	 *
+	 * **The lateral component is the one exception, and it is deliberate.** The decorative sway below rewrites it for
+	 * every ball that has sway state, because a sine wave expressed as velocity has to be written as velocity. The
+	 * consequence is that a ball knocked sideways has its sideways motion overwritten on the next tick rather than
+	 * carried: the sway is the only lateral intent this model has, and a collision is not allowed to leave a ball riding
+	 * off the wave.
 	 *
 	 * **This loop is the only writer of the along-belt component, and it runs on `Heartbeat`.** Anything else that writes
 	 * `AssemblyLinearVelocity` along `±X` between two ticks is overwritten here before it can accumulate, which is why the
@@ -1338,6 +1347,10 @@ export class BallSpawnerService implements OnStart {
 		const right = this.treadmill.getBeltRightVector();
 		// Read once for the whole loop: it is the frame every ball's `localZ` is measured in.
 		const beltFrame = this.treadmill.getBeltFrame();
+		// Angular rate of the sway, `2 * pi * SWAY_FREQUENCY_HZ`. Hoisted and named because both the position wave and
+		// its derivative use it: one expression for both means the velocity can never be the derivative of a *different*
+		// frequency than the position it is meant to track.
+		const swayOmega = 2 * math.pi * SWAY_FREQUENCY_HZ;
 
 		for (const ball of this.liveBalls) {
 			if (ball.Parent === undefined) {
@@ -1368,32 +1381,46 @@ export class BallSpawnerService implements OnStart {
 			const velocity = ball.AssemblyLinearVelocity;
 			const along = velocity.Dot(right);
 
-			// ## The decorative weave — lateral, world Z
+			// ## The decorative sway - lateral, world Z
 			//
 			// Axis, and why it is not `LookVector`: a `CFrame`'s `LookVector` is its **-Z** axis, so the belt's local
 			// **+Z** is `RightVector:Cross(UpVector)` (for `RightVector = +X` that is world `+Z`). Using `LookVector`
-			// would weave toward local -Z, which works but disagrees with every `localZ` in the log and with
+			// would sway toward local -Z, which works but disagrees with every `localZ` in the log and with
 			// `PointToObjectSpace`, so the two would need negating against each other forever. `Cross` keeps the term and
-			// the measurement in one frame.
+			// the measurement in one frame. **Positive Z is the viewer's right from the front looking toward the back**,
+			// and code-frame Z runs `-6 .. +6` across this belt.
 			//
-			// **Positive Z is the viewer's right from the front looking toward the back**, so `direction = +1` weaves
-			// toward quad 1 and `-1` toward quad 4. The bound below is compared in code-frame Z, which is centred on the
-			// belt: `localZ` runs `-6 .. +6`, and the weave stays within `LATERAL_BOUND` of the centreline.
+			// ## The law: a sine for position, its derivative for velocity
+			//
+			// The ball is driven to `z(t) = A * sin(omega * t + phase)` in code-frame Z. Physics integrates velocity, so
+			// what this loop can write is the derivative, **`A * omega * cos(omega * t + phase)` - cosine, not sine**.
+			// Writing the sine here is the trap worth restating: the sine is the *position*, so using it as a velocity
+			// would move the ball fastest where the wave is slowest and slowest at its extremes, which shakes in place
+			// instead of swaying.
+			//
+			// The second term is a correction toward the wave's *position*, `(targetZ - localZ) / SWAY_TRACK_SECONDS`, and
+			// it is here for a measured reason rather than for tidiness. Integrating the derivative alone returns the wave
+			// plus a constant, `A * sin(...) - A * sin(phase)`, added to wherever the ball already was; this game's spawn
+			// lanes sit at code-frame Z `+-1` and `+-3`, so a ball would sway `+-A` around *its lane* instead of around the
+			// belt's centre and reach `+-5` of the `+-5.5` the surface allows - a ball apparently about to fall off. With
+			// the correction the offset decays as `e' = -e / SWAY_TRACK_SECONDS`, and `SWAY_AMPLITUDE` means what its
+			// docblock says. It is a fixed time constant rather than a gain scaled by `omega`, so changing the frequency
+			// cannot change how hard the correction pulls.
 			const lateralState = this.lateral.get(ball);
 			if (lateralState !== undefined && beltFrame !== undefined) {
+				// This ball's own clock, in seconds since it spawned. Not a global time and not `os.clock()`: the latter
+				// is CPU time on this platform, shared by every ball, and a ball spawned late would then begin part-way
+				// into the wave at a velocity unrelated to its phase. Accumulating the same `dt` the engine integrates
+				// with keeps position and velocity in one time base.
+				lateralState.elapsed += dt;
+
 				const localZ = beltFrame.PointToObjectSpace(ball.Position).Z;
-
-				// Reversed when the ball has reached its bound on the side it was heading toward. `bound` is signed
-				// and matched to `direction`, so this is one comparison rather than a sign table.
-				if (localZ * lateralState.direction >= math.abs(lateralState.bound)) {
-					const flipped = this.newWeave();
-					// Mutated rather than replaced so the map entry stays the same object for any future reader.
-					lateralState.direction = flipped.direction;
-					lateralState.bound = flipped.bound;
-				}
-
+				const angle = swayOmega * lateralState.elapsed + lateralState.phase;
+				const targetZ = math.sin(angle) * SWAY_AMPLITUDE;
 				const across = beltFrame.RightVector.Cross(beltFrame.UpVector).Unit;
-				const lateral = across.mul(Z_DRIFT_SPEED * lateralState.direction);
+				const lateralRate =
+					SWAY_AMPLITUDE * swayOmega * math.cos(angle) + (targetZ - localZ) / SWAY_TRACK_SECONDS;
+				const lateral = across.mul(lateralRate);
 				ball.AssemblyLinearVelocity = velocity.sub(right.mul(along)).add(right.mul(-relative)).add(lateral);
 				continue;
 			}
@@ -2326,13 +2353,14 @@ export class BallSpawnerService implements OnStart {
 		const ballSpeed = this.readNumber(ball, BALL_SPEED_ATTRIBUTE, 0);
 		// The model's reference, so `RELATIVE_SPEED` in the line is the number the simulation used.
 		const beltSpeed = this.treadmill.getReferenceBeltSpeed();
-		// The weave, so the lateral motion is readable from the log rather than only from the screen: `localZ` is
-		// where the ball is across the belt, `lateralDir` which way it is heading there.
+		// The sway, so the lateral motion is readable from the log rather than only from the screen: `localZ` is where
+		// the ball is across the belt, `swayPhase` where in its own wave it is. The two together tell a ball that is
+		// tracking its wave from one that has not found it yet.
 		const localPoint = belt.CFrame.PointToObjectSpace(ball.Position);
-		const weave = this.lateral.get(ball);
-		const lateralDir = weave === undefined ? "none" : tostring(weave.direction);
+		const sway = this.lateral.get(ball);
+		const swayPhase = sway === undefined ? "none" : formatNumber(sway.phase);
 		print(
-			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(localPoint)} localZ=${formatNumber(localPoint.Z)} lateralDir=${lateralDir} velocity=${formatVector(velocity)} BALL_SPEED=${formatNumber(ballSpeed)} BELT_SPEED=${formatNumber(beltSpeed)} RELATIVE_SPEED=${formatNumber(ballSpeed - beltSpeed)} ${this.describeOwner(ball)}`,
+			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(localPoint)} localZ=${formatNumber(localPoint.Z)} swayPhase=${swayPhase} velocity=${formatVector(velocity)} BALL_SPEED=${formatNumber(ballSpeed)} BELT_SPEED=${formatNumber(beltSpeed)} RELATIVE_SPEED=${formatNumber(ballSpeed - beltSpeed)} ${this.describeOwner(ball)}`,
 		);
 	}
 
