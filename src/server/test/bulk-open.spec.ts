@@ -33,7 +33,7 @@ function profileWith(coins: number, balls: Record<string, number>): Profile {
 		ownedBalls.set(ballId, count);
 	}
 
-	return { version: 1, coins, ownedBalls, purchases: [] };
+	return { version: 1, coins, ownedBalls, purchases: [], lastDailyRewardAt: 0, lastPlaytimeRewardAt: 0 };
 }
 
 /** Everything a batch touches, flattened, so "byte-identical" is one comparison rather than a list of assertions. */

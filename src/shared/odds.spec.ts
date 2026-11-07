@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@rbxts/jest-globals";
-import { ROBUX_CHEST_RARITIES, RARITIES, RARITY_WEIGHTS } from "./economy.config";
+import { ROBUX_CHEST_RARITIES, ROBUX_CHEST_WEIGHTS, RARITIES } from "./economy.config";
 import { chestOdds, fusionOdds, robuxChestOdds } from "./odds";
 
 /**
@@ -121,24 +121,30 @@ describe("robuxChestOdds", () => {
 		}
 	});
 
-	it("derives 75 / 22.5 / 2.5 from the surviving weights", () => {
-		// Computed here from `RARITY_WEIGHTS` rather than written as literals, so the assertion still means something
-		// after somebody retunes a tier.
+	it("derives 65 / 25 / 10 from the paid table's own weights", () => {
+		// Read from `ROBUX_CHEST_WEIGHTS`, not from `RARITY_WEIGHTS`: the two chests no longer share a table, and this
+		// assertion is what ties the displayed percentage to the number the roll actually uses.
 		let total = 0;
 		for (const rarity of ROBUX_CHEST_RARITIES) {
-			total += RARITY_WEIGHTS[rarity];
+			total += ROBUX_CHEST_WEIGHTS[rarity];
 		}
 
 		const rows = robuxChestOdds();
 		for (let index = 0; index < rows.size(); index++) {
-			const expected = (RARITY_WEIGHTS[rows[index].rarity] / total) * 100;
+			const expected = (ROBUX_CHEST_WEIGHTS[rows[index].rarity] / total) * 100;
 			expect(rows[index].percent).toBe(expected);
 		}
+
+		// And the shipped numbers, spelled out: a table-only assertion would pass just as happily if every row moved.
+		expect(rows[0].percent).toBe(65);
+		expect(rows[1].percent).toBe(25);
+		expect(rows[2].percent).toBe(10);
 	});
 
-	it("beats the coin chest for every tier it offers", () => {
-		// The point of the Robux chest: not merely "no commons", but better odds for everything left in it. If a
-		// renormalisation ever made a tier worse, the paid chest would be a downgrade for that tier.
+	it("beats the coin chest for every tier it offers, and by more than before", () => {
+		// The point of the Robux chest: not merely "no commons", but better odds for everything left in it. This invariant
+		// held under the old shared table (75 / 22.5 / 2.5) and must hold under the paid table's own numbers, because a
+		// renormalisation that made any tier worse would make the paid chest a downgrade for that tier.
 		const coin = chestOdds();
 		const robux = robuxChestOdds();
 
@@ -152,5 +158,11 @@ describe("robuxChestOdds", () => {
 
 			expect(row.percent > coinPercent).toBe(true);
 		}
+
+		// And the retune's real shape: the reach tier paid for the top one, ten points of rare moved into legendary.
+		expect(robux[0].percent).toBe(65);
+		expect(robux[2].percent).toBe(10);
+		// Ten times the free chest's legendary rate, exactly - the number the whole rebalance exists to move.
+		expect(robux[2].percent).toBe(coin[3].percent * 10);
 	});
 });

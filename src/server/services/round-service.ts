@@ -5,6 +5,7 @@ import {
 	hasOwnerIdentity,
 	OWNER_DISPLAY_NAME_ATTRIBUTE,
 	OWNER_USER_ID_ATTRIBUTE,
+	PLAYER_COINS_ATTRIBUTE,
 	PLAYER_OWNED_BALLS_ATTRIBUTE,
 } from "shared/attributes";
 import {
@@ -20,11 +21,13 @@ import {
 	PICKER_PICK_REMOTE_NAME,
 	PICKER_REROLL_REMOTE_NAME,
 	REMOTES_FOLDER_NAME,
+	ROUND_PAYOUT_REMOTE_NAME,
 	ROUND_STATE_VALUE_NAME,
 	WINNER_NAME_VALUE_NAME,
 } from "shared/remotes";
 import { PickerOfferMessage, PickerResult, REROLL_COST_COINS } from "shared/picker";
 import { ECONOMY_ACTION_COOLDOWN_MS } from "shared/economy.config";
+import { payoutAwards, RoundPayoutMessage } from "shared/round-payout";
 import { powerForBallId } from "shared/powers.config";
 import { lastToucherOf, setHitEffectRemote, setPower } from "server/powers";
 import { TAGS } from "shared/tags";
@@ -141,6 +144,36 @@ export class RoundService implements OnStart {
 	/** Whether the once-per-round idle warning has printed. Reset at `Playing` entry. */
 	private idleWarned = false;
 
+	/**
+	 * Every owned competitor that took part in the round, recorded **when its body was tracked**.
+	 *
+	 * ## Why the round has to keep this, when it keeps nothing else about the past
+	 *
+	 * A payout is owed to "everyone who raced", and by the time a round ends `getCompetitors()` holds one body. The
+	 * participants are therefore a fact that only exists while the round runs — this is that record. It is written in
+	 * `trackBall`, which is the single place every spawn path passes through, so a future spawn route cannot forget it.
+	 *
+	 * Reassigned rather than cleared in `clearAllBodies`, which is the one place a round's body set ends — see the note
+	 * there for why the reset cannot live at `Playing` entry.
+	 */
+	private roundParticipants = new Array<BallOwner>();
+
+	/**
+	 * Competitors in the order their bodies left the round, **worst first** — the first entry finished last.
+	 *
+	 * ## Why elimination order is the only ranking this game has
+	 *
+	 * The round's own rule (`round-outcome`) says the last survivor wins and nothing else: there is no finish line, no
+	 * elapsed-time cap, and `initialLiveCount` was deleted with the guard that read it. So the *result* of a round is exactly
+	 * the sequence in which bodies died, read backwards — which is a by-product of elimination rather than a second opinion
+	 * about it, and cannot disagree with the winner the round published.
+	 *
+	 * The leaderboard is deliberately **not** consulted: it ranks live bodies by distance from the spawn edge, it publishes
+	 * at 1 Hz with a swap threshold, and at the moment this is read the field is one body. A snapshot of a decayed distance
+	 * would be a plausible-looking ranking that is not the race's result.
+	 */
+	private eliminatedOwners = new Array<BallOwner>();
+
 	/** The linear ramp's frame connection. `undefined` whenever the belt is not ramping. */
 	private rampConnection?: RBXScriptConnection;
 
@@ -211,6 +244,14 @@ export class RoundService implements OnStart {
 	/** Broadcast — every client hears an elimination, and each one throttles its own playback. See `ELIMINATION_SOUND_REMOTE_NAME`. */
 	private eliminationSoundRemote?: RemoteEvent;
 
+	/**
+	 * The payout channel: **one recipient per round**, fired after that player's coins were actually granted.
+	 *
+	 * Optional rather than required, like every other remote here: a server that failed to create it must still pay its
+	 * players, so the grant is unconditional and only the panel is lost.
+	 */
+	private roundPayoutRemote?: RemoteEvent;
+
 	// #endregion
 
 	public constructor(
@@ -228,6 +269,7 @@ export class RoundService implements OnStart {
 		this.createPickerRemotes();
 		this.createDecoyOutlineRemote();
 		this.createHitEffectRemote();
+		this.createRoundPayoutRemote();
 		this.createRoundStateValue();
 
 		// The first `[Round]` line a fresh server prints must name the phase it is in, not the one it is
@@ -915,6 +957,75 @@ export class RoundService implements OnStart {
 			// **Wrapped.** `PostGame ? Intermission` is the other covered transition.
 			this.transitionAround("PostGame", "Intermission", () => this.enterIntermission("post-game hold elapsed"));
 		});
+
+		// **Paying out after the hold is armed, not before it.** `grantCoins` saves the profile per player, and a save is the
+		// one thing here that can yield; a payout placed above this line would make the length of `PostGame` depend on how
+		// fast DataStore answered. Arming the timer first makes the phase's duration a constant and the payout a thing that
+		// finishes inside it. The bodies are already frozen and the winner already published, so nothing below can change the
+		// result — it only prices it.
+		this.payOut(winner);
+	}
+
+	/**
+	 * Grants every player's round payout and tells each one what it was.
+	 *
+	 * ## Why the award is computed from the record and not from the world
+	 *
+	 * See `roundParticipants` and `eliminatedOwners`: at this point the field is one body, and the ranking is history. The
+	 * rule itself lives in `shared/round-payout` so it can be asserted without an engine — this method only does the part
+	 * that touches instances: resolve an owner id to a `Player`, read the balance, grant, publish, log.
+	 *
+	 * ## Why the balance is read as an attribute rather than from the profile
+	 *
+	 * `EconomyService` owns the profile and exposes no getter, and the attribute is the balance it publishes — the same value
+	 * the shop's coin pill reads. Using it means the server and every client agree about the number being animated, and it
+	 * costs no new API on the economy (whose save and DataStore paths are explicitly out of scope for this change).
+	 *
+	 * ## Why a failed grant is silent on the remote side
+	 *
+	 * `grantCoins` returns false when there is no profile or the save failed, and it has already warned with the reason. A
+	 * panel counting up coins that were never added would be a second, worse report of the same failure.
+	 */
+	private payOut(winner: BallOwner | undefined): void {
+		const awards = payoutAwards({
+			participants: this.roundParticipants,
+			eliminated: this.eliminatedOwners,
+			winner,
+		});
+
+		if (awards.size() === 0) {
+			return;
+		}
+
+		for (const award of awards) {
+			// `undefined` for a player who left between being paid for and being told. Their grant is skipped rather than
+			// retried: the profile is gone with the session, and the next round pays them afresh.
+			const player = Players.GetPlayerByUserId(award.userId);
+			if (player === undefined) {
+				continue;
+			}
+
+			const balanceBefore = readCoins(player);
+			if (!this.economy.grantCoins(player, award.total)) {
+				continue;
+			}
+			const balanceAfter = readCoins(player);
+
+			const message: RoundPayoutMessage = {
+				base: award.base,
+				bonus: award.bonus,
+				total: award.total,
+				placement: award.placement,
+				balanceBefore,
+				balanceAfter,
+			};
+
+			print(
+				`[Round] payout player=${award.displayName} placement=${award.placement === 0 ? "none" : tostring(award.placement)} base=${award.base} bonus=${award.bonus} total=${award.total} coins=${balanceAfter}`,
+			);
+
+			this.roundPayoutRemote?.FireClient(player, message);
+		}
 	}
 
 	private enterIntermission(reason: string): void {
@@ -967,6 +1078,17 @@ export class RoundService implements OnStart {
 		}
 
 		this.liveBalls.clear();
+
+		// **The payout records describe the bodies the round owns, so they are cleared with them.** This is the one place
+		// every round's body set ends — `forceWaiting`, the `Playing` restart, and `Intermission` — so resetting here means
+		// a record can never describe a body that no longer exists, and a record from the previous round can never price the
+		// next one.
+		//
+		// **It cannot live in `enterPlaying`.** Competitors are spawned during `Waiting` (and by the auto-bots that
+		// `forceWaiting` adds there), so a reset at `Playing` entry would throw away every participant recorded while the
+		// countdown ran — a round of five would pay nobody.
+		this.roundParticipants = new Array<BallOwner>();
+		this.eliminatedOwners = new Array<BallOwner>();
 
 		if (destroyed > 0) {
 			print(`[Round] cleared ${destroyed} ball(s) (${reason})`);
@@ -1188,6 +1310,13 @@ export class RoundService implements OnStart {
 			// The toucher is read here, before the destroy, for the same reason as the owner: the last-touch record is
 			// cleared when a body dies (`powers.forgetBall`), and a destroyed body would report no owner at all.
 			const toucher = lastToucherOf(ball);
+
+			// **The placement record, one line beside the log line that says the same thing.** This loop is the elimination
+			// order — `getLiveBalls` is walked once per tick and bodies leave it permanently — so the order these pushes
+			// happen in *is* the result the payout is derived from. Recorded before the destroy, while the owner value is
+			// still meaningful.
+			this.recordElimination(owner);
+
 			this.forgetBall(ball);
 			ball.Destroy();
 
@@ -1461,6 +1590,15 @@ export class RoundService implements OnStart {
 	private trackBall(ball: BasePart): void {
 		this.liveBalls.add(ball);
 
+		// **The participant record, taken here because every spawn path passes through this method.** A payout is owed to
+		// everyone who had a body on the belt, and by the time the round ends this set holds one entry — so the only moment
+		// the full field can be observed is while it is being built. Reading it off the body rather than out of the caller's
+		// owner list keeps the record true to what actually got spawned, which is the same rule the debug-spawn log follows.
+		const owner = readOwner(ball);
+		if (owner !== undefined) {
+			this.roundParticipants.push(owner);
+		}
+
 		const connection = ball.Destroying.Connect(() => {
 			this.handleExternalDestruction(ball);
 		});
@@ -1482,6 +1620,11 @@ export class RoundService implements OnStart {
 		// first — the natural reading of "clean up, then destroy" — would make every cull silent.
 		const toucher = lastToucherOf(ball);
 
+		// A culled body is an eliminated competitor, so it takes its place in the payout order here too: `KillY` and the
+		// `MaxLiveBalls` cap are removal paths the round does not control, and a player whose body fell out of the world
+		// still finished where it finished. Teardown never reaches this line — `clearAllBodies` forgets first.
+		this.recordElimination(owner);
+
 		this.forgetBall(ball);
 
 		// Culled, not torn down: `KillY` and the `MaxLiveBalls` cap remove a competitor the same way the zone does, and the
@@ -1499,6 +1642,18 @@ export class RoundService implements OnStart {
 		this.lastProgressAt = os.clock();
 
 		this.evaluateAfterLoss();
+	}
+
+	/**
+	 * Appends one competitor to the payout order.
+	 *
+	 * `undefined` for an orphan: an ownerless body (a decoy twin) can leave the belt, and it is nobody's placement. The
+	 * record is only ever appended to — the order is the result, so nothing may reorder or remove an entry.
+	 */
+	private recordElimination(owner: BallOwner | undefined): void {
+		if (owner !== undefined) {
+			this.eliminatedOwners.push(owner);
+		}
 	}
 
 	/**
@@ -2128,6 +2283,28 @@ export class RoundService implements OnStart {
 	}
 
 	/**
+	 * Creates the payout remote: **server to client only, one player per firing.**
+	 *
+	 * No `OnServerEvent` connection, deliberately — like the elimination remote and for the same reason. A payout is the
+	 * server's statement about a round the client just watched; a client that could fire it could name its own coins, and a
+	 * `Value` per player would need one instance per joiner. The absence of a connection is the whole authorisation model.
+	 */
+	private createRoundPayoutRemote(): void {
+		let folder = ReplicatedStorage.FindFirstChild(REMOTES_FOLDER_NAME);
+		if (folder === undefined || !folder.IsA("Folder")) {
+			const created = new Instance("Folder");
+			created.Name = REMOTES_FOLDER_NAME;
+			created.Parent = ReplicatedStorage;
+			folder = created;
+		}
+
+		const payout = new Instance("RemoteEvent");
+		payout.Name = ROUND_PAYOUT_REMOTE_NAME;
+		payout.Parent = folder;
+		this.roundPayoutRemote = payout;
+	}
+
+	/**
 	 * Creates `ReplicatedStorage.RoundState` and seeds it with the initial phase.
 	 *
 	 * Created before the first `publishPhase` call in `onStart` so the very first write has somewhere to
@@ -2188,6 +2365,17 @@ function readOwner(ball: BasePart): BallOwner | undefined {
 	// The type guard belongs in `hasOwnerIdentity`, which a spec can call; this cast is the price of narrowing across a
 	// function boundary and is exactly what the guard above proved.
 	return { userId: math.floor(userId as number), displayName: displayName as string };
+}
+
+/**
+ * A player's balance, as the economy last published it.
+ *
+ * `0` when the attribute is absent, which happens only for a player whose profile never loaded — and `grantCoins` refuses
+ * those anyway, so the value is read for the log and for the client's animation and never used to decide anything.
+ */
+function readCoins(player: Player): number {
+	const coins = player.GetAttribute(PLAYER_COINS_ATTRIBUTE);
+	return typeIs(coins, "number") ? math.floor(coins) : 0;
 }
 
 /** Seconds to two places, so an `elapsed=` field is readable without `string.format`. */

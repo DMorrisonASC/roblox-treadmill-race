@@ -29,10 +29,14 @@ const SWAP_THRESHOLD_STUDS = 2;
  *
  * ## What it reads, and what it deliberately does not touch
  *
- * The service is **read-only over the world**. It enumerates the bodies `RoundService` already tracks (`getLiveBalls`),
- * keeps the ones carrying an owner identity, measures each one in the belt's own frame, sorts, and fires. It writes no
- * attribute, moves no body, and knows nothing about elimination - so a round cannot behave differently because a HUD is
- * watching it. That is the property that makes it safe to add a leaderboard to a shipped game.
+ * The service is **read-only over the world**. It enumerates every body carrying `TAGS.ball`, measures each one in the belt's
+ * own frame, sorts, and fires. It writes no attribute, moves no body, and knows nothing about elimination - so a round cannot
+ * behave differently because a HUD is watching it. That is the property that makes it safe to add a leaderboard to a shipped
+ * game.
+ *
+ * **It asks `RoundService` which phase it is in, and never which bodies exist.** Those are two different questions and only
+ * the first one is the round's: the phase is the round's own state, while "what is on the belt" is a fact about the world
+ * that `RoundService` only tracks a subset of. See `collect` for the decoy that proved the difference.
  *
  * ## Why the belt's frame rather than world `X`
  *
@@ -87,6 +91,14 @@ export class LeaderboardService implements OnStart {
 	private readonly bodyKeys = new Map<BasePart, string>();
 	private nextBodyKey = 1;
 
+	/**
+	 * Whether this round's standings line has printed.
+	 *
+	 * Reset wherever the ranking resets - the phase leaving `Playing` - so it is one line per round rather than one per
+	 * server, which is the granularity that makes it comparable with the `[Round]` lines beside it.
+	 */
+	private reportedRound = false;
+
 	public constructor(
 		private readonly round: RoundService,
 		private readonly treadmill: TreadmillService,
@@ -111,6 +123,7 @@ export class LeaderboardService implements OnStart {
 				// leftovers, and a body from a finished round cannot hold a key.
 				this.bodyKeys.clear();
 				this.nextBodyKey = 1;
+				this.reportedRound = false;
 				continue;
 			}
 
@@ -148,12 +161,35 @@ export class LeaderboardService implements OnStart {
 	 *
 	 * The winner rule is still `RoundService`'s business and this service does not touch it - an ownerless decoy twin can
 	 * appear in the standings and still not be a competitor. That is the same asymmetry the `decoy` power is built on.
+	 *
+	 * ## Why the tag and not `round.getLiveBalls()`
+	 *
+	 * **This was the bug that kept decoys off the board.** Every other part of the decoy story landed - `ownerIdentityFor`
+	 * already followed a twin back to its parent so the row would carry the player's own name - but the enumeration still read
+	 * `getLiveBalls()`, which is `RoundService`'s *tracked competitor* set. A decoy is deliberately ownerless and deliberately
+	 * **not tracked**: it is created by the `decoy` power through the spawner, never by `spawnRoundCompetitors`, so it was
+	 * invisible to the one list this service iterated. The fix from item 128 removed the *owner filter* and left the
+	 * *enumeration* alone, which is why the board looked repaired and still never showed a twin.
+	 *
+	 * `CollectionService.GetTagged(TAGS.ball)` is exactly the enumeration `clearAllBodies` already uses, and for the identical
+	 * reason: **the tag is how a body says it is in the game, and a tracked set is how one service remembers its own spawns.**
+	 * The second goes stale the moment anything else creates a body - which is the 21:20 bug that left an untracked ball
+	 * rolling 274 studs past the belt, and now this one. A decoy carries `TAGS.ball` (see `spawnDecoy`), so the tag sees it.
+	 *
+	 * The `IsA("BasePart")` guard is not defensive noise: the tag is a name, not a type, and a `Model` tagged `ball` would
+	 * otherwise reach `PointToObjectSpace` and throw inside the tick - which the loop would report as a failed broadcast
+	 * every second for the rest of the session.
 	 */
 	private collect(): Array<LeaderboardEntry> {
 		const belt = this.beltGeometry();
 		const entries = new Array<LeaderboardEntry>();
 
-		for (const ball of this.round.getLiveBalls()) {
+		for (const candidate of CollectionService.GetTagged(TAGS.ball)) {
+			if (!candidate.IsA("BasePart")) {
+				continue;
+			}
+
+			const ball = candidate;
 			if (ball.Parent === undefined) {
 				continue;
 			}
@@ -189,6 +225,21 @@ export class LeaderboardService implements OnStart {
 		// payload is at most `MaxLiveBalls` entries of four small fields.
 		const ranked = this.rank(entries);
 		this.previousRanked = this.idsOf(ranked);
+
+		// **One line per round, at the first broadcast, naming what the board holds.** Twice now the complaint has been "X is
+		// not in the leaderboard" - the single-row bug and the decoys - and both times the log could not answer it, because a
+		// HUD that publishes silently leaves only a screenshot as evidence. `namesShared` is the number of rows that share a
+		// name with another row, which is exactly what a decoy twin looks like and exactly what nothing else does; a round
+		// with `bodies=14 namesShared=0` is a round whose twin is genuinely absent, and one with `namesShared=1` is a twin on
+		// the board. Display names are not guaranteed unique across accounts, so this is a diagnostic rather than a fact about
+		// players - which is why it is a log line and not a payload field.
+		if (!this.reportedRound) {
+			this.reportedRound = true;
+			print(
+				`[Leaderboard] round standings: bodies=${entries.size()} namesShared=${entries.size() - distinctNames(entries)}`,
+			);
+		}
+
 		return ranked;
 	}
 
@@ -293,7 +344,6 @@ export class LeaderboardService implements OnStart {
 		}
 		return keys;
 	}
-
 	/**
 	 * The belt's frame and its half-length, or a neutral pair when no belt is tagged.
 	 *
@@ -352,4 +402,20 @@ export class LeaderboardService implements OnStart {
 		remote.Parent = folder;
 		return remote;
 	}
+}
+
+/**
+ * How many **distinct** names a set of entries carries.
+ *
+ * Only used by the once-per-round standings line, where the interesting number is the *difference*: rows sharing a name are
+ * what a decoy twin looks like and what nothing else does. Kept out of the class because it is a property of the payload
+ * rather than of the service - no state, no world, no clock.
+ */
+function distinctNames(entries: Array<LeaderboardEntry>): number {
+	const names = new Set<string>();
+	for (const entry of entries) {
+		names.add(entry.name);
+	}
+
+	return names.size();
 }

@@ -164,7 +164,7 @@ describe("applyRobuxChestGrant", () => {
 			ownedBalls.set(ballId, count);
 		}
 
-		return { version: 1, coins: 0, ownedBalls, purchases };
+		return { version: 1, coins: 0, ownedBalls, purchases, lastDailyRewardAt: 0, lastPlaytimeRewardAt: 0 };
 	}
 
 	it("grants one ball from the rare pool and records the purchase", () => {
@@ -339,7 +339,7 @@ describe("applyRobuxChestBundleGrant", () => {
 			ownedBalls.set(ballId, count);
 		}
 
-		return { version: 1, coins: 0, ownedBalls, purchases };
+		return { version: 1, coins: 0, ownedBalls, purchases, lastDailyRewardAt: 0, lastPlaytimeRewardAt: 0 };
 	}
 
 	it("grants count balls and one purchase id, saving once", () => {
@@ -528,5 +528,96 @@ describe("applyRobuxChestBundleGrant", () => {
 		expect(profile.ownedBalls.get("heavy_ball")).toBe(10);
 		expect(profile.purchases.size()).toBe(1);
 		expect(saves).toBe(2);
+	});
+
+	it("forces the last roll to the guaranteed tier when nothing rolled it", () => {
+		// The bundle's term: ten paid rolls that all came back rare still contain one legendary. The forcing is on the *last*
+		// roll, so the first nine keep their honest odds and the grant stays "ten balls, each added once".
+		const profile = profileWith({});
+		const rarities = new Array<Rarity>();
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-floor-1",
+			10,
+			() => true,
+			() => "rare",
+			(rarity) => {
+				rarities.push(rarity);
+				return rarity === "legendary" ? "recycle_ball" : "heavy_ball";
+			},
+			"legendary",
+		);
+
+		expect(result.outcome).toBe("granted");
+		expect(result.floored).toBe(true);
+		expect(result.granted.size()).toBe(10);
+
+		// Nine rares and one legendary, and the legendary is last - the floor replaced a roll, it did not add an eleventh ball.
+		expect(profile.ownedBalls.get("heavy_ball")).toBe(9);
+		expect(profile.ownedBalls.get("recycle_ball")).toBe(1);
+		expect(rarities[rarities.size() - 1]).toBe("legendary");
+	});
+
+	it("does not force anything when the bundle rolled the guaranteed tier itself", () => {
+		// A lucky bundle must read as lucky: `floored` is what the log line keys on, and a guarantee that fires on a bundle
+		// which already had a legendary would tell the player their purchase was worse than it was.
+		const profile = profileWith({});
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-floor-2",
+			10,
+			() => true,
+			() => "legendary",
+			() => "recycle_ball",
+			"legendary",
+		);
+
+		expect(result.outcome).toBe("granted");
+		expect(result.floored).toBe(false);
+		expect(profile.ownedBalls.get("recycle_ball")).toBe(10);
+	});
+
+	it("rolls every slot normally when no guarantee is passed", () => {
+		// The parameter is optional, and its absence has to mean "no floor" rather than "floor to the default tier" - the
+		// single-chest path and every existing caller depend on that.
+		const profile = profileWith({});
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-floor-3",
+			10,
+			() => true,
+			() => "rare",
+			() => "heavy_ball",
+		);
+
+		expect(result.outcome).toBe("granted");
+		expect(result.floored).toBe(false);
+		expect(profile.ownedBalls.get("heavy_ball")).toBe(10);
+	});
+
+	it("reverts the whole bundle when the forced tier has an empty pool", () => {
+		// The floor goes through the same `pickBall` as a rolled tier, so a build with an empty legendary pool must fail the
+		// whole grant rather than shipping nine rares for the price of ten. This is the interaction between the two rules that
+		// a reader is most likely to assume is safe.
+		const profile = profileWith({});
+
+		const result = applyRobuxChestBundleGrant(
+			profile,
+			"bundle-floor-4",
+			10,
+			() => true,
+			() => "rare",
+			(rarity) => (rarity === "legendary" ? undefined : "heavy_ball"),
+			"legendary",
+		);
+
+		expect(result.outcome).toBe("save-failed");
+		expect(result.granted.size()).toBe(0);
+		expect(result.floored).toBe(false);
+		expect(profile.ownedBalls.size()).toBe(0);
+		expect(profile.purchases.size()).toBe(0);
 	});
 });

@@ -319,23 +319,68 @@ export const ROBUX_CHEST_PRICE_ROBUX = 30;
 export const ROBUX_CHEST_RARITIES: Array<Rarity> = RARITIES.filter((rarity) => rarity !== "common");
 
 /**
- * The weight map the Robux chest rolls against: `RARITY_WEIGHTS` with every excluded tier set to **zero**.
+ * The weight map the Robux chest rolls against: **its own table**, not a filtering of `RARITY_WEIGHTS`.
+ *
+ * ## Why the two chests no longer share numbers
+ *
+ * Until the coin economy gained participation, daily and playtime income, `robuxChestWeights()` copied
+ * `RARITY_WEIGHTS` and zeroed commons - so "make legendaries rarer" moved both chests at once, which was the point.
+ * That coupling is now a liability: a **free** chest and a **paid** product answer different questions, and the
+ * monetisation tune that has to happen when the free track gets faster would otherwise silently change the free chest
+ * as well. Retuning the paid one must not move the earned one, so the numbers are stated separately and a change here
+ * is visibly a change to *this* product.
+ *
+ * ## The numbers, and what they trade
+ *
+ * `650 / 250 / 100` over a total of 1000 is **65% rare, 25% epic, 10% legendary**. The legendary rate is the point: a
+ * 1-in-10 top tier is a reason to spend Robux where a 1-in-40 was not.
+ *
+ * | tier | coin chest | paid, before | paid, now |
+ * | --- | --- | --- | --- |
+ * | rare | 30% | 75% | 65% |
+ * | epic | 9% | 22.5% | 25% |
+ * | legendary | 1% | 2.5% | 10% |
+ *
+ * **What pays for it is the rare tier**: ten points of reach moved into the two tiers worth having. Every tier the paid
+ * chest offers is still *strictly better* than the same tier on the free chest - rare 65 against 30, epic 25 against 9,
+ * legendary ten times over - so the product remains a straight upgrade rather than a sideways move, which is the
+ * property to check before any future retune. (The first draft of this docblock claimed epics had been *reduced* in
+ * exchange for legendaries. That was arithmetic on the wrong row: the coin chest's epic rate is `90 / 1000 = 9%`, not
+ * the `300` rare weight read as a percentage. The spec caught it, and it is left here as the concrete reason the two
+ * tables are compared tier by tier rather than eyeballed.)
+ */
+export const ROBUX_CHEST_WEIGHTS: Record<Rarity, number> = {
+	common: 0,
+	rare: 650,
+	epic: 250,
+	legendary: 100,
+};
+
+/**
+ * The weight map the Robux chest rolls against.
+ *
+ * ## Why a function and not just the constant
+ *
+ * `rollFromWeights` takes a `Record<Rarity, number>` and only reads it, but a caller holding the exported table could
+ * mutate it - a shared config value is one stray `weights.legendary = 0` away from a silent product bug that no type
+ * catches. A fresh copy per roll makes that impossible, and it costs one small table per chest.
  *
  * ## Why a full `Record<Rarity, number>` with zeros, not a smaller table
  *
  * Because then the roll needs **one** implementation. `rollFromWeights` walks `RARITIES` and subtracts each weight from
  * a running roll; a tier with weight `0` cannot satisfy `roll < 0` on its own step, so **zero weight is unreachable by
- * construction** ? the exclusion is arithmetic, not a separate branch that could be forgotten. A second, smaller table
+ * construction** - the exclusion is arithmetic, not a separate branch that could be forgotten. A second, smaller table
  * would need a second pick function, and two pick functions are two places for the pools to diverge.
  *
- * The weights themselves are copied from `RARITY_WEIGHTS`, so "make legendaries rarer" remains a one-number edit that
- * moves both chests at once.
+ * The zeros are therefore load-bearing even though `ROBUX_CHEST_WEIGHTS` states them: this function is what makes
+ * "every tier is present in the map" a property of the code rather than a property of somebody remembering to type
+ * `common: 0` in a table edit.
  */
 export function robuxChestWeights(): Record<Rarity, number> {
 	const weights = {} as Record<Rarity, number>;
 
 	for (const rarity of RARITIES) {
-		weights[rarity] = rarity === "common" ? 0 : RARITY_WEIGHTS[rarity];
+		weights[rarity] = ROBUX_CHEST_WEIGHTS[rarity];
 	}
 
 	return weights;
@@ -367,11 +412,32 @@ export const PURCHASE_HISTORY_CAP = 50;
  *
  * A **second** product on the Creator Dashboard, not a quantity on the first: Roblox charges per product, so "ten for the
  * price of eight" has to exist as its own product with its own price. Also fake ? replace both ids together.
+ *
+ * ## The bundle floor, which is the reason to buy this instead of ten singles
+ *
+ * **One of the ten rolls is guaranteed to be `ROBUX_CHEST_BUNDLE_GUARANTEE`** if the bundle has not produced one on its
+ * own. That is the product's whole pitch, and it has to live beside the product id because it is a *term of the sale*:
+ * ten singles at `ROBUX_CHEST_PRICE_ROBUX` would cost more and could return no legendary at all, while this purchase
+ * cannot. A player who reads the store's copy and this constant must find the same promise.
+ *
+ * **Written as a value, not as an if.** The guarantee is a `Rarity` passed into the grant function, so the rule is one
+ * constant that a caller proves it honoured (`floored` in the result) rather than a branch inside a roll loop that a
+ * later refactor can drop. Nothing about it changes the odds table above: the other nine rolls are ordinary paid rolls.
  */
 export const ROBUX_CHEST_BUNDLE_PRODUCT_ID = 1234567891;
 
 /** **Placeholder.** Balls granted per bundle purchase. One charge, one receipt, `count` grants. */
 export const ROBUX_CHEST_BUNDLE_COUNT = 10;
+
+/**
+ * The tier the bundle cannot fail to deliver: **at least one of `ROBUX_CHEST_BUNDLE_COUNT` rolls is this tier.**
+ *
+ * A `Rarity` rather than a `boolean` because "guaranteed legendary" is a *tier promise*, and the shape lets the floor
+ * move - a future bundle that guarantees an epic would change one word here rather than invert a flag at two call
+ * sites. `legendary` is the shipped value: it is the tier the free track virtually never gives (1% a chest, so about
+ * one in a hundred coin chests), which makes it the only tier a paid purchase can promise that grinding cannot.
+ */
+export const ROBUX_CHEST_BUNDLE_GUARANTEE: Rarity = "legendary";
 
 /**
  * **Placeholder.** The bundle's Robux price, **for display only**.
@@ -381,5 +447,53 @@ export const ROBUX_CHEST_BUNDLE_COUNT = 10;
  * billing error.
  */
 export const ROBUX_CHEST_BUNDLE_PRICE_ROBUX = 250;
+
+// #endregion
+
+// #region time-based rewards
+
+/**
+ * **Placeholder.** Coins for the first join of the day.
+ *
+ * Chosen against a round rather than against a chest: a win pays 20 and a loss 10, so fifty is **two and a half wins** -
+ * enough that a player who cannot play today still feels their account moved, small enough that a full session is still the
+ * better deal. It is also exactly half a chest, which is the number to keep in mind before raising it.
+ */
+export const DAILY_LOGIN_REWARD_COINS = 50;
+
+/**
+ * **Placeholder.** How long between daily logins, in seconds: **twenty hours**, not twenty-four.
+ *
+ * The gap is deliberately shorter than a day. At exactly 24 hours a player who plays at eight every evening is paid late
+ * every evening, and one who plays at eight one day and seven the next is paid **nothing** - the cooldown is a rate, not an
+ * appointment, and 20 hours absorbs that drift while still being one reward a day for anyone playing a normal schedule.
+ */
+export const DAILY_LOGIN_COOLDOWN_SECONDS = 20 * 60 * 60;
+
+/**
+ * **Placeholder.** Coins per playtime interval.
+ *
+ * A quarter of a chest every fifteen minutes: about four chests an hour of *staying connected*, against roughly six from
+ * winning rounds. The ordering matters - the stipend should not out-earn playing - and that is the relation to preserve.
+ */
+export const PLAYTIME_REWARD_COINS = 25;
+
+/**
+ * **Placeholder.** How long a player must be in the server to earn the stipend, in seconds.
+ *
+ * Measured from **load**, not from the epoch: see `playtimeBaselineAtLoad`. A stored timestamp that has already expired is
+ * moved forward at load rather than paid immediately, so an absence is never billed as playtime.
+ */
+export const PLAYTIME_REWARD_INTERVAL_SECONDS = 15 * 60;
+
+/**
+ * **Placeholder.** How often the playtime pass runs, in seconds.
+ *
+ * **A ticker, not a timer per player.** One thread walks the player list once a minute and asks each profile a question,
+ * which for a fifteen-minute interval is at most sixty seconds of lateness - invisible for a stipend - and costs one
+ * iteration over a list that is at most a few dozen long. A `task.spawn` per player would be a thread and a `task.wait` per
+ * joiner, all of them awake at once, for a 0.2% accuracy gain nobody asked for.
+ */
+export const PLAYTIME_TICK_SECONDS = 60;
 
 // #endregion

@@ -199,3 +199,36 @@ export const DECOY_OUTLINE_REMOTE_NAME = "DecoyOutline";
  * be showing a leaderboard for a round that ended.
  */
 export const LEADERBOARD_UPDATE_REMOTE_NAME = "LeaderboardUpdate";
+
+/**
+ * A player's round payout: **server to client only, one recipient, fired once per round that had a result to pay.**
+ *
+ * ## Why it is not an attribute or a broadcast
+ *
+ * An attribute would be a **persistent** slot for a **one-shot event**: the panel it drives is an animation, and an
+ * attribute that stayed set would either replay the panel for a player who rejoins inside `PostGame` or need a second
+ * attribute saying "and you have already seen it". A broadcast would carry one player's numbers to everybody else, which
+ * is a payout breakdown for a race they did not run in the same order.
+ *
+ * ## Why the balances are in the payload
+ *
+ * `EconomyService.grantCoins` publishes the new balance before this fires, so a client that read `Coins` on arrival would
+ * see the *end* of the animation it is meant to start. The two numbers are only both known on the server, in the method
+ * that changed them — see `RoundPayoutMessage` in `shared/round-payout`.
+ *
+ * Fired **only when the grant succeeded.** A player with no profile is paid nothing (the economy logs why), and a panel
+ * counting up coins that were never added is worse than no panel.
+ */
+export const ROUND_PAYOUT_REMOTE_NAME = "RoundPayout";
+
+/**
+ * A time-based reward: **server to client only, one recipient, fired when coins were actually added.**
+ *
+ * The two grants this carries - the daily login and the playtime stipend - differ only in their label and their amount, and
+ * they reach the client the same way. A second remote would be a second name for one message.
+ *
+ * **Fired after the grant succeeded, never before.** The toast says "you were paid"; a toast for a save that failed would be
+ * the only report of a reward the player did not get. The amount in the payload is what was added, which is why it travels
+ * from the server rather than being re-derived here from the schedule.
+ */
+export const REWARD_TOAST_REMOTE_NAME = "RewardToast";

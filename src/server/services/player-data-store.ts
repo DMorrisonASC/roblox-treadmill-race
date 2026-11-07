@@ -130,19 +130,33 @@ export function profileKeyFor(userId: number, studio: boolean): string {
 }
 
 /**
+ * Whether this session is a Studio playtest.
+ *
+ * **The one `RunService.IsStudio()` read in the tree.** It is exported rather than repeated because the rule this module
+ * documents - one environment read, so nothing can half-disagree about which environment it is in - is worth more than the
+ * import it saves elsewhere. `profileKey` is its first caller; the economy's Studio-only reward preview is the second.
+ *
+ * It answers a question about the *environment*, not about the place's publication state: a playtest of a published place is
+ * Studio too. A live server is the one place it returns false.
+ */
+export function isStudioSession(): boolean {
+	return RunService.IsStudio();
+}
+
+/**
  * The key this server should use for `player`.
  *
- * **`RunService.IsStudio()` is read here and nowhere else in the tree.** One read means the namespace cannot be half a
- * namespace — a `loadAsync` that agreed with `release` but not with `saveAsync` would strand a lock on a key nobody
- * reads again. It also means there is exactly one thing to audit when the question is "could anything choose the
- * namespace": the answer is this function, and nothing else in `src/` calls `profileKeyFor` with a computed flag.
+ * **`RunService.IsStudio()` is read through `isStudioSession` and nowhere else in the tree.** One read means the namespace
+ * cannot be half a namespace — a `loadAsync` that agreed with `release` but not with `saveAsync` would strand a lock on a key
+ * nobody reads again. It also means there is exactly one thing to audit when the question is "could anything choose the
+ * namespace": the answer is that function, and nothing else in `src/` calls `profileKeyFor` with a computed flag.
  *
  * Note what the predicate does and does not mean: `IsStudio()` reports the *environment*, not the *place's publication
  * state*, so a playtest of a published place is Studio too and gets the `_Dev` key. That is the case this exists for.
  * A live server is the one place it returns false.
  */
 function profileKey(player: Player): string {
-	return profileKeyFor(player.UserId, RunService.IsStudio());
+	return profileKeyFor(player.UserId, isStudioSession());
 }
 
 /** The schema this build reads and writes. A profile at any other version is refused, never upgraded. */
@@ -197,6 +211,17 @@ export interface Profile {
 	 * one write, no window.
 	 */
 	purchases: Array<string>;
+
+	/**
+	 * `os.time()` of the last daily-login grant, or **`0` for an account that has never had one**.
+	 *
+	 * Required here and optional on disk, exactly like `purchases` - see `StoredProfile`. `0` rather than `undefined` so
+	 * every reader is a number comparison instead of a `?? 0`, and so "never paid" has one spelling.
+	 */
+	lastDailyRewardAt: number;
+
+	/** `os.time()` of the last playtime stipend, or `0`. Same rules as `lastDailyRewardAt`. */
+	lastPlaytimeRewardAt: number;
 }
 
 /** Who holds a profile and since when, as stored. */
@@ -219,6 +244,16 @@ interface StoredProfile {
 	 * `SCHEMA_VERSION` stays at 1.
 	 */
 	purchases?: Array<string>;
+	/**
+	 * Optional **on disk** for the same reason as `purchases`: every profile written before the time-based rewards existed
+	 * has no such key, and `readStored` fills the gap with `0`.
+	 *
+	 * **No `SCHEMA_VERSION` bump.** A bump makes `readStored` refuse every profile written by an earlier build, which would
+	 * put every session into `readonly` to record two timestamps that default safely. The version says "this build
+	 * understands this data"; it does, with or without these keys.
+	 */
+	lastDailyRewardAt?: number;
+	lastPlaytimeRewardAt?: number;
 	lock?: StoredLock;
 }
 
@@ -353,6 +388,14 @@ export function readStored(value: unknown): Stored | undefined {
 		}
 	}
 
+	// **A timestamp is defaulted, not validated.** Any profile written before the time-based rewards existed has neither
+	// key, and `0` means "never paid" - the true answer. A *malformed* value is also read as `0` rather than refused: the
+	// cost is one reward granted early, while a refusal would put the player's whole account into `readonly` over a field
+	// they never wrote. `math.floor` for the same reason the owner id in `round-service` uses it - a float that arrived
+	// through a hand-edited value must not make two timestamps compare unequal through number formatting.
+	const lastDailyRewardAt = readTimestamp((value as { lastDailyRewardAt?: unknown }).lastDailyRewardAt);
+	const lastPlaytimeRewardAt = readTimestamp((value as { lastPlaytimeRewardAt?: unknown }).lastPlaytimeRewardAt);
+
 	const rawLock = (value as { lock?: unknown }).lock;
 	let lock: StoredLock | undefined;
 	if (rawLock !== undefined) {
@@ -369,7 +412,23 @@ export function readStored(value: unknown): Stored | undefined {
 		lock = { session, at };
 	}
 
-	return { profile: { version: SCHEMA_VERSION, coins, ownedBalls, purchases }, lock };
+	return {
+		profile: { version: SCHEMA_VERSION, coins, ownedBalls, purchases, lastDailyRewardAt, lastPlaytimeRewardAt },
+		lock,
+	};
+}
+
+/** A stored timestamp, or `0` for "absent, not a number, or not a positive number". */
+function readTimestamp(value: unknown): number {
+	if (!typeIs(value, "number")) {
+		return 0;
+	}
+
+	// Floored for the same reason `readOwner` floors an owner id: a fractional value that arrived by accident must not
+	// compare unequal to the integer it was meant to be. `<= 0` is `rewardDue`'s "never paid" case, so a negative or `NaN`
+	// value is normalised to it here rather than left for every reader to handle.
+	const floored = math.floor(value);
+	return floored > 0 ? floored : 0;
 }
 
 /**
@@ -384,6 +443,12 @@ export function toStored(profile: Profile, session: string): StoredProfile {
 		coins: profile.coins,
 		ownedBalls: flattenOwned(profile.ownedBalls),
 		purchases: profile.purchases,
+		// **Both timestamps, and this is the write path that makes them exist at all.** `readStored` defaults them, so a
+		// save that omitted them would write a profile whose rewards "never happened" on every single save - the cooldown
+		// would reset each time the player did anything, and the daily login would pay out on every grant that followed it.
+		// `release`'s rebuild has the same obligation; it is the second of exactly two places a stored value is constructed.
+		lastDailyRewardAt: profile.lastDailyRewardAt,
+		lastPlaytimeRewardAt: profile.lastPlaytimeRewardAt,
 		lock: { session, at: os.time() },
 	};
 }
@@ -400,7 +465,16 @@ export function flattenOwned(ownedBalls: Map<string, number>): Record<string, nu
 
 /** A brand-new profile. Coins are granted here and nowhere else, so "a new player" has exactly one definition. */
 function emptyProfile(startingCoins: number): Profile {
-	return { version: SCHEMA_VERSION, coins: startingCoins, ownedBalls: new Map(), purchases: [] };
+	return {
+		version: SCHEMA_VERSION,
+		coins: startingCoins,
+		ownedBalls: new Map(),
+		purchases: [],
+		// `0` is "never paid", and `rewardDue` reads it as due - which is what makes a brand-new account's first join pay the
+		// daily login. The playtime clock is baselined separately at load, because that one must *not* be paid on arrival.
+		lastDailyRewardAt: 0,
+		lastPlaytimeRewardAt: 0,
+	};
 }
 
 /**
@@ -621,6 +695,11 @@ export class PlayerDataStore {
 						// erased — releasing the lock would have wiped the purchase history and re-opened the door to a
 						// duplicate grant on the player's next purchase.
 						purchases: stored.profile.purchases,
+						// Same obligation as the line above, for the same reason: this literal is a **rebuild**, so omitting
+						// a field erases it. Losing a timestamp would hand the player their daily login again on the next
+						// join, which is a reward the log cannot tell apart from a correct one.
+						lastDailyRewardAt: stored.profile.lastDailyRewardAt,
+						lastPlaytimeRewardAt: stored.profile.lastPlaytimeRewardAt,
 						lock: undefined,
 					};
 

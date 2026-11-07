@@ -150,7 +150,11 @@ export function chestOdds(): Array<ChestOdd> {
  * The Robux chest's odds: the same tiers as the coin chest **minus commons**, renormalised over what survives.
  *
  * Derived from `robuxChestWeights()`, so the displayed table and the rolled table are the same numbers. With the shipped
- * weights (rare 300, epic 90, legendary 10 over a total of 400) this is **75% / 22.5% / 2.5%**, summing to exactly 100.
+ * weights (rare 650, epic 250, legendary 100 over a total of 1000) this is **65% / 25% / 10%**, summing to exactly 100.
+ *
+ * **The numbers are the paid table's own.** They used to be the coin chest's weights renormalised over three tiers,
+ * which meant a monetisation tune could not move one chest without moving the other; see `ROBUX_CHEST_WEIGHTS` for why
+ * that coupling was removed and for the epic trade the new split makes.
  *
  * The coin chest's table is untouched by this function ? it reads `RARITY_WEIGHTS` directly and every one of its
  * weights is positive, so `oddsFrom` returns all four rows exactly as before.

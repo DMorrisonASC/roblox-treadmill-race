@@ -3481,3 +3481,129 @@ entry.button.BackgroundTransparency = enabled ? 0 : DISABLED_WASH;   // removed
 **Audit.** `src/server/services/round-service.ts` only - `forceWaiting` (the call and its comment), `debugSpawnCompetitors` (signature, guard, refusal log, success log, `return spawned.size()`), and its docblock, which swapped the "refused outside `Playing`" argument for the `Waiting`-is-safe one plus a "why it returns a count" section. Build, lint, prettier and tests green at **295 in 21 files**; `\uXXXX` zero; `flamework.build` unchanged at 23 identifiers - no new service and no decorated method, so nothing reflection-visible changed.
 
 **Studio-only:** that the bots-plus-player population is right for watching a round with - there is no `DEBUG_COMPETITORS` constant, the press spawns one per **bound spawner** (`getBoundSpawnerCount()`), so "four" is a property of the place rather than a number this round chose, and that the extra `[Round] debug spawn (auto-bots for debug key 2)` line between the spawn and the transition reads as one press rather than as two.
+
+## 132. Rounds pay coins, and the payout gets its own visual language
+
+**Reported: there is no way to earn coins.** Correct, and worse than cosmetic - the chest, the picker's re-roll and the fusion verb all spend a currency whose only sources were the command bar and a Robux purchase. A round now pays **base 10 for turning up plus 15/10/5 for the podium**, granted through the `grantCoins` path item 51 wrote and nothing had ever called.
+
+**The rule is `shared/round-payout`, not eight lines in `endPlaying`.** `RoundService` cannot be constructed in Jest (its dependencies reach `DataStoreService`), so a payout written inside the transition would only be checkable by playing a round - the argument that produced `round-outcome`. Eleven assertions now cover the table, the reversal, the no-winner branch, synthetic owners and duplicates.
+
+**Placement is the elimination record, read backwards.** There is no ranking in this game: a round ends on "one competitor left wins", the `initialLiveCount` guard was deleted with item 72, and the leaderboard is a 1 Hz snapshot of live distances with hysteresis on top. So `RoundService` records the order bodies leave (in `settleEliminations` and in `handleExternalDestruction`, the two places an owner is read) and the winner is prepended. **A `no survivors` round ranks nobody and pays base only** - the alternative was promoting whichever body a cleanup loop happened to destroy last into first place, which the banner would then contradict.
+
+**The participant list is recorded at `trackBall`, and it had to move twice.** First at `enterPlaying`, which was wrong for a reason item 131 created: competitors are spawned during `Waiting` (including the auto-bots), so a reset at `Playing` entry would have paid nobody. It now lives in `clearAllBodies`, the one place every round's body set ends.
+
+**Where the brief was wrong, in four places.** (1) It asks the client to read `Coins` before and after the grant; `grantCoins` publishes the new balance *before* the remote fires, so "before" no longer exists when the handler runs - both numbers travel in the payload. (2) Its `{ base, bonus, total }` payload cannot drive a rolling balance for the same reason. (3) "Wait 3 seconds" after counting up does not fit: `POST_GAME_SECONDS` is 5, the wipe that ends the phase is drawn above this panel's layer, and fade-in + two counts + a roll + 3 s of hold is ~6 s, so the cover would cut the counter mid-roll. The hold is now **derived** from the phase. (4) `initialLiveCount` does not exist to calculate from.
+
+**The panel is a new direction, and it is local on purpose.** `shared/round-payout` is shared, but the look is not: `payout-controller` owns its own palette (`#D4AF37` gold, near-black glass at 0.1 transparency, one 1 px gold hairline) rather than `chunkyDarkTheme`, because a payout is a statement about money and the chunky language belongs to things you press. It mounts on the `splash` layer - above the HUD, below the wipe. The fade is **one `NumberValue`** driving every element as `mix(1, resting, reveal)`, so "revealed" is a single fact and the fade-out is the same tween reversed; the counts and the balance are `TweenService` on `NumberValue`s read through `Changed`, not `RenderStepped` loops that would need disconnecting on a self-destructing frame.
+
+**Audit.** New: `src/shared/round-payout.ts` (+ `.spec.ts`, 11 assertions), `src/client/controllers/payout-controller.ts`. Changed: `src/server/services/round-service.ts` (participant/elimination records, `recordElimination`, `payOut`, `createRoundPayoutRemote`, `readCoins`), `src/shared/remotes.ts` (`RoundPayout`), `src/server/services/economy-service.ts` (one stale docblock line: `grantCoins` said "not called by anything yet"). Build, lint, prettier and tests green at **306 in 22 files**; `\uXXXX` zero; `flamework.build` regenerated to **24 identifiers** (the new controller).
+
+**Studio-only:** that `#D4AF37` on near-black is the intended read rather than "brass", that the derived 3 s hold is long enough to read the breakdown, that the panel survives a phone's viewport as a centred card, and that the coin grant is visible in the shop's pill at the next `Intermission`.
+
+## 133. The payout panel was a stranger: it now speaks Chunky, and only its paint changed
+
+**Reported: the payout screen looks like a bank, not like this game.** Item 132 built it from a brief that asked for "sleek fintech" - glass at `0.1` transparency, a 1-pixel gold hairline, GothamMedium at caption weights - and the result was internally consistent and wrong, because **visual identity is a contract**. A payout is one of the most-seen surfaces in the game and the player meets it seconds after a round ends, which is the exact moment the game should look most like itself.
+
+**The paint came across; the motion did not move one line.** The reveal `NumberValue`, the three counting `TweenService`s, the derived hold, the `formatCoins` roll and the self-destructing frame are the same code as item 132. A style is a set of colours, weights and offsets, and none of those are animation decisions - so the restyle is confined to what is *drawn*.
+
+**The face is `buildChunkyPanel`, not a copy of its hierarchy.** The shadow depth (`10`), the face-only outline (`6`), the corner radius (`12`) and the centring anchor come from the module the store and the inventory already use; a copy here would be a second description of the house style that drifts the first time either is retuned. The face colour is `theme.paint.panel`, which the theme documents as *equal to* `CHUNKY_PANEL_FACE` - named through the theme so a sheet retint reaches this panel. **The shadow plate is left at the module's `CHUNKY_PANEL_SHADOW`**, and that is the one place the brief's "use the theme for the face and shadow colours" could not be followed: the theme has no shadow-plate slot, and `colors.shadow` is pure black - darker than the `10, 10, 12` outline the builder draws on the face, which would erase the very band that creates the depth.
+
+**A hairline rule cannot survive this language, so the divider became a plate.** The fintech panel separated the balance with a 1-pixel gold line; hairline rules are the one thing Chunky never draws. Bands are separated here by a **value step** - `paint.surface`, one step below the face, with its own `rgb(20, 20, 20)` outline at the control weight - which is the same move the store's bands make and reads as inset rather than raised.
+
+**The bar became a well.** `4` pixels with no edge became `16` with `paint.trough` behind it and `CHUNKY_CONTROL_STROKE` outlines on both the trough and the fill, so an empty bar still reads as a slot cut into the panel and a half-full one reads as a solid object sliding in it. The `Size.X` tween is untouched.
+
+**The text outlines had to join the fade, and that is the one bug the restyle could have shipped.** A `UIStroke`'s transparency is its own property - lowering `TextTransparency` does not fade the outline with it, which is exactly why `elimination-splash-controller` tweens a word and its stroke as two targets. Every label is now built through one `label()` helper that pushes the stroke `outlineText` created onto the same driver list, so the reveal is still one number and no glyph outline is ever visible without its glyph.
+
+**Where the brief was wrong, in three places.** (1) `scale.ts` exports **one** font, `FONT` = GothamMedium; there is no GothamBlack to import from it. GothamBlack is the family's *display* weight and lives as a local constant in `chunky-button` (`TITLE_FONT`) and a local literal in `leaderboard-controller`, so it is a local `TITLE_FONT` here too - adding a second export to `scale.ts` would be a second answer to "what font is this game". (2) The store's `coinDot` has **no** stroke: it is a flat `20`-pixel circle in `colors.coin` with a `UDim(1, 0)` corner, because it sits inside a saturated price pill. The size and the colour here are the store's own; the 2-pixel `colors.shadow` edge is added because this coin sits on charcoal next to the largest number on screen, and that difference is deliberate rather than a copy. (3) "The 3-second hold must remain exactly as it is" - it does, and it is *derived*: `5 - 0.2 - 1.25 - 0.35 - 0.2 = 3.0`, so the note is satisfied by construction rather than by a literal.
+
+**Audit.** `src/client/controllers/payout-controller.ts` only. No server change, no payload change, no new controller - `flamework.build` is unchanged. Build, lint, prettier and tests green at **306 in 22 files**; `\uXXXX` zero.
+
+**Studio-only:** that the derived 3 s hold still reads as a pause rather than a stall under a heavier panel, that GothamBlack at `18` does not crowd the title row, and that a `3`-pixel outline on a `16`-pixel bar reads as an edge rather than eating the fill at third place's 33%.
+
+## 134. Round payouts were tuned down, and two time-based rewards went in beside them
+
+**Reported: rounds are the only source of coins, so a session without a win earns nothing.** The placement ladder is now `[10, 5, 0]` - first pays 20 all in, third pays the base rate and nothing more - and two schedules were added: a **50-coin daily login** and a **25-coin stipend every 15 minutes** of play.
+
+**`toStored` was the trap, and the brief never mentioned it.** It names `Profile`, `StoredProfile`, `readStored` and `release` - but `toStored` is the function every *save* builds its value from, so a field it forgets is erased on every single write. Omitting the two timestamps there would not have failed to compile and would not have looked like a bug: the daily login would simply have paid again after any round, chest or admin command, because each of those saves would have written a profile that had never been paid. Both `toStored` and `release`'s rebuild now restate both fields, and `reward-schema.spec.ts` asserts the round trip rather than trusting that the three literals agree.
+
+**`grantCoins` already saves, so the reward is stamped *before* it rather than after.** The brief's sequence - grant, update the timestamp, save - is two `UpdateAsync` calls with a window between them; a crash in that window leaves coins granted and the clock unread, and the next pass pays again. Setting the stamp first puts the balance and the timestamp in **one** write. On failure `grantCoins` reverts the coins and `award` reverts the stamp to the value it captured, so a failed save leaves the reward due rather than silently skipped.
+
+**The playtime condition, taken literally, pays a brand-new player twice.** `os.time() - (lastPlaytimeRewardAt ?? 0) >= 900` is true for the `0` that every migrating profile reads as, so a first join would mint 25 coins in the same second as the 50-coin login and show two toasts for one arrival. `playtimeBaselineAtLoad` moves a stored value that is **already past its interval** forward to the load time, so the stipend means fifteen minutes *of playing*; a stored value still inside the interval is kept, which is what stops a rejoin every fourteen minutes from resetting progress forever.
+
+**Where the brief was wrong, in four places.** (1) `toStored`, above - the write path. (2) The three-step grant, above - it is one step. (3) `lastDailyRewardAt?: number` - optional in memory would put `?? 0` at every reader and make "never paid" two spellings; the repo's own precedent (`purchases`) is required in `Profile`, optional on disk, defaulted in `readStored`. That is a compile error in four existing spec factories, which is the point: the compiler lists the readers. (4) The playtime condition's first-join behaviour, above.
+
+**The ticker is one thread, not one per player.** `PLAYTIME_TICK_SECONDS = 60` wakes a single loop that walks `Players.GetPlayers()` and asks each profile a question: at most a minute of lateness on a fifteen-minute stipend, and nothing to leak. The pass is `pcall`ed because a background thread that throws is gone for the session - one bad profile would otherwise switch the stipend off for everyone. `os.time()` is read once per pass so every player in it is judged against the same instant.
+
+**The toast is its own controller, not the payout panel.** A payout replaces the screen's attention; a toast must not interrupt. It is 240x52, top-centre, slides down one card-height while a single reveal driver fades the face, the shadow plate and six outlines in, holds `3`s, then reverses and destroys itself. **No frame in it is `Active`**, so a reward arriving mid-picker cannot eat a click. Toasts stack by slot rather than replacing each other, because the one thing a notification must not do is silently drop a message.
+
+**Audit.** New: `src/shared/rewards.ts` (+ `.spec.ts`, 9 assertions), `src/server/test/reward-schema.spec.ts` (6), `src/client/controllers/reward-toast-controller.ts`. Changed: `src/shared/round-payout.ts` (ladder + the ratio note), `src/shared/economy.config.ts` (five constants), `src/shared/remotes.ts` (`RewardToast`), `src/server/services/player-data-store.ts` (fields, `readTimestamp`, `toStored`, `emptyProfile`, `release`), `src/server/services/economy-service.ts` (`award`, `startPlaytimeRewards`, `payPlaytimeRewards`, the load hook, the remote), and four existing spec factories for the new required fields. Build, lint, prettier and tests green at **322 in 24 files**; `\uXXXX` zero; `flamework.build` regenerated to **25 identifiers** (the toast controller). `SCHEMA_VERSION` untouched at 1.
+
+**Studio-only:** that a real DataStore round-trip preserves both timestamps (the write path is asserted, the platform is not), that `release`'s rebuild keeps them (it runs inside an `UpdateAsync` transform and needs a live store), that the toast's 52-pixel card does not collide with the topbar on a phone, and that 60-second ticker lateness is invisible in the log.
+
+## 135. The daily-login toast plays on every Studio session, and pays nothing
+
+**Reported: the daily toast is untestable.** It fires at most once per twenty hours, so a playtest either shows it by luck or does not show it at all - and the thing being iterated on is a card, not a balance.
+
+**In Studio, a session that is *not* due now fires the toast anyway, with no grant.** No coins move, no save happens, and `lastDailyRewardAt` keeps its stored value, so the real reward still lands on its real schedule. The log says so explicitly:
+
+```
+[Economy] morri reward Daily Login preview amount=50 (studio, no grant)
+```
+
+The word is `preview` and the amount is the schedule's nominal value, because the card is being *rendered* rather than reported - a toast that said `+50` after a real grant and a toast that says `+50` in a preview are different events, and the log is the only place that distinction can survive.
+
+**It fires on the read-only path too.** A Studio session whose `DataStore` is refused would otherwise reach `return` before any reward code, which is the state where a designer most wants to look at the toast. Gated on `isStudioSession()` and nothing else, because the whole point is that a plain `Play` shows it without a step somebody has to remember - a debug key would be the same untestability one level down.
+
+**`RunService.IsStudio()` still has exactly one reader.** `player-data-store` documents that rule on `profileKey` ("one read means the namespace cannot be half a namespace"), so rather than importing `RunService` into a second file the predicate was lifted into `isStudioSession()` and `profileKey` now calls it. The audit statement stays true: one environment read, two callers.
+
+**Nothing else changed.** The `.spec.ts` suites are untouched (this is a branch no test can reach - the environment is a fact, not an input), the payload is the same, and the playtime stipend was deliberately **not** given the same treatment: it is minutes away, so it needs no preview.
+
+**Audit.** `src/server/services/player-data-store.ts` (`isStudioSession`, docblock), `src/server/services/economy-service.ts` (`toast` split out of `award`, `previewDailyLogin`, two call sites in `spawnLoad`). Build, lint, prettier and tests green at **322 in 24 files**; `\uXXXX` zero; `flamework.build` unchanged.
+
+**Studio-only:** that the preview toast appears on a plain `Play` with a warm profile and with a refused store, and that the coin pill does not move when it does.
+
+## 136. The paid chest got its own odds table and a guarantee, and the epic row got read wrong twice
+
+**Reported: the faster free track makes the Robux chest feel optional.** Two changes: the paid chest now rolls **65% rare / 25% epic / 10% legendary** (was 75 / 22.5 / 2.5), and the ten-chest bundle **cannot fail to deliver a legendary**.
+
+**The paid chest could not be retuned at all before this, and that is the real finding.** `robuxChestWeights()` did not own a table - it *copied* `RARITY_WEIGHTS` and zeroed commons, with a docblock celebrating the coupling ("make legendaries rarer remains a one-number edit that moves both chests at once"). That is exactly the trap this task needed to escape: changing the paid legendary rate would have changed the **free** chest's, which the brief forbids. So `ROBUX_CHEST_WEIGHTS` is now its own exported table and the function is a per-roll copy of it (a caller holding a shared config table is one stray `weights.legendary = 0` away from a silent product bug).
+
+**The bundle floor forces the last roll; it does not upgrade the worst one.** Upgrading a granted ball means decrementing one count and incrementing another inside the all-or-nothing snapshot - a bug there corrupts `ownedBalls` rather than merely mis-stating a rarity. Taking the last slot keeps the invariant "ten balls, each added exactly once", keeps the first nine rolls at their honest odds, and makes the guarantee a statement about the *set*, which is what the product sells. The rule is a `Rarity` (`ROBUX_CHEST_BUNDLE_GUARANTEE`), not a boolean, so a future "bundle guarantees an epic" is one word.
+
+**Where the brief was wrong, in four places.** (1) It says the weights are `750 / 225 / 25` out of 1000 - they were `300 / 90 / 10` out of 400, because the map was a filtered `RARITY_WEIGHTS`. (2) `ROBUX_CHEST_PRICE_ROBUX` is `30`, not `25`, and the bundle is `250`, not `200`. (3) "Update `odds.ts` tests to match" understates it: `odds.spec.ts` also carried an **invariant** ("beats the coin chest for every tier"), and at least one *other* spec derived the Robux odds from `RARITY_WEIGHTS` - both had to be re-pointed or they would have gone on asserting the coupling. (4) The `economy.config.spec.ts` assertion that the surviving weights sum to *less* than the full table is now false and meaningless: the paid table totals 1000 on its own, so there is no renormalisation step left.
+
+**The docblock was wrong twice before the specs caught it, and both drafts are recorded.** First: "the trade is the epic tier, 25% here against the free chest's 30%". The coin chest's epic rate is `90 / 1000 = 9%`, not the `300` rare weight read as a percentage - so the paid chest wins *every* tier and there is no trade. Second: the "reach tier pays for it" comparison is only true against the *previous paid table* (75 -> 65 rare), not against the free one (65 against 30). The comment now carries a tier-by-tier table plus a note that the first draft was arithmetic on the wrong row, because that is the kind of mistake a table prevents and prose does not.
+
+**The Policy gate is untouched, and should be.** `policyAllowsPurchase` answers "may this player receive a paid random item at all". The floor caps the downside of a draw; it does not make the draw deterministic - the player still does not know which ball, nor which of the ten slots carries the tier - so the item is exactly as random as it was and the disclosure obligations are identical.
+
+**Audit.** `src/shared/economy.config.ts` (`ROBUX_CHEST_WEIGHTS`, `robuxChestWeights`, `ROBUX_CHEST_BUNDLE_GUARANTEE`, the product-id docblock), `src/shared/odds.ts` (docblock only - the function already derives from the weights), `src/server/services/economy-service.ts` (`guaranteed` parameter, `floored` flag, the floor log line, the constant passed at the bundle call site), `src/shared/odds.spec.ts`, `src/shared/economy.config.spec.ts`, `src/server/test/economy-service.spec.ts` (four new bundle-floor cases, including the interaction with the empty-pool abort). Build, lint, prettier and tests green at **327 in 24 files**; `\uXXXX` zero; `flamework.build` unchanged at 25 identifiers.
+
+**Studio-only:** that a real receipt with the bundle product id returns a legendary in ten rolls that would otherwise have none (the roll is injectable and the floor is asserted, but `ProcessReceipt` needs a real purchase), and that the store's odds copy - which reads `robuxChestOdds()` - now prints 65 / 25 / 10 without a second edit.
+
+## 137. The decoys were never enumerated, only *filtered* - and that is why they were still missing
+
+**Reported: decoys are still not on the leaderboard.** Item 128 removed the owner filter, item 129 taught the board to name a twin after its parent, and neither could help, because `collect()` never saw a twin in the first place:
+
+```ts
+for (const ball of this.round.getLiveBalls()) {   // RoundService's *tracked competitor* set
+```
+
+A decoy is created by the `decoy` power through `spawnDecoy`, never by `spawnRoundCompetitors`, and it is deliberately ownerless - so it is not in `liveBalls` and never was. The board was repaired everywhere except at the door.
+
+**The enumeration is now `CollectionService.GetTagged(TAGS.ball)`**, which is exactly what `clearAllBodies` already uses and for the identical reason: *the tag is how a body says it is in the game; a tracked set is how one service remembers its own spawns.* The second goes stale the moment anything else creates a body - the 21:20 bug that left an untracked ball rolling 274 studs past the belt, and now this one. `spawnDecoy` adds `TAGS.ball` before parenting, so the tag sees it. `RoundService` is still injected, but now only to answer **which phase it is** - never which bodies exist.
+
+**Putting twins on the board exposed a leak, and it is fixed in the same round.** `ownerIdentityFor` answered "who is this twin" by reverse-scanning `decoysByParent` - and `forgetDecoy` deletes that link when the *parent* dies, which is the ordinary end of a decoy's life (the parent is the body being raced). From that instant the orphaned twin would have published as `Decoy B7`, announcing the fake to the whole server. The twin now carries a copy of its parent's `{userId, name}`, taken at spawn in `decoyIdentities`; it survives the parent by design, it is one map read instead of a ~40-entry scan per body per second, and it cannot disagree with anything because it is a snapshot rather than an index.
+
+**A diagnostic, because this is the second "X is missing from the board" that a screenshot had to explain.** One line per round, at the first broadcast:
+
+```
+[Leaderboard] round standings: bodies=14 namesShared=1
+```
+
+`namesShared` is the number of rows sharing a name with another row - which is what a decoy twin looks like and what nothing else does. A round with `bodies=14 namesShared=0` now *says* the twin is absent instead of leaving it to be inferred from a picture.
+
+**What the pasted log proves, and what it does not.** It shows the twin alive (markers on `Workspace.SpawnedBalls.Decoy`, `bodyTaggedBall=true`, `[Decoy] outline granted decoy=Workspace.SpawnedBalls.Decoy`) while `live=13` competitors were tracked - so the body existed, carried the tag, and had a parent to name it after. The board could not have listed it. What the log cannot show is the broadcast contents; that is what the new line is for.
+
+**Audit.** `src/server/services/leaderboard-service.ts` (tag enumeration, `IsA` guard, `distinctNames`, `reportedRound`, two docblocks), `src/server/services/ball-spawner-service.ts` (`decoyIdentities`, the copy at spawn, the simplified `ownerIdentityFor`, the delete in `forgetDecoy`). Build, lint, prettier and tests green at **327 in 24 files**; `\uXXXX` zero; `flamework.build` unchanged at 25 identifiers.
+
+**Studio-only:** that the board now shows two identically-named rows while a twin is alive (the code paths are asserted only by reading - the spawner and the service both need a DataModel), that losing the parent keeps the twin's row named, and that a decoy's row carries the parent's name rather than `Decoy`.

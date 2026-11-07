@@ -51,7 +51,7 @@ function always(value: number): () => number {
 }
 
 function profileWith(coins: number): Profile {
-	return { version: 1, coins, ownedBalls: new Map(), purchases: [] };
+	return { version: 1, coins, ownedBalls: new Map(), purchases: [], lastDailyRewardAt: 0, lastPlaytimeRewardAt: 0 };
 }
 
 /** A decoded-attribute string, i.e. what `encodeOwnedBalls` writes. */

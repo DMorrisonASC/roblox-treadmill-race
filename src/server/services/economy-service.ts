@@ -41,16 +41,22 @@ import {
 	checkBulkOpenCount,
 	chestBatchCost,
 	COIN_CHEST_COST,
+	DAILY_LOGIN_COOLDOWN_SECONDS,
+	DAILY_LOGIN_REWARD_COINS,
 	ECONOMY_ACTION_COOLDOWN_MS,
 	encodeOwnedBalls,
 	FUSION_INPUT_COUNT,
 	FUSION_TABLE,
+	PLAYTIME_REWARD_COINS,
+	PLAYTIME_REWARD_INTERVAL_SECONDS,
+	PLAYTIME_TICK_SECONDS,
 	PURCHASE_HISTORY_CAP,
 	RARITIES,
 	RARITY_WEIGHTS,
 	Rarity,
 	rarityOfBall,
 	ROBUX_CHEST_BUNDLE_COUNT,
+	ROBUX_CHEST_BUNDLE_GUARANTEE,
 	ROBUX_CHEST_BUNDLE_PRODUCT_ID,
 	ROBUX_CHEST_PRODUCT_ID,
 	robuxChestWeights,
@@ -61,8 +67,16 @@ import {
 	OPEN_COIN_CHEST_REMOTE_NAME,
 	PURCHASE_GRANTED_REMOTE_NAME,
 	REMOTES_FOLDER_NAME,
+	REWARD_TOAST_REMOTE_NAME,
 } from "shared/remotes";
-import { PlayerDataStore, Profile } from "./player-data-store";
+import {
+	DAILY_LOGIN_LABEL,
+	PLAYTIME_LABEL,
+	playtimeBaselineAtLoad,
+	RewardToastMessage,
+	rewardDue,
+} from "shared/rewards";
+import { isStudioSession, PlayerDataStore, Profile } from "./player-data-store";
 
 /** What a chest press produced. */
 export type ChestResult = { ok: true; balls: Array<string>; coins: number } | { ok: false; reason: string };
@@ -126,6 +140,15 @@ export class EconomyService implements OnStart {
 	/** Tells one buyer a grant succeeded. See `PURCHASE_GRANTED_REMOTE_NAME` for why the Robux path needs it. */
 	private purchaseGrantedRemote?: RemoteEvent;
 
+	/**
+	 * Tells one player a time-based reward was paid, so a toast can say so.
+	 *
+	 * Optional like every other remote: a grant that happened without a toast is a reward the player sees in their balance
+	 * and not in a pop-up, which is a cosmetic loss. The reverse - refusing the grant because the remote is missing - would
+	 * be an economy error caused by a UI failure.
+	 */
+	private rewardToastRemote?: RemoteEvent;
+
 	public onStart(): void {
 		this.store.start();
 
@@ -134,6 +157,7 @@ export class EconomyService implements OnStart {
 
 		this.createRemotes();
 		this.createAdminCommand();
+		this.startPlaytimeRewards();
 
 		Players.PlayerAdded.Connect((player) => this.spawnLoad(player));
 		Players.PlayerRemoving.Connect((player) => this.unload(player));
@@ -396,11 +420,24 @@ export class EconomyService implements OnStart {
 			(candidate) => this.store.saveAsync(player, candidate),
 			() => rollFromWeights(robuxChestWeights()),
 			(rarity) => pickBallFrom(rarity),
+			// The product's term. See `ROBUX_CHEST_BUNDLE_GUARANTEE`: the bundle cannot fail to deliver one of these, which is
+			// what makes it worth more than ten singles rather than merely cheaper.
+			ROBUX_CHEST_BUNDLE_GUARANTEE,
 		);
 
 		if (result.outcome === "granted") {
 			this.publish(player, profile);
 			this.notifyGranted(player);
+
+			// **The floor is logged, always, when it fired.** A guaranteed legendary that the player cannot tell apart from a
+			// lucky roll is a promise with no evidence; this line is the only record that the purchase kept its word, and it is
+			// the line a support question about "my bundle had no legendary" would be answered from.
+			if (result.floored) {
+				print(
+					`[Economy] bundle floor: guaranteed ${ROBUX_CHEST_BUNDLE_GUARANTEE} added purchase=${purchaseId}`,
+				);
+			}
+
 			print(
 				`[Economy] ${player.Name} robux bundle granted purchase=${purchaseId} count=${result.granted.size()} balls=${result.granted.join(",")}`,
 			);
@@ -529,11 +566,11 @@ export class EconomyService implements OnStart {
 	}
 
 	/**
-	 * Adds coins. **Not called by anything yet** — there is no coin-earn path in this round.
+	 * Adds coins. The only caller is `RoundService.payOut`, which prices a finished round (base plus placement bonus).
 	 *
-	 * Written now because the profile is the only thing that can hold coins and this is the only correct way to
-	 * change the balance outside a chest: it goes through the same save-before-report path, so the day a round
-	 * grants a prize, the prize cannot be granted twice or lost.
+	 * Written before that existed because the profile is the only thing that can hold coins and this is the only correct
+	 * way to change the balance outside a chest: it goes through the same save-before-report path, so a round's prize
+	 * cannot be granted twice or lost.
 	 */
 	public grantCoins(player: Player, amount: number): boolean {
 		const profile = this.store.getProfile(player);
@@ -789,6 +826,14 @@ export class EconomyService implements OnStart {
 		purchaseGranted.Name = PURCHASE_GRANTED_REMOTE_NAME;
 		purchaseGranted.Parent = folder;
 		this.purchaseGrantedRemote = purchaseGranted;
+
+		// Server to client only, no `OnServerEvent` connection: a reward is the server's statement about a grant it made, and
+		// a client that could fire this remote could claim a reward it never earned. The absence of a handler is the whole
+		// authorisation model, exactly as on the payout remote.
+		const rewardToast = new Instance("RemoteEvent");
+		rewardToast.Name = REWARD_TOAST_REMOTE_NAME;
+		rewardToast.Parent = folder;
+		this.rewardToastRemote = rewardToast;
 	}
 
 	/**
@@ -940,13 +985,187 @@ export class EconomyService implements OnStart {
 			const profile = this.store.loadAsync(player, STARTING_COINS);
 			if (profile === undefined) {
 				player.SetAttribute(PLAYER_ECONOMY_STATE_ATTRIBUTE, "readonly");
+
+				// A read-only session cannot be paid, but in Studio the toast is the thing being looked at, not the coins. See
+				// `previewDailyLogin`.
+				if (isStudioSession()) {
+					this.previewDailyLogin(player);
+				}
+
 				return;
 			}
+
+			// **The playtime clock is baselined before anything can read it.** `getProfile` returns this profile as soon as
+			// `loadAsync` has it, so the playtime ticker can see it on the very next pass - and a stored timestamp that is
+			// hours old would pay a stipend for time that was not spent playing. See `playtimeBaselineAtLoad`.
+			profile.lastPlaytimeRewardAt = playtimeBaselineAtLoad(
+				os.time(),
+				profile.lastPlaytimeRewardAt,
+				PLAYTIME_REWARD_INTERVAL_SECONDS,
+			);
 
 			this.publish(player, profile);
 			player.SetAttribute(PLAYER_ECONOMY_STATE_ATTRIBUTE, "ready");
 			print(`[Economy] ${player.Name} loaded coins=${profile.coins} balls=${profile.ownedBalls.size()}`);
+
+			// **After `ready`, so the toast lands on a client that knows its own balance.** The load itself is deliberately not
+			// part of the reward path: a session that is read-only never reaches here, and a session that does is guaranteed a
+			// profile to stamp.
+			if (rewardDue(os.time(), profile.lastDailyRewardAt, DAILY_LOGIN_COOLDOWN_SECONDS)) {
+				this.award(player, profile, "lastDailyRewardAt", DAILY_LOGIN_REWARD_COINS, DAILY_LOGIN_LABEL);
+			} else if (isStudioSession()) {
+				// Paid already, so nothing is granted - but a playtest exists to look at the UI, and the one thing a designer
+				// cannot see by waiting twenty hours is the toast. See `previewDailyLogin`.
+				this.previewDailyLogin(player);
+			}
 		});
+	}
+
+	/**
+	 * Grants one time-based reward, stamping the timestamp **in the same write as the coins**.
+	 *
+	 * ## The ordering, which is the whole safety story
+	 *
+	 * The stamp is set *before* `grantCoins`, not after, because `grantCoins` is the thing that saves: it writes the whole
+	 * profile, so the timestamp and the balance land in **one** `UpdateAsync`. Stamping afterwards would need a second save,
+	 * and a crash between the two would leave the coins granted and the clock unread - the next pass would pay again, and
+	 * again, until a save happened to succeed.
+	 *
+	 * ## What happens when the save fails
+	 *
+	 * `grantCoins` reverts the balance and returns `false`; this reverts the stamp and returns without a toast. Nothing was
+	 * persisted, so nothing happened - the profile in memory is left exactly as it was, and the next pass (or the next join)
+	 * sees the reward as still due. The alternative - keeping the stamp on a failed save - would silently skip a reward the
+	 * player never received, which is the failure mode a player reports and a log cannot confirm.
+	 *
+	 * `previous` is captured rather than assumed to be `0`: a reward that fails a minute before the next one is due must
+	 * leave the *original* stamp in place, not a cleared one.
+	 */
+	private award(
+		player: Player,
+		profile: Profile,
+		field: "lastDailyRewardAt" | "lastPlaytimeRewardAt",
+		amount: number,
+		label: string,
+	): boolean {
+		const previous = profile[field];
+		profile[field] = os.time();
+
+		if (!this.grantCoins(player, amount)) {
+			profile[field] = previous;
+			return false;
+		}
+
+		// One line per reward, and it carries the balance because the reward's own amount is already in `grantCoins`'s line:
+		// what a log reader cannot otherwise see is *which schedule* paid and what the clock was set to.
+		print(
+			`[Economy] ${player.Name} reward ${label} amount=${amount} total=${profile.coins} stamp=${profile[field]}`,
+		);
+		this.toast(player, label, amount);
+
+		return true;
+	}
+
+	/**
+	 * Shows the daily-login toast **without granting anything**, and only ever in Studio.
+	 *
+	 * ## Why the coins are allowed to lie here, and only here
+	 *
+	 * The daily fires at most once per twenty hours, so the toast is a surface a designer can look at roughly once a working
+	 * day - and never at all if the store still has a recent stamp. A playtest exists to look at the UI, which makes "show the
+	 * card, move no coins" the useful behaviour: the panel, its slide, its stack slot and its text are all exercised, and the
+	 * **economy is untouched** - no grant, no save, and `lastDailyRewardAt` keeps the value it had, so the real reward still
+	 * arrives on its real schedule.
+	 *
+	 * It is gated on `isStudioSession()` rather than on a debug key because a key cannot fire it: the whole point is that it
+	 * happens on a plain `Play`, without a step somebody has to remember.
+	 *
+	 * ## Why the balance does not move and the toast still says `+50`
+	 *
+	 * A previewed grant that actually paid would be a repeat reward, which is the thing this must not be. The number is the
+	 * schedule's nominal value because the toast is being *rendered*, not reported - the log line says `preview` so the two
+	 * can never be confused after the fact.
+	 */
+	private previewDailyLogin(player: Player): void {
+		print(
+			`[Economy] ${player.Name} reward ${DAILY_LOGIN_LABEL} preview amount=${DAILY_LOGIN_REWARD_COINS} (studio, no grant)`,
+		);
+		this.toast(player, DAILY_LOGIN_LABEL, DAILY_LOGIN_REWARD_COINS);
+	}
+
+	/**
+	 * Fires the reward toast, if the client is listening.
+	 *
+	 * Split out of `award` so the preview path can reach the client without reaching the economy: the grant and the message
+	 * are two separate facts, and only one of them is what a Studio preview fakes.
+	 */
+	private toast(player: Player, label: string, amount: number): void {
+		const remote = this.rewardToastRemote;
+		if (remote === undefined) {
+			return;
+		}
+
+		remote.FireClient(player, { label, amount } as RewardToastMessage);
+	}
+
+	/**
+	 * Starts the playtime stipend's ticker.
+	 *
+	 * ## Why one thread walking the player list, and not a timer per player
+	 *
+	 * A per-player `task.spawn` would be a thread parked in `task.wait` for every joiner, all of them waking on their own
+	 * schedule, for an interval measured in minutes. One thread that wakes once a minute and asks each profile a question
+	 * costs one iteration over a list that is a few dozen long at most, and it cannot leak: there is exactly one of it for
+	 * the life of the server.
+	 *
+	 * ## Why the pass is `pcall`ed
+	 *
+	 * A background thread that throws is **gone for the session** - no restart, no error beyond the one line it printed - so
+	 * a single bad profile would silently switch off the stipend for everyone still connected. The `pcall` is the difference
+	 * between one failed pass and a feature that never runs again.
+	 *
+	 * ## Why the wait comes first
+	 *
+	 * Nothing can be due at second zero: `spawnLoad` baselines every joining profile, and the first pass at `t=60` finds the
+	 * players who loaded in the first minute. Starting with a pass would iterate an empty list and prove nothing.
+	 */
+	private startPlaytimeRewards(): void {
+		task.spawn(() => {
+			while (true) {
+				task.wait(PLAYTIME_TICK_SECONDS);
+
+				const [ok] = pcall(() => this.payPlaytimeRewards());
+				if (!ok) {
+					warn(`[Economy] playtime pass failed — it will try again in ${PLAYTIME_TICK_SECONDS}s.`);
+				}
+			}
+		});
+	}
+
+	/**
+	 * One pass of the playtime stipend.
+	 *
+	 * `os.time()` is read **once**, so every player in one pass is judged against the same instant. Reading it per player
+	 * would let a slow pass straddle the boundary and pay two players whose clocks agree on screen.
+	 *
+	 * Players whose profile is missing are skipped silently: that is the loading, read-only, or already-released case, and
+	 * `spawnLoad`/`loadAsync` has already logged why for the ones that matter.
+	 */
+	private payPlaytimeRewards(): void {
+		const now = os.time();
+
+		for (const player of Players.GetPlayers()) {
+			const profile = this.store.getProfile(player);
+			if (profile === undefined) {
+				continue;
+			}
+
+			if (!rewardDue(now, profile.lastPlaytimeRewardAt, PLAYTIME_REWARD_INTERVAL_SECONDS)) {
+				continue;
+			}
+
+			this.award(player, profile, "lastPlaytimeRewardAt", PLAYTIME_REWARD_COINS, PLAYTIME_LABEL);
+		}
 	}
 
 	/** Saves and then releases, in that order: a release clears the lock the save still needs to match. */
@@ -1368,6 +1587,22 @@ export function applyCoinSpend(profile: Profile, amount: number, save: (profile:
  * again. If the id survived the rollback, the retry would hit the duplicate guard, report `"duplicate"`, and be answered
  * `PurchaseGranted` ? the player charged, the receipt consumed, and no balls. Restoring the array is what makes the
  * retry a fresh attempt instead of a false duplicate.
+ *
+ * ## The floor, and why it forces the *last* roll rather than upgrading the worst
+ *
+ * `guaranteed` is the bundle's tier promise (`ROBUX_CHEST_BUNDLE_GUARANTEE`). If the preceding rolls have not produced
+ * that tier, the final roll is taken from it directly instead of being rolled. Two reasons this is the last roll and not
+ * a post-hoc upgrade:
+ *
+ * 1. **A replacement has to move two numbers.** Upgrading the weakest granted ball means decrementing that ball's count
+ *    and incrementing another's, and a bug there corrupts `ownedBalls` rather than merely mis-stating a rarity. Forcing a
+ *    roll leaves the grant as "ten balls, each added exactly once" - the property the all-or-nothing snapshot already
+ *    relies on.
+ * 2. **The promise is about the bundle, not about any particular roll.** "At least one of these ten" is a statement about
+ *    the set, and taking the last slot is the smallest way to make it true: the first nine rolls keep their honest odds.
+ *
+ * The `floored` flag comes back so the caller can log that the floor did something. A silent guarantee is a guarantee a
+ * player support conversation has to take on faith.
  */
 export function applyRobuxChestBundleGrant(
 	profile: Profile,
@@ -1376,24 +1611,40 @@ export function applyRobuxChestBundleGrant(
 	save: (profile: Profile) => boolean,
 	roll: () => Rarity,
 	pickBall: (rarity: Rarity) => string | undefined,
-): { outcome: "granted" | "duplicate" | "save-failed"; granted: Array<string> } {
+	guaranteed?: Rarity,
+): { outcome: "granted" | "duplicate" | "save-failed"; granted: Array<string>; floored: boolean } {
 	if (profile.purchases.includes(purchaseId)) {
-		return { outcome: "duplicate", granted: [] };
+		return { outcome: "duplicate", granted: [], floored: false };
 	}
 
 	const ballsBefore = copyOwnedBalls(profile.ownedBalls);
 	const purchasesBefore = copyPurchases(profile.purchases);
 
 	const granted = new Array<string>();
+	let sawGuarantee = false;
+	let floored = false;
 
 	for (let index = 0; index < count; index++) {
-		const ballId = pickBall(roll());
+		let rarity: Rarity;
+
+		if (guaranteed !== undefined && !sawGuarantee && index === count - 1) {
+			rarity = guaranteed;
+			floored = true;
+		} else {
+			rarity = roll();
+		}
+
+		if (guaranteed !== undefined && rarity === guaranteed) {
+			sawGuarantee = true;
+		}
+
+		const ballId = pickBall(rarity);
 		if (ballId === undefined) {
 			// An empty pool is a build bug, and the money has already been taken. Nothing is granted, nothing is
 			// recorded, and the receipt stays unprocessed so a fixed build can still deliver it.
 			restoreProfile(profile, ballsBefore, purchasesBefore);
 			warn(`[Economy] robux bundle: the rolled tier has an empty pool ? purchase ${purchaseId} not granted.`);
-			return { outcome: "save-failed", granted: [] };
+			return { outcome: "save-failed", granted: [], floored: false };
 		}
 
 		profile.ownedBalls.set(ballId, (profile.ownedBalls.get(ballId) ?? 0) + 1);
@@ -1405,10 +1656,10 @@ export function applyRobuxChestBundleGrant(
 
 	if (!save(profile)) {
 		restoreProfile(profile, ballsBefore, purchasesBefore);
-		return { outcome: "save-failed", granted: [] };
+		return { outcome: "save-failed", granted: [], floored: false };
 	}
 
-	return { outcome: "granted", granted };
+	return { outcome: "granted", granted, floored };
 }
 
 /**

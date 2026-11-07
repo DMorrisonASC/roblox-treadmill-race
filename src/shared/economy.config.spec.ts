@@ -10,6 +10,7 @@ import {
 	ROBUX_CHEST_PRICE_ROBUX,
 	ROBUX_CHEST_PRODUCT_ID,
 	ROBUX_CHEST_RARITIES,
+	ROBUX_CHEST_WEIGHTS,
 	robuxChestWeights,
 } from "./economy.config";
 
@@ -187,33 +188,40 @@ describe("Robux chest pool", () => {
 		}
 	});
 
-	it("gives common a weight of zero and every other tier its coin weight", () => {
+	it("gives common a weight of zero and every other tier its own paid weight", () => {
 		const weights = robuxChestWeights();
 
 		// Zero is the mechanism: `rollFromWeights` subtracts each weight from a roll that starts non-negative, so a
 		// zero-weight tier can never satisfy `roll < 0`. Asserting the zero is asserting the exclusion.
 		expect(weights.common).toBe(0);
 
+		// From `ROBUX_CHEST_WEIGHTS`, not `RARITY_WEIGHTS`: the paid chest stopped sharing the free chest's table when the
+		// legendary rate was raised to 10%, and asserting the old source would have quietly re-coupled them.
 		for (const rarity of ROBUX_CHEST_RARITIES) {
-			expect(weights[rarity]).toBe(RARITY_WEIGHTS[rarity]);
+			expect(weights[rarity]).toBe(ROBUX_CHEST_WEIGHTS[rarity]);
 		}
 	});
 
-	it("leaves the surviving weights summing to less than the full table", () => {
-		// Renormalisation is what makes the paid chest's odds better; if the surviving total ever equalled the whole
-		// table, the renormalisation would be a no-op and the odds would silently match the coin chest.
-		let surviving = 0;
-		let all = 0;
+	it("pays more for every tier it offers than the free chest does", () => {
+		// Both tables are stated over 1000, so a weight comparison here *is* a percentage comparison. Every paid tier must sit
+		// above its free counterpart or the product is a downgrade somewhere - 650/250/100 against 300/90/10 does, on all
+		// three. (The reach tier only went down against the *previous paid* table, 75 -> 65; it is still twice the free rate.)
+		expect(ROBUX_CHEST_WEIGHTS.rare > RARITY_WEIGHTS.rare).toBe(true);
+		expect(ROBUX_CHEST_WEIGHTS.epic > RARITY_WEIGHTS.epic).toBe(true);
+		expect(ROBUX_CHEST_WEIGHTS.legendary > RARITY_WEIGHTS.legendary).toBe(true);
+	});
 
-		for (const rarity of RARITIES) {
-			all += RARITY_WEIGHTS[rarity];
-			if (rarity !== "common") {
-				surviving += RARITY_WEIGHTS[rarity];
-			}
+	it("sums the surviving weights to a full table, so the odds are stated rather than derived", () => {
+		// Under the old coupling the surviving total was 400 of the coin chest's 1000, and renormalisation was what made the
+		// paid odds better. Now the table is its own and totals 1000, so the percentages are the weights - there is no
+		// hidden renormalisation left to be surprised by.
+		let surviving = 0;
+
+		for (const rarity of ROBUX_CHEST_RARITIES) {
+			surviving += ROBUX_CHEST_WEIGHTS[rarity];
 		}
 
-		expect(surviving > 0).toBe(true);
-		expect(surviving < all).toBe(true);
+		expect(surviving).toBe(1000);
 	});
 
 	it("carries a product id and a display price that are both obvious placeholders", () => {

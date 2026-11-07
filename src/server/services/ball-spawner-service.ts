@@ -462,6 +462,28 @@ export class BallSpawnerService implements OnStart {
 	private readonly decoysByParent = new Map<BasePart, BasePart>();
 
 	/**
+	 * The identity a twin answers with, **copied from its parent at spawn**.
+	 *
+	 * ## Why the twin remembers this instead of walking `decoysByParent` at read time
+	 *
+	 * The leaderboard asks "who does this body represent" once per body per second, and the honest answer for a twin is *its
+	 * parent's* identity — the twin carries no owner attributes at all, by design. Reading that out of `decoysByParent` needs a
+	 * reverse scan, and the scan has one failure that matters more than its cost: **the link is deleted the moment the parent
+	 * dies**, so from that instant the twin has no parent to name and would be published as `Decoy B7` — announcing to every
+	 * player that the leftover body was the fake. The parent is usually eliminated first (it is the one being raced), so this
+	 * is not an edge case; it is the normal end of a decoy's life.
+	 *
+	 * A copy taken at spawn cannot go stale in that way: the identity is a `{userId, name}` pair that nothing rewrites, and
+	 * it survives the parent by exactly as long as the twin does. It is also immune to the "second index disagrees with the
+	 * first" hazard `forgetDecoy` warns about, because it is not an index of the link at all — it is a snapshot of an
+	 * attribute pair.
+	 *
+	 * Cleared when the **twin** dies (`forgetDecoy` with the twin as the argument), never when the parent does — keeping the
+	 * entry through the parent's death is the whole point.
+	 */
+	private readonly decoyIdentities = new Map<BasePart, { userId: number; name: string }>();
+
+	/**
 	 * Each live ball's decorative sway state: the **phase** its sine wave starts at, and its **own clock**, in seconds
 	 * since it spawned.
 	 *
@@ -1199,6 +1221,14 @@ export class BallSpawnerService implements OnStart {
 
 		// The link the `DecoyOutline` remote answers from — see `decoysByParent` for why it is a map and not an attribute.
 		this.decoysByParent.set(parent, decoy);
+
+		// The identity this twin answers with, taken now because the answer has to outlive the parent — see
+		// `decoyIdentities`. Read before the twin is parented is irrelevant (it is the *parent's* attributes), but it is read
+		// here rather than later so the copy is made at the one moment the two bodies are known to be a pair.
+		const parentIdentity = this.identityOf(parent);
+		if (parentIdentity !== undefined) {
+			this.decoyIdentities.set(decoy, parentIdentity);
+		}
 	}
 
 	/**
@@ -1230,15 +1260,19 @@ export class BallSpawnerService implements OnStart {
 	 * method answers a *display* question and writes nothing. A twin that reports its parent's identity here is still an
 	 * ownerless body everywhere the simulation looks, which is the whole point of keeping the two apart.
 	 *
-	 * ## Why the reverse lookup is a scan
+	 * ## Why the twin's identity is a copy, not a reverse lookup
 	 *
-	 * `decoysByParent` is keyed by the parent, so finding a twin's parent means walking its values - at most one entry per
-	 * lane, so a handful. A second map keyed the other way would answer in one step and could disagree with the first after a
-	 * missed delete; `forgetDecoy` already carries the same argument for its own reverse pass, and paying ~40 iterations once
-	 * per body per second is cheaper than a second index that can rot.
+	 * This used to walk `decoysByParent` to find the parent of a given twin. That answers correctly while both bodies are
+	 * alive and **silently stops answering the moment the parent dies** - `forgetDecoy` deletes the link, because the map is
+	 * a record of live pairs and a dead parent has none. Since putting twins on the leaderboard, that failure has a visible
+	 * cost: the orphaned twin would publish as `Decoy B7` for the rest of its life, which is the one thing the `decoy` power
+	 * must never do. The parent is normally the body that dies first, so this is the ordinary case rather than a corner.
 	 *
-	 * Returns `undefined` for a body with no owner and no parent - a debug ball, a stray, or a twin whose parent has already
-	 * been destroyed. The caller falls back to naming the body itself.
+	 * The twin now carries a copy of the pair, taken at spawn (`decoyIdentities`). It costs one small table per decoy, it is
+	 * one map read instead of a scan per body per second, and it outlives the parent by design.
+	 *
+	 * Returns `undefined` for a body with no owner and no remembered twin origin - a debug ball, a stray, or a body spawned
+	 * before this build. The caller falls back to naming the body itself.
 	 */
 	public ownerIdentityFor(ball: BasePart): { userId: number; name: string } | undefined {
 		const own = this.identityOf(ball);
@@ -1246,20 +1280,9 @@ export class BallSpawnerService implements OnStart {
 			return own;
 		}
 
-		for (const [parent, decoy] of this.decoysByParent) {
-			if (decoy !== ball) {
-				continue;
-			}
-
-			// A destroyed parent reports its defaults, so its identity has to be read before the answer means anything.
-			if (parent.Parent === undefined) {
-				return undefined;
-			}
-
-			return this.identityOf(parent);
-		}
-
-		return undefined;
+		// A twin's copy, taken at spawn. It survives its parent's death, which is the case a reverse lookup through
+		// `decoysByParent` cannot answer — see `decoyIdentities`.
+		return this.decoyIdentities.get(ball);
 	}
 
 	/** A body's own owner attributes, or `undefined` when the pair is missing or half-written. */
@@ -1294,6 +1317,11 @@ export class BallSpawnerService implements OnStart {
 		for (const parent of stale) {
 			this.decoysByParent.delete(parent);
 		}
+
+		// **Only when the dead body is the twin.** `ball` is whichever body died, so this is a no-op when a *parent* dies - and
+		// that is deliberate: the twin keeps the identity it was given at spawn so its leaderboard row still carries the
+		// player's name after the parent is gone. Deleting it on the parent's death would publish the orphan as `Decoy B7`.
+		this.decoyIdentities.delete(ball);
 	}
 
 	private ballsFolder(): Folder {

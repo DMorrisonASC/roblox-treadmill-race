@@ -27,7 +27,7 @@ function profileWith(coins: number, balls: Record<string, number>, purchases: Ar
 		ownedBalls.set(ballId, count);
 	}
 
-	return { version: 1, coins, ownedBalls, purchases };
+	return { version: 1, coins, ownedBalls, purchases, lastDailyRewardAt: 0, lastPlaytimeRewardAt: 0 };
 }
 
 /** Everything a reset touches, flattened, so "unchanged" is a string comparison rather than five assertions. */
