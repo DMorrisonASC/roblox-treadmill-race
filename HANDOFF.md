@@ -3197,3 +3197,98 @@ So the client was not ignoring the constant; it was reporting the value it had l
 **Audit.** New `src/shared/ui/text.ts` (one constant and one function). `scale.ts`: the ladder, `nextTextVariant`, `typographyOneStepUp` - no existing value changed. `panel.ts` and `tabs.ts`: two optional fields and the reads that honour them. `shop-controller.ts`: one import pair, the `PANEL_TYPE` table, 21 reads moved, seven `outlineText` calls, three band calls passing the options. Build, lint, prettier and tests green at 289; `\uXXXX` zero; `flamework.build` unchanged.
 
 **Studio-only, and the thing most likely to need a follow-up:** the **fixed-pixel bands did not grow**. `HEADER_HEIGHT` (50), `PANEL_HEADER_HEIGHT` (44), `TAB_STRIP_HEIGHT` (36), `PANEL_FOOTER_HEIGHT` (34) and `FUSION_ROW_HEIGHT` (34) are constants, not scale reads, so text that grew one step now has less room in them - `h6 -> h5` in a 44-pixel header is the tightest case (24 pixels of glyph in a 44-pixel band, which should fit, but the close button beside it is `body1 -> h6` at 18 inside a 26-pixel pill). If anything clips, the fix is a height constant per band and nothing else.
+
+## 117. Every control on the sheet now carries the offset card, because the depth is the affordance
+
+**Asked for directly: "its important because it is visual hint that you can click something".** That is the right frame for it, and it is why this round touched six controls rather than one. A style used on some buttons and not others does not read as a style; it reads as a rendering bug, and worse, it makes the flat ones look inert. Before this round the sheet had depth on the *rail* and on the *sheet itself*, and every control inside it was a flat coloured rectangle - so the only thing saying "you can click this" was the cursor.
+
+**`src/shared/ui/chunky-chrome.ts` is a decorator, not a builder.** `applyChunkyChrome(button, options)` takes a `GuiButton` the caller already made and gives it the two plates, the thick outline and the pressed state, returning `{ shadow, face, label, setRaised }`. `buildChunkyButton` *builds* a card with an icon slot and a badge, which is right for the rail and wrong for a chest button that already has two lines of live text in a layout. This exists so those controls get the chrome without being rebuilt.
+
+**The mechanic, and why it is not the same as the sheet's.** A child **cannot draw behind its own parent's background** - the repo's own `Panel` docblock records that - so depth on an existing button means inverting the stack: the button becomes a transparent hit area, and the shadow and face become its children. The consequence is that the button's own `Text` is covered, which is what `options.label` exists for: a button that carried a caption gets a `TextLabel` on the face instead, and the caller keeps a handle to it.
+
+**Six controls, and the three that had to give up their `Text`:**
+
+| control | before | now |
+|---|---|---|
+| header close | button `Text = "X"` | chrome + label |
+| coin chest `Open N` | flat accent rect | chrome, contents re-parented to the face |
+| premium chest `Open N` | flat green rect | chrome, contents re-parented |
+| ball card | flat white/accent rect, own `Text` | chrome + name label + rarity ring |
+| fusion material row | flat white/accent rect | chrome, contents re-parented + rarity ring |
+| fuse button | flat accent rect, own `Text` | chrome + label, via `setFusionCaption` |
+| inventory `Balls`/`Fusion` tabs | flat pills | chrome + labels |
+
+`applyChunkyChrome` is called **seven times** (six in `shop-controller`, one in `tabs.ts`); the tab strip is inside the sheet too, so leaving it flat would have been the most visible exception of all.
+
+**Two consequences that were not cosmetic and had to be fixed with them:**
+
+- **The disabled wash stopped working.** `button.TextTransparency` was how the premium buttons said "you cannot buy this"; with the caption on a child label it did nothing. `dimChunkyChrome(button, dimmed)` walks the face and its labels instead, and the three call sites (policy gate, purchase guard, initial state) now go through it. The comment says why, because "the old line did nothing" is exactly the kind of thing that gets re-added.
+- **Draw order had to move up one.** Every chunky control is at `STORE_Z_INDEX + 3`, so its face is at `+4`; anything parented at `+3` - which was every label the text factory made - is now *underneath* it. The factory moved to `+5`, and the cards' children moved with it (`art` `+5`, `pip` `+6`, `count` `+7`). This is the one thing that would have looked like "the text vanished" and been blamed on the theme.
+
+**The rarity tint moved from a border to a ring.** Ball cards and fusion rows used a 1-2px `UIStroke` in the tier colour to say which rarity they were. With a 3px near-black outline on the face, that stroke was either hidden or fighting it, so it is now a second stroke *inside* the face at the same thickness - the tier still reads at a glance, and the chunky outline still reads as the button's edge.
+
+**The constants and their rule:** `CHUNKY_CONTROL_DEPTH = 6`, `CHUNKY_CONTROL_STROKE = 3`, corner `8`. Same invariant as the card and the sheet, stated on the constant: depth must be at least `1.5 x` the stroke or the centred outline eats the shadow. `shadowOf(face)` derives a shadow at 45% brightness, which bends the tree's "designed values, not computed" rule deliberately and says so - a shadow that is a scalar multiple of its own face cannot drift out of hue.
+
+**Audit.** New `chunky-chrome.ts`. `tabs.ts`: the chrome per tab, the label map, and a restyle that recolours the face and label and sets the pressed state. `shop-controller.ts`: six chrome calls, contents re-parented, the label fields, `setFusionCaption`, `dimChunkyChrome` at three sites, and the draw-order bumps. Build, lint, prettier and tests green at 289; `\uXXXX` zero; **`flamework.build` unchanged** - no controller, no service.
+
+**Studio-only:** whether `6` pixels of depth reads on a 34-pixel fusion row (the tightest control), whether the derived shadows are visible enough against the `#34343A` face where the cards' own face is only `#3E3E47`, and whether the pressed tab still reads as selected now that the label sits on a face rather than on the button.
+
+## 118. The cards were changing colour because two `UIStroke`s were fighting over one face
+
+**Reported: clicking a ball makes the other cards change colour, oddly on the second click of the same card.** The mechanism is a Roblox rule that item 117 walked straight into: **an object gets exactly one `UIStroke`.** Add a second and it does not stack - the newer instance takes the outline over - so every ball card's **chunky black border was being replaced by a 1px hairline in the ball's rarity colour**. Blue, green, violet, gold borders on cards that were supposed to be black. Because `refreshOwned` destroys and rebuilds every card on every click, which of the two strokes won could differ between rebuilds, which is exactly why it looked like the *other* cards changed when a rebuild happened rather than the one that was clicked.
+
+**The fix is a second object rather than a second stroke.** New `addChunkyRing(face, color, thickness)` in `chunky-chrome.ts` creates a transparent `Frame` filling the face, copies the face's `UICorner` so the ring follows the rounded edge, and gives it one stroke. Two strokes, two objects, both visible. Both the ball card and the fusion row now call it, and the face keeps its black border.
+
+**Two more layering defects in the same card, found while tracing it:**
+
+- **The name label had `Size = UDim2.fromScale(1, 0)`** - a zero-height label clips its own glyphs, so the ball's name rendered as nothing. It is now the caption's line height. That is a straight bug from item 117, not a design choice.
+- **The name sat at `ZIndex + 5`, tied with the art block**, which is drawn over the face. A tie is resolved by creation order - and the art was created *after* the name, so the tinted art covered the text. The name is now `+ 8`, above `art` (`+5`), `pip` (`+6`) and `count` (`+7`). A tie in `ZIndex` between a background and a label is not a style question, it is the "text sometimes disappears" class of bug.
+
+**What I could not confirm from source, stated plainly.** The literal "second click on the same card" cannot change any *state* - `inspectBallId` is already that ball's id, so the rebuild reaches identical inputs and should produce an identical picture. The rebuild *is* the difference: it re-creates every instance, and with two strokes on one object Roblox's choice among them is not specified, so the picture is not guaranteed stable across rebuilds. That is consistent with the report and with the fix; if a colour change survives this round, the remaining suspect is `card.Debris`-like staleness in `ballsCards` rather than the styling, and the next step is a log of `inspectBallId` plus each card's face colour after a refresh.
+
+**Audit.** `chunky-chrome.ts`: `addChunkyRing` added. `shop-controller.ts`: the two ring constructions replaced by calls, the name's size and `ZIndex` corrected. No other file. Build, lint, prettier and tests green at 289; `\uXXXX` zero; `flamework.build` unchanged.
+
+**Studio-only:** that every card now shows a black chunky border with a rarity hairline inside it, and that a rebuild (any click) no longer changes any card's border colour.
+
+## 119. The pale box around the purchase buttons was the section card, not the buttons
+
+**Reported: white edges around a white box at the coin chest's `Open` buttons.** The box was the **chest section** itself - `paint.card`'s `#3E3E47` fill with a 1-pixel accent outline around it. It read as paper once the buttons stopped being flat: the chunky chrome insets each face 6 pixels inside its cell, so the section's fill showed as a pale ring around both buttons with the section's own outline outside *that*, and the ring belonged to nothing the eye could name. Sampled from the screenshot: the buttons' faces are `#3F82C9`, the ring is `#3E3E47`, the sheet behind is `#34343A`, and the outline under the buttons is the section's accent stroke.
+
+**The fix is one property per section.** The fill is gone (`BackgroundTransparency = 1`); the **1-pixel outline stays**, so each chest is still one identifiable offer and the premium section still keeps its green identity. Applied to both sections, not just the coin one - the premium section had the identical ring, and fixing only the one the screenshot showed would have left two sections with different treatment.
+
+**Why not remove the section entirely.** It still carries the grouping: title, odds rows, prize shelf and buttons sit inside its outline, and the outline is what says "these four things are one product". What it should not do is paint a plate behind controls that now draw their own.
+
+**Audit.** `shop-controller.ts` only: two property changes and their comments. Build, lint, prettier and tests green at 289; `\uXXXX` zero; `flamework.build` unchanged.
+
+**Studio-only:** whether a 1-pixel outline alone is enough to group a chest section without a fill behind it. If it reads as too loose, the alternative is the chunky treatment on the section itself - a shadow plate and a thick outline - rather than the pale fill returning.
+
+## 120. The pale notches were the rounded *shadow* plate leaving its cell corners uncovered
+
+**Reported: still present after item 119.** Correct - item 119 removed the section's fill, which was a real pale plate, but the notch survived because it had a different cause. Sampled from the second screenshot: buttons `#3F82C9`, shadow `#1C3A5A`, sheet `#34343A`, and at each cell corner a wedge of **`#909093`** - a colour produced by nothing in the theme.
+
+**The geometry is the finding.** The wedges sat at the top-right, bottom-left and bottom-right of each button cell, and only in the corner arcs - 3-6 pixels wide, tapering. That is a rounded rectangle failing to cover its own bounding box: **the shadow plate filled the cell but was rounded**, so its four corners pulled in and left slivers. What renders through a sliver that small is not any single layer from the source: the parent chain there is the row (transparent), the section (transparent) and the sheet, and the sliver lands where all three have anti-aliased corner edges. Measured, it is 45% white over the sheet - which no colour in this tree is.
+
+**The fix removes the gap instead of explaining it.** The shadow plate is now **square**: it covers its cell corner to corner, and the **face stays rounded** on top. The silhouette is a rounded button on a hard-edged cast shadow - which is what the reference art does - and there is nothing left for a sliver to show. `UICorner` is gone from the shadow in `applyChunkyChrome` only; `buildChunkyButton`'s card and `buildChunkyPanel`'s sheet keep theirs, because in both of those the shadow is the **outermost** layer against the game world, so a rounded corner there is just a rounded shadow.
+
+That distinction is the general rule and is now written down: **a shadow plate only wants rounding when it is the outermost thing drawn.**
+
+**Audit.** `src/shared/ui/chunky-chrome.ts` only: the `UICorner` on the shadow removed, with the reason. Build, lint, prettier and tests green at 289; `\uXXXX` zero; `flamework.build` unchanged.
+
+**Studio-only:** that the corners now read as shadow rather than as a notch, and whether a square-cornered cast shadow under a rounded face is the look wanted - the alternative is a 2-4 pixel corner radius on the shadow, which shrinks the sliver rather than removing it.
+
+## 121. `UI_STYLE_GUIDE.md`: the chunky language written down as a project-independent guide
+
+**The style had accumulated across five rounds of component work and lived only in docblocks.** That is fine for the person who wrote them and useless for the next agent on a different repo, so this round wrote the rules out: `UI_STYLE_GUIDE.md` at the repository root, markdown only, **no code changed**.
+
+**The arithmetic is the centre of it, not the screenshots.** The guide's ?1.1 states the rule that the whole look rests on - **`UIStroke` is drawn centred on the edge**, so a stroke of `X` hangs `X/2` inside and `X/2` outside, which makes the visible shadow strip `D - X/2` and makes `D >= 2X` the constraint. A table shows the shipped values against it (card `8/4` = 6 px visible, panel `10/6` = 7 px, control `6/3` = 4.5 px) and the `4/4` = 2 px case that shipped once and read flat.
+
+**Four rules the guide states that are not obvious from any single file:**
+
+- **One `UIStroke` per object** - reached twice in this project (item 118's colour-changing cards), so it is its own section and appears again in the pitfalls.
+- **A shadow plate is only rounded when it is outermost** - the item-120 notches, generalised.
+- **Pressed means the face grows to cover the shadow, never slides** - the item-113 bug, stated as a rule.
+- **Every label gets its outline, not most of them** - item 116's half-migration risk.
+
+**Two prompt problems, reported rather than silently absorbed.** The required responsiveness text names `viewportConstraint.ts` and `panelChrome.ts` from a `roblox-dodgeball` project; **neither exists here** - this tree's equivalents are `src/shared/ui/viewport.ts` (`capToViewport`), `chunky-panel.ts` and `panel.ts`. The paragraph is included **verbatim** as instructed, with a clearly-marked naming note directly beneath it giving this repo's real paths, so the policy survives unchanged and the file names do not mislead. The prompt also specified `text-ui-stroke` and other free description of the anchor `UI_STYLE_GUIDE.md`; that name was used as written.
+
+**Audit.** One new file, markdown, 20.7 KB, seven top-level sections. **No `.ts` file was touched by this round** - `git status` shows only the pre-existing uncommitted work from items 112-120 plus the new guide.

@@ -42,6 +42,7 @@ import { PanelFooter, PANEL_FOOTER_HEIGHT, PANEL_HEADER_HEIGHT, PanelHeader } fr
 import { TabStrip, TAB_STRIP_HEIGHT } from "shared/ui/tabs";
 import { buildChunkyButton, ChunkyButton } from "shared/ui/chunky-button";
 import { buildChunkyPanel } from "shared/ui/chunky-panel";
+import { addChunkyRing, applyChunkyChrome, dimChunkyChrome, shadowOf } from "shared/ui/chunky-chrome";
 import { attachPressFeedback } from "shared/ui/press";
 import { attachClickSound, playPurchaseSound } from "shared/ui/sounds";
 import { capToViewport } from "shared/ui/viewport";
@@ -392,6 +393,8 @@ export class ShopController implements OnStart {
 	private readonly prizeShelves = new Array<ScrollingFrame>();
 	private fusionOddsLabel?: TextLabel;
 	private fusionButton?: TextButton;
+	/** The fuse button's caption. The chrome makes the button a hit area, so its word lives on the face. */
+	private fusionLabel?: TextLabel;
 	private chestButtons = new Array<ChestButton>();
 
 	private chestSection?: Frame;
@@ -607,7 +610,9 @@ export class ShopController implements OnStart {
 
 		for (const button of this.premiumButtons) {
 			button.Active = allowed;
-			button.TextTransparency = allowed ? 0 : 0.5;
+			// The button has no `Text` of its own any more - the chrome moved the caption onto the face - so the wash goes
+			// through the chrome's face and labels rather than through `TextTransparency`, which would now do nothing.
+			dimChunkyChrome(button, !allowed);
 		}
 
 		if (this.policyNote !== undefined) {
@@ -671,7 +676,7 @@ export class ShopController implements OnStart {
 		this.busy = true;
 		for (const button of this.premiumButtons) {
 			button.Active = false;
-			button.TextTransparency = 0.5;
+			dimChunkyChrome(button, true);
 		}
 
 		// `void` return: the dialog is asynchronous and the only signals are `PromptProductPurchaseFinished` and the
@@ -1043,34 +1048,30 @@ export class ShopController implements OnStart {
 		)({
 			Name: "Close",
 			Size: UDim2.fromOffset(HEADER_HEIGHT - SPACING.md, HEADER_HEIGHT - SPACING.md),
-			BackgroundColor3: this.theme.paint.trough.color,
-			BackgroundTransparency: this.theme.paint.trough.transparency,
 			BorderSizePixel: 0,
 			AutoButtonColor: false,
-			Font: FONT,
-			TextSize: PANEL_TYPE.h6.size,
-			TextColor3: this.theme.colors.textSecondary,
-			Text: "X",
+			Text: "",
 			LayoutOrder: 4,
-			ZIndex: STORE_Z_INDEX + 2,
+			ZIndex: STORE_Z_INDEX + 3,
 			Parent: header,
 		});
 
-		this.corners(scope, close, SPACING.xs);
-
-		Fusion.New(
-			scope,
-			"UIStroke",
-		)({
-			Color: this.theme.colors.border,
-			Thickness: HAIRLINE,
-			ApplyStrokeMode: Enum.ApplyStrokeMode.Border,
-			Parent: close,
+		// The close button is as clickable as anything else on the sheet, so it gets the same depth. Its "X" moves onto the
+		// face as a label: the chrome turns the button into a transparent hit area, and its own `Text` would sit under the
+		// face.
+		applyChunkyChrome(close, {
+			color: this.theme.paint.trough.color,
+			shadowColor: shadowOf(this.theme.paint.trough.color),
+			zIndex: STORE_Z_INDEX + 3,
+			corner: SPACING.xs,
+			label: {
+				text: "X",
+				textSize: PANEL_TYPE.h6.size,
+				color: this.theme.colors.textPrimary,
+				font: FONT,
+				zIndex: STORE_Z_INDEX + 5,
+			},
 		});
-
-		// The "X" is the button's own `Text`, so it needs the glyph outline directly - the border `UIStroke` above strokes
-		// the button's box, not its glyphs, and one instance cannot do both jobs.
-		outlineText(close);
 
 		attachPressFeedback(close);
 		attachClickSound(close);
@@ -1221,11 +1222,12 @@ export class ShopController implements OnStart {
 			Name: "CoinChestSection",
 			Size: new UDim2(1, 0, 0, 0),
 			AutomaticSize: Enum.AutomaticSize.Y,
-			// **A card, not a bare stack.** Two sections floating on one sheet with no boundary read as one long list
-			// rather than as two things you can buy, and the player has to infer where one product ends. The outline is
-			// the section's own button colour, so the box and the control that buys from it are visibly the same offer.
-			BackgroundColor3: this.theme.paint.card.color,
-			BackgroundTransparency: this.theme.paint.card.transparency,
+			// **An outlined group, not a filled card.** It used to carry `paint.card`'s fill, which put a lighter plate
+			// behind everything - and since the purchase buttons now draw their own chunky plates inset 6 pixels inside
+			// their cells, that fill showed as a pale ring around them with the section's own stroke outside it: a "white
+			// box" whose edges belonged to nothing. The fill is gone and the **1-pixel outline stays**, so the section is
+			// still one identifiable offer and the only things with depth are the controls you can press.
+			BackgroundTransparency: 1,
 			BorderSizePixel: 0,
 			LayoutOrder: order,
 			ZIndex: STORE_Z_INDEX + 2,
@@ -1307,11 +1309,11 @@ export class ShopController implements OnStart {
 			Name: "PremiumChestSection",
 			Size: new UDim2(1, 0, 0, 0),
 			AutomaticSize: Enum.AutomaticSize.Y,
-			// Same card treatment as the coin section, in `premium` rather than `accent`: two boxes outlined in one
-			// colour would look like one product split in half, and the whole point of the premium tint is that the paid
-			// offer is identifiable before the price is read.
-			BackgroundColor3: this.theme.paint.card.color,
-			BackgroundTransparency: this.theme.paint.card.transparency,
+			// Same outlined-group treatment as the coin section, in `premium` rather than `accent`: two boxes outlined in
+			// one colour would look like one product split in half, and the whole point of the premium tint is that the paid
+			// offer is identifiable before the price is read. The fill is gone for the reason spelled out on the coin
+			// section - it was a pale plate showing around the chunky buttons.
+			BackgroundTransparency: 1,
 			BorderSizePixel: 0,
 			LayoutOrder: order,
 			ZIndex: STORE_Z_INDEX + 2,
@@ -1494,7 +1496,6 @@ export class ShopController implements OnStart {
 		)({
 			Name: `Premium${slot}`,
 			Size: new UDim2(0.5, -SPACING.xs / 2, 1, 0),
-			BackgroundColor3: this.theme.colors.premium,
 			BorderSizePixel: 0,
 			AutoButtonColor: false,
 			Text: "",
@@ -1503,7 +1504,14 @@ export class ShopController implements OnStart {
 			Parent: parent,
 		});
 
-		this.corners(scope, button, SPACING.sm);
+		// The chrome, then the two lines go on its face rather than on the button: the face is a child of the button, so
+		// anything parented to the button itself would be drawn underneath it.
+		const chrome = applyChunkyChrome(button, {
+			color: this.theme.colors.premium,
+			shadowColor: shadowOf(this.theme.colors.premium),
+			zIndex: STORE_Z_INDEX + 3,
+		});
+
 		attachPressFeedback(button);
 		attachClickSound(button);
 
@@ -1516,12 +1524,12 @@ export class ShopController implements OnStart {
 			VerticalAlignment: Enum.VerticalAlignment.Center,
 			SortOrder: Enum.SortOrder.LayoutOrder,
 			Padding: new UDim(0, SPACING.xs),
-			Parent: button,
+			Parent: chrome.face,
 		});
 
 		const top = this.text(
 			scope,
-			button,
+			chrome.face,
 			label,
 			"body1",
 			"primary",
@@ -1534,7 +1542,7 @@ export class ShopController implements OnStart {
 
 		const priceLabel = this.text(
 			scope,
-			button,
+			chrome.face,
 			`${price} R$`,
 			"body2",
 			"primary",
@@ -1551,7 +1559,7 @@ export class ShopController implements OnStart {
 
 		// Starts disabled: `policy` is `"loading"` until the read returns, and loading is not permission.
 		button.Active = false;
-		button.TextTransparency = 0.5;
+		dimChunkyChrome(button, true);
 		this.premiumButtons.push(button);
 	}
 
@@ -1939,8 +1947,6 @@ export class ShopController implements OnStart {
 		)({
 			Name: `Open${count}`,
 			Size: new UDim2(0.5, -SPACING.xs, 1, 0),
-			BackgroundColor3: this.theme.colors.accent,
-			BackgroundTransparency: 0,
 			BorderSizePixel: 0,
 			AutoButtonColor: false,
 			Text: "",
@@ -1949,7 +1955,12 @@ export class ShopController implements OnStart {
 			Parent: parent,
 		});
 
-		this.corners(scope, button, SPACING.sm);
+		const chrome = applyChunkyChrome(button, {
+			color: this.theme.colors.accent,
+			shadowColor: shadowOf(this.theme.colors.accent),
+			zIndex: STORE_Z_INDEX + 3,
+		});
+
 		attachPressFeedback(button);
 		attachClickSound(button);
 		button.Activated.Connect(() => this.fireChest(count));
@@ -1965,12 +1976,12 @@ export class ShopController implements OnStart {
 			VerticalAlignment: Enum.VerticalAlignment.Center,
 			SortOrder: Enum.SortOrder.LayoutOrder,
 			Padding: new UDim(0, SPACING.xs),
-			Parent: button,
+			Parent: chrome.face,
 		});
 
 		const top = this.text(
 			scope,
-			button,
+			chrome.face,
 			action,
 			"body1",
 			"primary",
@@ -1990,8 +2001,8 @@ export class ShopController implements OnStart {
 			AutomaticSize: Enum.AutomaticSize.X,
 			BackgroundTransparency: 1,
 			LayoutOrder: 2,
-			ZIndex: STORE_Z_INDEX + 4,
-			Parent: button,
+			ZIndex: STORE_Z_INDEX + 5,
+			Parent: chrome.face,
 		});
 
 		Fusion.New(
@@ -2025,7 +2036,7 @@ export class ShopController implements OnStart {
 			BackgroundColor3: this.theme.colors.coin,
 			BorderSizePixel: 0,
 			LayoutOrder: order,
-			ZIndex: STORE_Z_INDEX + 4,
+			ZIndex: STORE_Z_INDEX + 5,
 			Parent: parent,
 		});
 
@@ -2083,7 +2094,9 @@ export class ShopController implements OnStart {
 			TextTruncate: Enum.TextTruncate.AtEnd,
 			Text: content,
 			LayoutOrder: order,
-			ZIndex: STORE_Z_INDEX + 3,
+			// `+5`, not `+3`: the chunky chrome puts a face at `button.ZIndex + 1`, so a label at the old order would be drawn
+			// underneath it. Every button on the sheet is at `+3`, which makes this the first order that is reliably above one.
+			ZIndex: STORE_Z_INDEX + 5,
 			Parent: parent,
 		});
 
@@ -2235,33 +2248,52 @@ export class ShopController implements OnStart {
 		const card = new Instance("TextButton");
 		card.Name = `Ball_${ball.id}`;
 		card.Size = UDim2.fromOffset(INVENTORY_CARD_WIDTH, INVENTORY_CARD_HEIGHT);
-		card.BackgroundColor3 = selected ? this.theme.colors.accent : this.theme.paint.card.color;
-		card.BackgroundTransparency = selected ? 0 : this.theme.paint.card.transparency;
 		card.BorderSizePixel = 0;
 		card.AutoButtonColor = false;
-		card.Font = FONT;
-		card.TextSize = PANEL_TYPE.caption.size;
-		card.TextColor3 = selected ? this.theme.colors.onAccent : this.theme.colors.textPrimary;
-		card.Text = displayName(ball.id);
-		card.TextTruncate = Enum.TextTruncate.AtEnd;
-		card.TextYAlignment = Enum.TextYAlignment.Bottom;
+		// The name is drawn on the chrome's face below, so the button itself carries nothing.
+		card.Text = "";
 		card.LayoutOrder = order;
 		card.ZIndex = STORE_Z_INDEX + 3;
 		card.Parent = parent;
 
-		const corner = new Instance("UICorner");
-		corner.CornerRadius = new UDim(0, SPACING.xs);
-		corner.Parent = card;
+		// **A ball card is clickable, so it gets the depth.** The face is the literal `card` surface colour, the shadow a
+		// darker shade of it, and the name is a label pinned to the bottom of the face ? the same place it used to be
+		// drawn by the button's own `Text`.
+		const cardChrome = applyChunkyChrome(card, {
+			color: selected ? this.theme.colors.accent : this.theme.paint.card.color,
+			shadowColor: shadowOf(selected ? this.theme.colors.accent : this.theme.paint.card.color),
+			zIndex: STORE_Z_INDEX + 3,
+			corner: SPACING.xs,
+		});
 
-		const stroke = new Instance("UIStroke");
-		stroke.Color = tint;
-		stroke.Thickness = selected ? 2 : HAIRLINE;
-		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
-		stroke.Parent = card;
+		const cardName = new Instance("TextLabel");
+		cardName.Name = "Name";
+		cardName.AnchorPoint = new Vector2(0, 1);
+		cardName.Position = UDim2.fromScale(0, 1);
+		// **A real height, not `(1, 0)`.** A zero-height label clips its own glyphs, so the name rendered as nothing at all -
+		// the caption's line height is exactly the room the text needs.
+		cardName.Size = new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight);
+		cardName.BackgroundTransparency = 1;
+		cardName.Font = FONT;
+		cardName.TextSize = PANEL_TYPE.caption.size;
+		cardName.TextColor3 = selected ? this.theme.colors.onAccent : this.theme.colors.textPrimary;
+		cardName.TextXAlignment = Enum.TextXAlignment.Center;
+		cardName.TextYAlignment = Enum.TextYAlignment.Bottom;
+		cardName.TextTruncate = Enum.TextTruncate.AtEnd;
+		cardName.Text = displayName(ball.id);
+		// **Above the art block and the count**, not level with them: the art is drawn over the face and would otherwise
+		// cover the name, and a tie in `ZIndex` is resolved by creation order - which is exactly the kind of thing that
+		// looks like "the text disappeared" on one card and not another.
+		cardName.ZIndex = STORE_Z_INDEX + 8;
+		cardName.Parent = cardChrome.face;
 
-		// The card's name is its own `Text`, so the glyph outline is a second stroke on the same button: the one above
-		// strokes the card's border, this one strokes the letters.
-		outlineText(card);
+		outlineText(cardName);
+
+		// **The rarity tint is a ring on its own frame, not a second stroke on the face.** Roblox applies one `UIStroke` per
+		// GuiObject and the newer one wins, so putting the tint on the face replaced the chunky black outline with a hairline
+		// in the ball's rarity colour - every card's border changed colour and the depth was gone. `addChunkyRing` gives the
+		// tint an object of its own so both are visible.
+		addChunkyRing(cardChrome.face, tint, selected ? 2 : HAIRLINE);
 
 		const art = new Instance("Frame");
 		art.Name = "Art";
@@ -2270,8 +2302,8 @@ export class ShopController implements OnStart {
 		art.BackgroundColor3 = tint;
 		art.BackgroundTransparency = selected ? 0.72 : 0.84;
 		art.BorderSizePixel = 0;
-		art.ZIndex = STORE_Z_INDEX + 4;
-		art.Parent = card;
+		art.ZIndex = STORE_Z_INDEX + 5;
+		art.Parent = cardChrome.face;
 
 		const artCorner = new Instance("UICorner");
 		artCorner.CornerRadius = new UDim(0, SPACING.xs);
@@ -2284,7 +2316,7 @@ export class ShopController implements OnStart {
 		pip.Size = UDim2.fromOffset(SWATCH, SWATCH);
 		pip.BackgroundColor3 = tint;
 		pip.BorderSizePixel = 0;
-		pip.ZIndex = STORE_Z_INDEX + 5;
+		pip.ZIndex = STORE_Z_INDEX + 6;
 		pip.Parent = art;
 
 		const pipCorner = new Instance("UICorner");
@@ -2302,7 +2334,7 @@ export class ShopController implements OnStart {
 		countLabel.TextColor3 = this.theme.colors.textPrimary;
 		countLabel.TextXAlignment = Enum.TextXAlignment.Right;
 		countLabel.Text = `x${ball.count}`;
-		countLabel.ZIndex = STORE_Z_INDEX + 6;
+		countLabel.ZIndex = STORE_Z_INDEX + 7;
 		countLabel.Parent = art;
 
 		outlineText(countLabel);
@@ -2331,8 +2363,6 @@ export class ShopController implements OnStart {
 		const row = new Instance("TextButton");
 		row.Name = `Material_${ball.id}`;
 		row.Size = new UDim2(1, 0, 0, FUSION_ROW_HEIGHT);
-		row.BackgroundColor3 = selected ? this.theme.colors.accent : this.theme.paint.card.color;
-		row.BackgroundTransparency = selected ? 0 : this.theme.paint.card.transparency;
 		row.BorderSizePixel = 0;
 		row.AutoButtonColor = false;
 		row.Text = "";
@@ -2340,15 +2370,16 @@ export class ShopController implements OnStart {
 		row.ZIndex = STORE_Z_INDEX + 3;
 		row.Parent = parent;
 
-		const corner = new Instance("UICorner");
-		corner.CornerRadius = new UDim(0, SPACING.xs);
-		corner.Parent = row;
+		// A material row is a button too, so it gets the depth. As on the ball card, the rarity tint moves from a border
+		// on the button to a thin inner ring on the face, which is the only layer of the two that is visible.
+		const rowChrome = applyChunkyChrome(row, {
+			color: selected ? this.theme.colors.accent : this.theme.paint.card.color,
+			shadowColor: shadowOf(selected ? this.theme.colors.accent : this.theme.paint.card.color),
+			zIndex: STORE_Z_INDEX + 3,
+			corner: SPACING.xs,
+		});
 
-		const stroke = new Instance("UIStroke");
-		stroke.Color = tint;
-		stroke.Thickness = selected ? 2 : HAIRLINE;
-		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
-		stroke.Parent = row;
+		addChunkyRing(rowChrome.face, tint, selected ? 2 : HAIRLINE);
 
 		const pip = new Instance("Frame");
 		pip.Name = "Ball";
@@ -2357,8 +2388,8 @@ export class ShopController implements OnStart {
 		pip.Size = UDim2.fromOffset(SWATCH - SPACING.xs, SWATCH - SPACING.xs);
 		pip.BackgroundColor3 = tint;
 		pip.BorderSizePixel = 0;
-		pip.ZIndex = STORE_Z_INDEX + 4;
-		pip.Parent = row;
+		pip.ZIndex = STORE_Z_INDEX + 5;
+		pip.Parent = rowChrome.face;
 
 		const pipCorner = new Instance("UICorner");
 		pipCorner.CornerRadius = ROUND;
@@ -2375,8 +2406,8 @@ export class ShopController implements OnStart {
 		nameLabel.TextXAlignment = Enum.TextXAlignment.Left;
 		nameLabel.TextTruncate = Enum.TextTruncate.AtEnd;
 		nameLabel.Text = rule === undefined ? `${displayName(ball.id)} (top tier)` : displayName(ball.id);
-		nameLabel.ZIndex = STORE_Z_INDEX + 4;
-		nameLabel.Parent = row;
+		nameLabel.ZIndex = STORE_Z_INDEX + 5;
+		nameLabel.Parent = rowChrome.face;
 
 		outlineText(nameLabel);
 
@@ -2391,8 +2422,8 @@ export class ShopController implements OnStart {
 		countLabel.TextColor3 = selected ? this.theme.colors.onAccent : this.theme.colors.textSecondary;
 		countLabel.TextXAlignment = Enum.TextXAlignment.Right;
 		countLabel.Text = `x${ball.count}`;
-		countLabel.ZIndex = STORE_Z_INDEX + 4;
-		countLabel.Parent = row;
+		countLabel.ZIndex = STORE_Z_INDEX + 5;
+		countLabel.Parent = rowChrome.face;
 
 		outlineText(countLabel);
 
@@ -2463,6 +2494,23 @@ export class ShopController implements OnStart {
 	}
 
 	/** The `Fusion` tab's facts pane: the chosen material, what it becomes, and whether the button may act. */
+	/**
+	 * Sets the fuse button's caption and its dimming, on the label rather than on the button.
+	 *
+	 * **One place instead of six.** The chrome makes the button a transparent hit area, so `button.Text` and
+	 * `button.TextTransparency` no longer draw anything; both now live on the label the chrome built. Six scattered rewrites
+	 * would each have to remember that, and the one that forgot would silently show a stale caption.
+	 */
+	private setFusionCaption(text: string, transparency: number): void {
+		const label = this.fusionLabel;
+		if (label === undefined) {
+			return;
+		}
+
+		label.Text = text;
+		label.TextTransparency = transparency;
+	}
+
 	private refreshFusionPanel(): void {
 		const button = this.fusionButton;
 		if (button === undefined) {
@@ -2486,9 +2534,8 @@ export class ShopController implements OnStart {
 				this.fusionOddsLabel.TextColor3 = this.theme.colors.textSecondary;
 			}
 
-			button.Text = "Select a ball";
+			this.setFusionCaption("Select a ball", 0.45);
 			button.Active = false;
-			button.TextTransparency = 0.45;
 			return;
 		}
 
@@ -2511,22 +2558,19 @@ export class ShopController implements OnStart {
 		}
 
 		if (ball.count < FUSION_INPUT_COUNT) {
-			button.Text = `Need ${FUSION_INPUT_COUNT}: you have ${ball.count}`;
+			this.setFusionCaption(`Need ${FUSION_INPUT_COUNT}: you have ${ball.count}`, 0.45);
 			button.Active = false;
-			button.TextTransparency = 0.45;
 			return;
 		}
 
 		if (rule === undefined) {
-			button.Text = "Cannot fuse";
+			this.setFusionCaption("Cannot fuse", 0.45);
 			button.Active = false;
-			button.TextTransparency = 0.45;
 			return;
 		}
 
-		button.Text = `Fuse ${FUSION_INPUT_COUNT} into ${tierName(rule.nextRarity)}`;
+		this.setFusionCaption(`Fuse ${FUSION_INPUT_COUNT} into ${tierName(rule.nextRarity)}`, this.busy ? 0.45 : 0);
 		button.Active = !this.busy;
-		button.TextTransparency = this.busy ? 0.45 : 0;
 	}
 
 	/**
@@ -3130,25 +3174,38 @@ export class ShopController implements OnStart {
 		)({
 			Name: "Fuse",
 			Size: new UDim2(1, 0, 0, BUTTON_ROW_HEIGHT),
-			BackgroundColor3: this.theme.colors.accent,
 			BorderSizePixel: 0,
 			AutoButtonColor: false,
-			Font: FONT,
-			TextSize: PANEL_TYPE.button.size,
-			TextColor3: this.theme.colors.onAccent,
-			Text: "Select a ball",
+			Text: "",
 			LayoutOrder: 3,
-			ZIndex: STORE_Z_INDEX + 1,
+			ZIndex: STORE_Z_INDEX + 3,
 			Parent: facts,
 		});
 
-		this.corners(factsScope, this.fusionButton, SPACING.sm);
-		outlineText(this.fusionButton);
+		// The primary action of the whole panel, so it gets the depth for the same reason the chest buttons do. Its caption
+		// is a label on the face, kept in `fusionLabel`, because the six places below rewrite it.
+		const fuseChrome = applyChunkyChrome(this.fusionButton, {
+			color: this.theme.colors.accent,
+			shadowColor: shadowOf(this.theme.colors.accent),
+			zIndex: STORE_Z_INDEX + 3,
+			label: {
+				text: "Select a ball",
+				textSize: PANEL_TYPE.button.size,
+				color: this.theme.colors.onAccent,
+				font: FONT,
+				zIndex: STORE_Z_INDEX + 5,
+			},
+		});
+
+		this.fusionLabel = fuseChrome.label;
+
 		attachPressFeedback(this.fusionButton);
 		attachClickSound(this.fusionButton);
 		this.fusionButton.Activated.Connect(() => this.pressFusion());
 		this.fusionButton.Active = false;
-		this.fusionButton.TextTransparency = 0.45;
+		if (this.fusionLabel !== undefined) {
+			this.fusionLabel.TextTransparency = 0.45;
+		}
 
 		return view;
 	}

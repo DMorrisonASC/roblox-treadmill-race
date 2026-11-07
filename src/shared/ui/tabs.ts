@@ -1,5 +1,5 @@
 import { SPACING, TYPOGRAPHY, FONT, Typography } from "./scale";
-import { outlineText } from "./text";
+import { applyChunkyChrome, ChunkyChrome } from "./chunky-chrome";
 import { Theme } from "./theme";
 import { attachPressFeedback } from "./press";
 import { attachClickSound } from "./sounds";
@@ -96,14 +96,27 @@ export function TabStrip(options: TabStripOptions): TabStripParts {
 	rowLayout.Parent = row;
 
 	const buttons = new Map<string, TextButton>();
+	// The chrome and its label, per tab. Kept beside `buttons` rather than replacing it so the returned shape still
+	// speaks in buttons; the label is what the selection restyle now recolours, because the button's own `Text` sits
+	// underneath the face.
+	const chromes = new Map<string, ChunkyChrome>();
 	let current = selected;
 
 	const restyle = () => {
-		for (const [name, button] of buttons) {
+		for (const [name] of buttons) {
 			const isSelected = name === current;
-			button.BackgroundColor3 = isSelected ? theme.colors.accent : theme.paint.trough.color;
-			button.BackgroundTransparency = isSelected ? 0 : theme.paint.trough.transparency;
-			button.TextColor3 = isSelected ? theme.colors.onAccent : theme.colors.textSecondary;
+			const chrome = chromes.get(name);
+			if (chrome === undefined) {
+				continue;
+			}
+
+			chrome.face.BackgroundColor3 = isSelected ? theme.colors.accent : theme.paint.trough.color;
+			if (chrome.label !== undefined) {
+				chrome.label.TextColor3 = isSelected ? theme.colors.onAccent : theme.colors.textSecondary;
+			}
+			// A selected tab is drawn **pressed**: the same "you are looking at me" cue the rail uses, and the reason
+			// selection needs no second colour.
+			chrome.setRaised(!isSelected);
 		}
 	};
 
@@ -115,9 +128,9 @@ export function TabStrip(options: TabStripOptions): TabStripParts {
 		button.AutomaticSize = Enum.AutomaticSize.X;
 		button.BorderSizePixel = 0;
 		button.AutoButtonColor = false;
-		button.Font = FONT;
-		button.TextSize = scale.body2.size;
-		button.Text = name;
+		// **Empty, and the label on the face carries the word.** `applyChunkyChrome` makes the button a transparent hit
+		// area, so its own `Text` would be drawn underneath the face and never seen.
+		button.Text = "";
 		button.LayoutOrder = order;
 		button.ZIndex = TAB_Z_INDEX;
 		button.Parent = row;
@@ -132,9 +145,21 @@ export function TabStrip(options: TabStripOptions): TabStripParts {
 		corner.CornerRadius = new UDim(0, TAB_CORNER_RADIUS);
 		corner.Parent = button;
 
-		if (options.outline === true) {
-			outlineText(button);
-		}
+		const chrome = applyChunkyChrome(button, {
+			color: name === current ? theme.colors.accent : theme.paint.trough.color,
+			shadowColor: theme.colors.shadow,
+			zIndex: TAB_Z_INDEX,
+			label: {
+				text: name,
+				textSize: scale.body2.size,
+				color: name === current ? theme.colors.onAccent : theme.colors.textSecondary,
+				font: FONT,
+				// `TAB_Z_INDEX + 2`, because the face is `TAB_Z_INDEX + 1` and a label at or below that is covered by it.
+				zIndex: TAB_Z_INDEX + 2,
+				outline: options.outline === true,
+			},
+		});
+		chromes.set(name, chrome);
 
 		attachPressFeedback(button);
 		// Every tab in every strip: `TabStrip` is the only place a tab button is built, so this covers the inventory's
