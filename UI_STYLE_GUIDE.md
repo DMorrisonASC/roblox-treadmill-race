@@ -79,17 +79,32 @@ edges. The shadow therefore shows along the far edges only — a one-sided strip
   eats the gap to the neighbour above; against a screen edge it clips. Inset the face instead — same shadow, same
   place, and the component's union stays exactly the cell it was given.
 
-### 1.3 Which plate is rounded
+### 1.3 Corners: both plates, same radius
 
-**A shadow plate is only rounded when it is the outermost thing drawn.**
+**Every plate in a component carries the same `UICorner` radius ? the shadow included.** A square plate under a
+rounded face is a silhouette mismatch: the control reads as a different component family from the tabs and cards
+beside it, and the eye notices the *shape* long before it notices the colour.
 
-- **Card and tab:** the shadow is the outermost layer, against game geometry. Round it — a rounded cast shadow
-  looks intentional.
-- **Control inside a panel:** the shadow sits *inside* another surface, and a rounded plate does not cover its
-  own bounding box. Its four corners pull inward and leave slivers, and what renders through a sliver is an
-  anti-aliased blend of every layer behind it — a pale notch nobody can attribute to a colour. **Make that
-  shadow square.** The face stays rounded on top, so the silhouette is still a rounded button on a hard-edged
-  shadow.
+The radius is one number per scale, applied to the shadow and the face:
+
+| Scale | Radius | Depth |
+|---|---|---|
+| Card / tab | 8 | 8 |
+| Panel / sheet | 12 | 10 |
+| Control inside a panel | 8 | 6 |
+
+Two consequences worth knowing:
+
+- **A rounded plate does not cover its own bounding box**, so a few pixels at the component's outermost corners
+  show whatever is behind it ? roughly `0.29 ? radius`, so about 2 px at radius 8. That is invisible **when the
+  shadow is a saturated dark shade of its face and everything around it is a surface of similar value**, which is
+  the normal case. It becomes a visible notch only when a *pale plate* sits directly behind the component; if you
+  see a pale corner, the plate behind is the bug, not the shadow. (That exact mistake cost two rounds here: the
+  fix was removing a light section fill behind the buttons, not squaring their shadows.)
+- **Do not try to fix the corners by clipping the container.** `ClipsDescendants` on a rounded container does not
+  reliably produce a rounded clip, so the shadow keeps its square silhouette ? the component is then pointed with
+  a clip that does nothing. Round the plate itself.
+
 
 ### 1.4 Border mode
 
@@ -361,7 +376,7 @@ Before calling a chunky screen finished:
 - [ ] Every shadow is a saturated shade of its own face, and face/shadow/border form a three-value ladder.
 - [ ] Every plate stroke names `ApplyStrokeMode.Border`; every text stroke does **not**.
 - [ ] No object carries two `UIStroke`s.
-- [ ] A control's shadow is square; only an outermost shadow is rounded.
+- [ ] The shadow and the face carry the **same** corner radius; neither is square.
 - [ ] Every label is outlined, including the ones on buttons that carry their own text.
 - [ ] `TextScaled` appears only with a `UITextSizeConstraint`.
 - [ ] Selection is expressed by the pressed state, not by a second colour.

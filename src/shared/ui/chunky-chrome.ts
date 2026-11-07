@@ -63,6 +63,13 @@ export interface ChunkyLabelOptions {
 
 /** What `applyChunkyChrome` returns. */
 export interface ChunkyChrome {
+	/**
+	 * The control itself, for `Active`, `Activated` and any other property of the button rather than of its paint.
+	 *
+	 * Carried on the handle so a caller never has to keep both: a list of these is a list of controls whose plates are
+	 * reachable, and `setRaised` / the face stay one dereference away from whatever `Active` was written on.
+	 */
+	readonly button: GuiButton;
 	/** The plate behind the face. */
 	readonly shadow: Frame;
 	/** The coloured face. Parent content here, not to the button. */
@@ -97,6 +104,14 @@ export interface ChunkyChrome {
  * face, which is what `label` is for: a button that carries text gets a `TextLabel` on the face instead, at
  * `zIndex + 2` or above.
  *
+ * ## The button's own background must stay invisible
+ *
+ * `applyChunkyChrome` sets `BackgroundTransparency = 1` on the button, and **nothing else may ever set it back**. A caller
+ * that dims a button by writing `button.BackgroundTransparency` - the obvious thing to do before this module existed -
+ * re-opens the hit area as a visible plate in front of *nothing*, and what shows is Roblox's default light grey: the face
+ * and shadow cover the middle of the cell, and a rounded shadow leaves its own corners uncovered, so the failure looks like
+ * pale wedges at every corner rather than like a grey box. Use `dimChunkyChrome`, which washes the face and its labels.
+ *
  * ## The pressed state
  *
  * `setRaised(false)` grows the face to the full cell, covering the shadow. It has to **grow rather than slide**, or the
@@ -112,17 +127,9 @@ export function applyChunkyChrome(button: GuiButton, options: ChunkyChromeOption
 	button.BackgroundTransparency = 1;
 	button.BorderSizePixel = 0;
 
-	// **Square, not rounded - and this is the fix for the corner wedges.**
-	//
-	// The shadow plate fills the whole cell, so if it is *rounded* its four corners pull inward and leave a sliver of the
-	// cell uncovered. What shows through those slivers is not this module's colour and cannot be controlled from here: the
-	// parent chain behind a button is the row (transparent), the section (transparent) and the sheet, and a sliver that
-	// small lands on the anti-aliased edge of a rounded corner where none of them is the visible surface. On screen it read
-	// as a pale notch at the bottom-left and top-right of every chest button.
-	//
-	// A square plate has no slivers: it covers the cell corner to corner, and the **face** stays rounded on top of it, so
-	// the silhouette is still a rounded button sitting on a hard-edged cast shadow - which is what the reference art does
-	// anyway. Nothing else in the look changes.
+	// **The shadow is rounded, like the face and like the card's.** It fills the cell and carries the same `UICorner`
+	// radius as the face; a square plate under a rounded face is a silhouette mismatch, and it is the one thing that made
+	// controls look like a different component family from the tabs that open them.
 	const shadow = new Instance("Frame");
 	shadow.Name = "Chunk";
 	shadow.Position = UDim2.fromScale(0, 0);
@@ -131,6 +138,10 @@ export function applyChunkyChrome(button: GuiButton, options: ChunkyChromeOption
 	shadow.BorderSizePixel = 0;
 	shadow.ZIndex = z;
 	shadow.Parent = button;
+
+	const shadowCorner = new Instance("UICorner");
+	shadowCorner.CornerRadius = new UDim(0, corner);
+	shadowCorner.Parent = shadow;
 
 	const face = new Instance("Frame");
 	face.Name = "Face";
@@ -189,7 +200,7 @@ export function applyChunkyChrome(button: GuiButton, options: ChunkyChromeOption
 		face.Size = UDim2.fromScale(1, 1);
 	};
 
-	return { shadow, face, label, setRaised };
+	return { button, shadow, face, label, setRaised };
 }
 
 /**

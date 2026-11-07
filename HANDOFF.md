@@ -3292,3 +3292,192 @@ That distinction is the general rule and is now written down: **a shadow plate o
 **Two prompt problems, reported rather than silently absorbed.** The required responsiveness text names `viewportConstraint.ts` and `panelChrome.ts` from a `roblox-dodgeball` project; **neither exists here** - this tree's equivalents are `src/shared/ui/viewport.ts` (`capToViewport`), `chunky-panel.ts` and `panel.ts`. The paragraph is included **verbatim** as instructed, with a clearly-marked naming note directly beneath it giving this repo's real paths, so the policy survives unchanged and the file names do not mislead. The prompt also specified `text-ui-stroke` and other free description of the anchor `UI_STYLE_GUIDE.md`; that name was used as written.
 
 **Audit.** One new file, markdown, 20.7 KB, seven top-level sections. **No `.ts` file was touched by this round** - `git status` shows only the pre-existing uncommitted work from items 112-120 plus the new guide.
+
+## 122. The ball picker joined the language, and every control's shadow got its corners back
+
+**Two reports, one round: the `Waiting`-phase ball picker was never restyled, and the chunky controls had *pointed* shadows while their sibling cards and sheets had round ones.** Both are fixed.
+
+**The pointed shadows were item 120's fix, one scale too broad.** That round made the control shadow square to stop the pale corner notches, and it worked - but a square plate under a rounded face leaves every button with a pointed shadow beside a rounded card, which reads as two styles on one screen. The correct pairing turns out to need both halves at once:
+
+- the **shadow stays full-size and square**, so it covers its cell corner to corner and there is no sliver for a background to leak through;
+- the **container** - the button itself - gets a `UICorner` at the face's radius and `ClipsDescendants = true`, so its rounded boundary cuts the shadow's corners off.
+
+Neither works alone: a square container leaks, and a rounded shadow still cuts *inside* a rounded clip. Implemented in `applyChunkyChrome`, so it applies to every control that module dresses - the rail, the sheet's tabs, chest buttons, ball cards, fusion rows, the fuse button and now the picker's cards and footer. `UI_STYLE_GUIDE.md` ?1.3 was rewritten to state the new rule, since the old text ("make that shadow square") is now wrong.
+
+**The picker was the last hand-built panel.** It now goes through `buildChunkyPanel` with `autoHeight` and `clipsDescendants` (it is the one panel that clips, deliberately - its bands are fixed-height and a taller child used to escape the sheet), reads `chunkyDarkTheme()` instead of `surfaceOpaqueTheme()`, and its type comes from one `typographyOneStepUp()` table rather than 20 literal scale reads.
+
+**Its cards are chunky buttons with a ring.** The rarity tint moved from a `UIStroke` on the button to `addChunkyRing` on the face - a GuiObject honours one stroke and the newer wins, so the old arrangement would have replaced the black outline (the item-118 failure, in a second file). Selection is now **depth plus a face tint**: the chosen card is drawn pressed, its face becomes the accent, and its **shadow follows the face** through `shadowOf` so the plate never stays neutral under an accent card.
+
+**Three things had to be renamed rather than restyled, and all three are traps worth recording:**
+
+- `footerButton` now returns `ChunkyChrome` instead of `TextButton`, because both footer buttons put their lines *inside* the face - a label parented to the button would be drawn under the plates.
+- `applyChunkyChrome`'s handle gained `button: GuiButton`, so a caller keeps one value: the control for `Active` and `Activated`, and the plates one dereference away. Two fields on the controller (`allBallsButton`, `rerollButton`) widened to `GuiButton` to match.
+- `DISABLED_WASH = 0.55` is gone. The footer buttons dimmed by writing `BackgroundTransparency` on the button, which paints nothing now; both go through `dimChunkyChrome`, which carries its own `0.45`. Two wash values on one screen is how one button ends up dimmer than another, so the local constant was deleted rather than reconciled.
+
+**The picker's labels are outlined and above their plates.** `this.label` applies `outlineText` and a `LABEL_Z_INDEX` of 6 - above the chrome's face at `+1` and the ring above that, or the labels would be covered by the very plates they sit on.
+
+**Audit.** `picker-controller.ts`, `chunky-chrome.ts`, `UI_STYLE_GUIDE.md`. No other controller has an interactive element left: `grep TextButton` across `src/client/controllers` returns only `picker-controller` and `shop-controller`, and both are fully chunky. The phase banner, the elimination splash and the round transition have no controls - they are HUD readouts, which the guide keeps in the HUD palette on purpose. Build, lint, prettier and tests green at 289; `\uXXXX` zero; **`flamework.build` unchanged** - no controller added or removed.
+
+**Studio-only:** whether the picker's cards read as pressable at their size, whether the footer buttons' `0.45` wash is right for a permanently-disabled `All Balls`, and whether the clipped container cuts anything it should not - the clip is at the button's own radius, so a child that legitimately overhangs the button (a badge, say) would be cut.
+
+## 123. The control shadows are rounded like the card's - the clip trick never worked, and the pale corner was never the shadow
+
+**Reported for the third time: controls had pointed shadows while their front faces and their sibling cards were round.** The second screenshot is the standard - the `SHOP` tab, built by `buildChunkyButton`, whose shadow carries a `UICorner`.
+
+**`applyChunkyChrome` was the only builder without one.** Item 120 removed it, on the theory that the pale corner notch was a rounded plate failing to cover its cell corner; item 122 then tried to get the rounding back by putting a `UICorner` and `ClipsDescendants = true` **on the button**. That does not work: `ClipsDescendants` does not reliably produce a *rounded* clip, so the shadow kept its square silhouette and the component stayed pointed - with a clip that did nothing. Removing the corner from the shadow was the wrong diagnosis and the clip was the wrong fix.
+
+**The fix is the card's, exactly: the shadow carries the same `UICorner` radius as the face.** One `UICorner` on the `Chunk` frame, radius `corner`, and `ClipsDescendants` deleted. Every control in the game goes through this one function - the sheet tabs, the close button, both chest buttons, the ball cards, the fusion rows, the fuse button, the picker's cards and its two footer buttons - so one edit fixes all of them and they now match the rail exactly.
+
+**Where the pale corner actually came from, recorded so it is not re-diagnosed.** A rounded plate leaves `~0.29 x radius`, so about 2 pixels, at the component's outermost corner. That is invisible when the shadow is a saturated dark shade of its face and the surface behind it is a similar value - which is the normal case. It was **visible only because a pale plate sat directly behind those buttons**: the chest section still carried `paint.card` as a fill (the "white box" of item 119). With that fill gone, the notch shows sheet-on-shadow, dark on dark. So the order of the two bugs was: pale fill behind (item 119, real), then a square shadow attempting to hide it (items 120 and 122, both wrong).
+
+**`UI_STYLE_GUIDE.md` ?1.3 rewritten a second time**, this time to the rule that is actually true: every plate in a component carries the same radius, the radius table is stated per scale, and the section now says explicitly **not** to try to fix corners by clipping the container, with the reason. The stale paragraph explaining the square-plate rationale was deleted from `chunky-chrome.ts` too, so the code no longer argues for a behaviour it does not have.
+
+**Audit.** `src/shared/ui/chunky-chrome.ts`: `UICorner` added to the shadow, `ClipsDescendants` and the container `UICorner` removed with their 876-character rationale, stale comment deleted. `UI_STYLE_GUIDE.md` ?1.3 and one checklist line. No other file. Build, lint, prettier and tests green at 289; `\uXXXX` zero; `flamework.build` unchanged.
+
+**Studio-only:** that the corner notch is invisible on every surface the controls sit on. If a pale corner ever reappears, the plate *behind* the component is the suspect - not the shadow's radius.
+
+## 124. Leaderboard: standings broadcast from the server, and a two-phase flip on the client
+
+**A new `LeaderboardService` (server) and `LeaderboardController` (client), plus `shared/leaderboard.ts` and one remote name.** `flamework.build` regenerated: **23 identifiers**, including `client/controllers/leaderboard-controller@LeaderboardController` and `server/services/leaderboard-service@LeaderboardService`.
+
+**The race direction in the brief was inverted, and that is the one substantive correction.** It said "the further along `+X`, the further ahead in the race". Source says the opposite, twice: `stepBallSpeeds` documents **"`+X` is toward the back - the exit end, where a ball is eliminated - and `-X` is toward the front"**, and a pickup is what "drifts the ball back toward the front edge, away from elimination". So moving toward `+X` is *losing*. Ranking by `+X` would put the body about to be eliminated in first place. The service ranks by **distance from the exit**, which is the same number a spectator is watching, and the choice is a single named constant (`LEADER_IS_FURTHEST_FROM_THE_EXIT`) that flips with one character if the other reading is wanted.
+
+**Three more places the brief was wrong:**
+
+- **`EliminationZone` is not a service.** Elimination is a `CollectionService` tag read by `RoundService`; there is no service by that name.
+- **`getCompetitors()` is private.** The public surface is `getLiveBalls()`, so the service filters with `hasOwnerIdentity` - the *same predicate* the winner rule uses, which is what stops the HUD showing a row for an ownerless `decoy` twin.
+- **`isMe` cannot be in the payload.** The array is identical for every client and goes out on `FireAllClients`; a server-computed `isMe` would need a separate `FireClient` per player for a boolean the client already knows. The payload carries `userId` instead - signed on purpose, so `userId > 0` is the whole "is this a real player" test - and the client compares it with `LocalPlayer.UserId`.
+
+**Decisions.** Distance is measured with `PointToObjectSpace` in the **belt's own frame**, not world `X`: the two coincide in this scene only because of how the fixture is placed, and a re-CFrame in Studio would silently invert a world-axis board. Previous order is the client's **array of owner ids**, not the rows' `LayoutOrder` - the layout order is what the flip *writes*, so reading it back would make the comparison depend on whether an animation had finished. The list is a **`ScrollingFrame` of exactly five rows** with `AutomaticCanvasSize.Y`: a fixed box so the sheet has a known height, a growing canvas so a full server scrolls instead of overflowing. It lives in **`hudCore`**, anchored to the right edge under the topbar inset by an offset rather than a fraction.
+
+**The flip, and why it reads as one.** Every row tweens `Size.Y` to `0` over `0.1`s with `TweenInfo(0.1, Quad, Out)`; a `task.delay` of the same duration (rather than a completion counter on every tween, which would have to survive a row destroyed mid-tween) commits the new `LayoutOrder` and the new text **while no row has any height**, then tweens every row back to `ROW_HEIGHT`. The order of operations is the effect: swapping `LayoutOrder` on a visible row is a teleport, and the instant of zero height is the only moment the swap is unobservable - so a card that moved appears to have been flipped over and re-dealt. A payload arriving mid-animation is **queued, not dropped and not applied**, because applying it would write `LayoutOrder` while rows are collapsed and stack a second jump on the first. Shrinking the row is also what makes `UIListLayout` close and open the gaps, so no row has to know about its neighbours.
+
+**New rows fade in** (`BackgroundTransparency` 1 -> 0.35 over `0.15`s) rather than popping, so an entry reads as having joined instead of having been there all along. The local player's row is marked with a **gold ring** from `addChunkyRing` plus a `GothamBlack` name - not a recoloured row, which would need a second colour and would compete with the names.
+
+**Audit.** New: `src/server/services/leaderboard-service.ts`, `src/client/controllers/leaderboard-controller.ts`, `src/shared/leaderboard.ts`. Modified: `src/shared/remotes.ts` (one name). `flamework.build` regenerated. Build, lint, prettier and tests green at 289; `\uXXXX` zero.
+
+**Studio-only:** that 0.1 s per half-flip reads as a flip rather than a blink (the brief asked for `0.2` per half, which is 0.4 s for a whole swap - slower than a HUD should move), that five visible rows is the right number at 1080p, and that a two-tooth swap of adjacent rows is legible at all when several rows change at once - a crowded belt may need the batch animating as one block.
+
+## 125. The leaderboard now publishes ground *lost*, ascending - the number changed even though the order already matched
+
+**The corrected brief agreed with the code's ordering and disagreed with its number, and both halves mattered.** Item 124 ranked by distance *from the exit* (`-localX`, descending), which puts the same body first as ascending-from-spawn does - the two orderings are the same relation seen from opposite ends. But the *published number* was different: `23` counting down to `-28` rather than `0` counting up. A HUD column is read as a score, so a score that shrinks as a racer holds its ground is unreadable however correct the order is.
+
+**`distance` is now studs from the belt's spawn edge: `0` at the edge a body is placed on, growing toward the exit at `+X`, sorted ascending.** Three details in that sentence are deliberate:
+
+- **The origin is the belt's spawn edge, not the spawner's position.** Measured from the belt, so a designer who moves the spawner in Studio does not shift every number; and so every body shares one origin instead of being measured from its own birth point.
+- **The frame is the belt's own** (`PointToObjectSpace`), with the belt's **half-length added back** because the transform measures from the geometric centre. The half-length is read from the part's `Size.X`, not hard-coded as `28`, so a re-sized belt keeps the origin on its real edge.
+- **`0` means safest, and the sort is ascending.** The elimination edge is `+X`, so the body nearest death has the *largest* number. This is the paragraph the code now carries, because a leaderboard sorted by "distance travelled" looks right and puts the loser first.
+
+**The `LEADER_IS_FURTHEST_FROM_THE_EXIT` flag is gone.** It existed to make the direction reversible while the question was open; the question is answered, and a two-mode constant around a decided fact is a maintenance surface. The reasoning lives in `collect()`'s docblock and in the field's own docblock instead.
+
+**The column shows a unit now.** `${math.floor(distance)}st` rather than a bare integer: an unlabelled number in a leaderboard column reads as a score, and this one grows while a racer loses. Whole studs rather than a tenth, because the value moves at roughly `BALL_SPEED_DECAY_RATE` studs a second and decimals would change on every broadcast without adding information.
+
+**Everything else from item 124 stands unchanged** - the flip, the queue for mid-animation payloads, the five-row scroll, the `hudCore` placement, the gold self ring, the owner-id-based "previous order", and the `userId`-in-payload decision that replaces the brief's `isMe`.
+
+**Audit.** `src/server/services/leaderboard-service.ts` (sign, origin, sort comparator, `beltGeometry` accessor replacing `beltFrame`), `src/shared/leaderboard.ts` (`distance` docblock), `src/client/controllers/leaderboard-controller.ts` (`formatDistance`). Build, lint, prettier and tests green at 289; `\uXXXX` zero; `flamework.build` unchanged since item 124 (still 23 identifiers).
+
+**Studio-only:** that `0st` at the top of the column reads as "best" to a player without a legend, and that the body that gets eliminated first is visibly last by a growing number rather than by position alone.
+
+## 126. `0st` was not a broken suffix - it was a distance wearing an ordinal, and there was no rank column at all
+
+**Reported as "the rank starts at 0 and always says `st`".** Half right, and the half that was wrong matters: **there was no rank on the board.** The number in the right-hand column was `distance` - studs from the spawn edge - and the previous round had suffixed it with `st` so it read `0st`, `15st`, `23st`. So the two symptoms had one cause each: no place was ever displayed, and a distance was dressed as one.
+
+**Fixed by giving the rank its own column and taking the unit off the distance.**
+
+- **`getOrdinal` in `src/shared/ordinal.ts`**, with `ordinal.spec.ts` pinning the boundaries: `1st`, `2nd`, `3rd`, `4th`, `11th`-`13th`, `21st`-`23rd`, `101st`, `111th`-`113th`, `121st`, plus a float and a zero case. It lives in `shared` rather than inline because it is arithmetic with boundaries, and boundaries are the thing that gets "simplified" later - `11` ending in `1` is exactly the case a one-digit rule gets wrong.
+- **The rank is `index + 1`**, written in `commitOrder` from the row's position in the *ranked* list. That is the one line the first build would have got wrong had it published a rank at all: a Lua array is 0-based, a place is not.
+- **The distance column lost its suffix** and is now a bare count. It is not a place, and it must not look like one.
+- **`RANK_WIDTH = 28`** in a fixed column, so the name starts at the same x on every row rather than shifting by a digit.
+
+**One build defect from the previous round surfaced and is fixed.** `UIListLayout.AbsoluteContentSize.ToString()` was a no-op - the property returns a `Vector2` that roblox-ts discards, so the "force a layout solve" line compiled to nothing and was a type error besides. The FLIP no longer needs a solve: **the travel distance is derived from the change of index**, `(oldIndex - newIndex) * (ROW_HEIGHT + ROW_GAP)`, which is exact because the rows are uniform by construction - the divider lives *inside* the container so it cannot change the pitch. Measured `First`, derived `Last`, tweened `Invert -> Play`; it is still FLIP, without a frame yield or a property read whose value nobody wants.
+
+**Audit.** New: `src/shared/ordinal.ts`, `src/shared/ordinal.spec.ts`. Modified: `src/client/controllers/leaderboard-controller.ts` (rank label, name column shifted, distance formatter, derived FLIP delta, `IsA` guard on the divider). **295 tests in 21 files** - six new assertions. Build, lint and prettier green; `\uXXXX` zero; `flamework.build` unchanged at 23 identifiers.
+
+**Studio-only:** that `28` pixels is enough for `12th` in the caption size without eliding, and that a two-column row still reads left-to-right as place, name, distance.
+
+## 127. The publisher was dead, not empty - a roblox-ts loop lowering bug, plus "any ball" instead of "any owner"
+
+**Reported as "No players" on the board.** The board was not showing nobody; it had **never received anything**, because the service's publisher thread died on its first `Playing` tick and a `task.spawn` thread that throws is gone for the session. The one line that survived was `leaderboard-service:196: attempt to index nil with 'distance'`.
+
+**The bug is in the compiled Luau, not in the TypeScript.** `for (let index = 0; index + 1 < ordered.size(); index++)` is lowered by roblox-ts to `for index = 0, #ordered - 1` - one iteration too many at every size, and at size `1` it runs once with `behind = ordered[2] = nil`. With one body on the belt (a solo playtest, before the debug spawn key was pressed) the first tick threw. Two fixes, both kept:
+
+- **The bound is spelled out and the degenerate case returns early**: `if (ordered.size() < 2) return ordered;` then `const lastIndex = ordered.size() - 1; for (let index = 0; index < lastIndex; index++)`. The compiled output is now a `while`-shaped loop with no arithmetic in the header, so the lowering has nothing left to get wrong.
+- **Each tick is `pcall`ed** and a failure logs `[Leaderboard] tick failed, retrying next interval`. A HUD must not be killable by one bad frame, and a dead publisher that prints once is the worst possible failure mode: it looks exactly like "there are no players".
+
+**"Any ball", not "any owner".** The ranking now includes **every live body** the round tracks, not only those carrying an owner identity. The old filter was defensible for the winner rule and wrong for a HUD: it produced an empty board on a solo playtest and excluded exactly the bodies a designer adds while testing. Bodies with an owner are named after the owner; the rest fall back to their own instance name (a `decoy` twin reads as `Decoy`). The winner rule is still `RoundService`'s business and is untouched - an ownerless body can appear in the standings and still not compete, which is the asymmetry the `decoy` power is built on.
+
+**That required re-keying the payload on the body rather than the owner.** `LeaderboardEntry` gained `key` (the body's full name - unique within a round, stable for the life of the body) and `userId` became `0` for "no owner" rather than an absent field, so the remote never carries a nil hole. The client's row map and its `previousOrder` are keyed by `key`; the self-highlight now tests `userId > 0 && userId === LocalPlayer.UserId`, which stops `0` matching anybody.
+
+**Audit.** `src/shared/leaderboard.ts` (entry shape), `src/server/services/leaderboard-service.ts` (pcall, widened source, keyed ranking, spelled-out bound), `src/client/controllers/leaderboard-controller.ts` (payload parsing, keyed rows, self test). Build, lint, prettier and tests green at **295 in 21 files**; `\uXXXX` zero; `flamework.build` unchanged at 23 identifiers.
+
+**Studio-only:** that a five-row board mixing players, `Debug#N` bodies and decoys reads sensibly, and that pressing the debug spawn key now fills it within one second.
+
+## 128. The single-row bug was `GetFullName()` - every ball is called `Ball`
+
+**Reported: seventeen live bodies, one row on the board.** The row key was `ball.GetFullName()`, and `GetFullName` returns the *path*. All balls are siblings named `Ball` under `Workspace.SpawnedBalls`, so all seventeen reported `Workspace.SpawnedBalls.Ball` - one key, one map entry, one row, overwritten by whichever body the loop reached last. The visible row (`1st Debug#2 16`) was simply the last writer. Nothing was wrong with the layout, the loops or the draw order.
+
+**The fix is a server-assigned key.** `KeyFor(ball)` hands out `B1`, `B2`, ... from a `Map<BasePart, string>` and a counter, cleared with `previousRanked` when the phase leaves `Playing`. It is the only thing here guaranteed distinct, and because it is assigned once per body the client's row identity survives a rank change - a per-broadcast index would renumber every row on every elimination.
+
+**Duplicate names, Part C.** Ownerless bodies are all called `Ball` or `Decoy`, so they now read `Ball 7`, `Decoy 12` - the numeric half of their own key. Stable for the body's life, and it matches the identity the client is using, so two rows that look alike are genuinely different bodies rather than a rendering artefact.
+
+**The cap is gone, not raised.** `LEADERBOARD_ENTRY_LIMIT` is deleted from `shared/leaderboard.ts` and `collect()` returns `ranked` directly, so the payload carries the whole field - at most `MaxLiveBalls` (50) entries of four small fields, once a second. The old rationale ("a fifty-row HUD is a wall of text") was wrong for this game: the player is watching every body on the belt, and a five-row window hid the racers in front of them.
+
+**The client shows every row and scrolls.** `TOP_ROWS` - which was a *cap* - became `VISIBLE_ROWS`, a **viewport height**, and `displayList` (top five plus a pinned self row) is deleted; the pinned-row machinery goes with it, including the divider child and `isPinned`. The list is a `ScrollingFrame` with `AutomaticCanvasSize.Y`: the box is five rows, the canvas is however many exist, so a fifty-body round scrolls inside a fixed-height panel instead of pushing the board off the screen.
+
+**One latent bug found on the way.** `commitOrder` is what writes `LayoutOrder` **and the rank text**, and it only ran on the sliding path. A row created on a broadcast whose order had not changed would therefore sit at order `0` with an empty rank column until something else moved. Both non-slide paths now commit as well, with a comment saying why the call is not redundant.
+
+**Audit.** `src/shared/leaderboard.ts` (cap constant deleted), `src/server/services/leaderboard-service.ts` (key map, names, uncapped return), `src/client/controllers/leaderboard-controller.ts` (scroller, no display cap, no pin, commit on every path). Build, lint, prettier and tests green at **295 in 21 files**; `\uXXXX` zero; `flamework.build` unchanged at 23 identifiers.
+
+**Studio-only:** that the scrollbar is legible at `4` pixels over a charcoal face, and that seventeen rows of `Ball 3`, `Decoy 7`, `Debug#12` read as a race rather than as a debug dump - if the labelled bodies dominate, the next step is hiding ownerless rows again behind a toggle rather than a hard filter.
+
+## 129. A decoy twin now reports its parent's identity, so the board no longer outs the fake
+
+**Reported: the leaderboard revealed the decoy by naming it `Decoy 12`.** Right, and it is worse than cosmetic - the whole `decoy` power rests on a twin being indistinguishable, and the one UI that lists every body was naming it.
+
+**`BallSpawnerService.ownerIdentityFor(ball)` answers "who does this body represent".** It reads the body's own owner pair first; failing that it walks `decoysByParent` to find a parent whose twin this is and returns the *parent's* identity. The leaderboard calls it and uses the result for both `userId` and `name`, falling back to the old `${ball.Name} ${key.sub(2)}` only when neither exists.
+
+**The reverse lookup is a scan, not a second map.** `decoysByParent` is keyed by parent, so finding a twin's parent means walking its values - at most one entry per lane. `forgetDecoy` already argues the same way for its own reverse pass ("the map is at most one entry per lane, which is why the reverse scan is a loop rather than a second index that could disagree with the first"), and ~40 iterations once per body per second is cheaper than an index that can rot after a missed delete.
+
+**The winner rule is untouched, and the comment says why.** `RoundService` decides who competes from `OwnerUserId` **on the body**; `ownerIdentityFor` is a display question that writes nothing. A twin reporting its parent's identity on the leaderboard is still an ownerless body everywhere the simulation looks - which is exactly the separation items 77/79 built.
+
+**The client needed no changes, and that was verified rather than assumed.** Rows are keyed by `entry.key` (`Map<string, Row>`), `removeNotIn` keeps a `Set<string>` of keys, and `orderChanged` compares keys - nothing dedupes by name or by `userId`, so two rows carrying the same player's identity render as two rows. The highlight tests `userId > 0 && userId === LocalPlayer.UserId`, so **the owner sees both their real body and their twin ringed in gold**, while everyone else sees two unmarked `Player1` rows. That asymmetry is the power working.
+
+**Where the brief was wrong, in one place.** It says a debug ball is an example of a body that should return `undefined`. Debug bodies are *owned* - synthetic ids `-1`, `-2`, ... with `Debug#N` display names - and `hasOwnerIdentity` accepts them deliberately, so they return their own identity and keep their names on the board. `undefined` is only reached by a body with no owner and no live parent: a stray, or a twin whose parent has already been destroyed (in which case there is no lookalike left to protect).
+
+**Audit.** `src/server/services/ball-spawner-service.ts` (`ownerIdentityFor`, `identityOf`, `hasOwnerIdentity` import), `src/server/services/leaderboard-service.ts` (spawner injected, identity from the spawner, three now-dead attribute imports removed). No client change. Build, lint, prettier and tests green at **295 in 21 files**; `\uXXXX` zero; `flamework.build` unchanged at 23 identifiers - no new service.
+
+**Studio-only:** that two identical rows with different ordinals read as "this player has two balls" rather than as a duplicate-row bug, and that the owner's gold ring on both rows is understood as "both of these are mine".
+
+## 130. The white box was `refreshChestButtons` re-opening the hit area
+
+**Reported: the `Open 1` / `Open 10` buttons are pointy and white-ish.** One line caused it, and it had been latent since item 123:
+
+```ts
+entry.button.BackgroundTransparency = enabled ? 0 : DISABLED_WASH;   // removed
+```
+
+`applyChunkyChrome` makes the button a **transparent hit area** and draws the face and shadow as its children ? it already set `BackgroundTransparency = 1`, so nothing was missing there. This block then wrote a transparency of `0` straight back onto the button, which paints **Roblox's default light grey** (`163, 162, 165`) behind both plates. The plates cover the middle of the cell, so what showed through was the **corners**: a rounded shadow does not cover its own bounding box, and until item 123 the shadow was square and hid the problem. Rounding the shadow is what turned a grey box into pale wedges.
+
+**Fixed by routing the wash through `dimChunkyChrome(entry.button, !enabled)`** ? the same call `applyPolicy` and the purchase guard already use for the Premium buttons. That re-washes the *face* and its *labels*, the only two properties on a chrome'd control that actually draw, and it means **all six buttons dim identically** instead of two of them using this file's own pair of constants.
+
+**Two constants deleted, not left behind.** `DISABLED_WASH` (`0.55`, the plate) and `DISABLED_TEXT_WASH` (`0.35`, the labels) existed only for that block. `dimChunkyChrome` carries one wash (`0.45`) for both, and keeping two locally-tuned numbers beside it is exactly how one button ends up dimmer than another. The three manual `TextTransparency` lines went with them ? `dimChunkyChrome` already walks the face's text descendants.
+
+**Audit: every chrome'd control, and none of them touches a background any more.** Nine `applyChunkyChrome` call sites ? `close`, both chest buttons, ball card, fusion row, fuse button (shop), the picker's card and footer button, and the tab strip. A sweep of every `BackgroundTransparency =` assignment in `src/client/controllers` now returns only frames, labels and the picker's tinted ball; no button. The trap is written into `applyChunkyChrome`'s own docblock so the next caller does not rediscover it: *the button's background must stay at 1, and a caller that writes it re-opens the hit area as a visible plate whose failure mode is pale corner wedges, not a grey box.*
+
+**Audit.** `src/client/controllers/shop-controller.ts` (the wash, two constants, three text-transparency lines), `src/shared/ui/chunky-chrome.ts` (docblock only). Build, lint, prettier and tests green at **295 in 21 files**; `\uXXXX` zero; `flamework.build` unchanged.
+
+**Studio-only:** that a disabled chest button now reads as a dimmed card rather than a dimmed grey slab, and that `0.45` is the right amount for both the face and its two lines ? the old pair was `0.55`/`0.35`, so the plate is slightly more transparent and the text slightly less.
+
+## 131. Debug key `2` spawns the auto-bots itself
+
+**Reported: pressing `2` in a one-player Studio session still ends the round instantly.** Correct - `forceWaiting` spawned the *players*, and a single competitor is the same thing as `last standing`, so `Waiting` counted down into a `Playing` phase that the first tick closed. The workaround was to press `4` inside a `WAITING_SECONDS` window, which is a race against a timer, not a harness.
+
+**The gate in `debugSpawnCompetitors` now accepts `Waiting` as well as `Playing`.** The original reason for refusing everything else stands and is untouched: a body in a phase with no tick is an orphan. `Waiting` is not that phase - it is the phase that already spawns the players' own bodies, `enterPlaying` is on a scheduled timer from it, and `Intermission`/`PostGame` stay refused (neither has a scheduled entry into `Playing`, and `Intermission` wipes every body on the way in). Bots spawned during `Waiting` behave exactly like the player's body: `spawner.setRoundActive(false)` and `setBeltSpeed(0)` mean they sit still through the countdown, then are raced, eliminated and cleaned up by the same code in `Playing`.
+
+**Placement: after `startWaitingRound`, before `enterWaiting`.** Both halves matter. After, because `startWaitingRound` rolls the offers and spawns the players - a spawn ahead of it would take spawner slots first and the human body would arrive second. Before, because `enterWaiting` prints the transition and arms the countdown, and its `competitors=` figure is read off the argument, not off the world.
+
+**`debugSpawnCompetitors` now takes a reason and returns a count, and both exist for the log.** Without the count, `enterWaiting(reason, spawned)` would print `competitors=1` beside a round holding five bodies - a log that disagrees with the world is worse than no log, and that number is the one a reader uses to decide whether the round was worth watching. Without the reason, the line could not distinguish an intentional `4` from the automatic pair, and the two are the only way to tell whether the fix is doing anything. The debug remote call site ignores the return value, which TypeScript allows; `print` keeps the ASCII hyphen in `not Playing or Waiting` rather than the file's arrow glyph.
+
+**Audit.** `src/server/services/round-service.ts` only - `forceWaiting` (the call and its comment), `debugSpawnCompetitors` (signature, guard, refusal log, success log, `return spawned.size()`), and its docblock, which swapped the "refused outside `Playing`" argument for the `Waiting`-is-safe one plus a "why it returns a count" section. Build, lint, prettier and tests green at **295 in 21 files**; `\uXXXX` zero; `flamework.build` unchanged at 23 identifiers - no new service and no decorated method, so nothing reflection-visible changed.
+
+**Studio-only:** that the bots-plus-player population is right for watching a round with - there is no `DEBUG_COMPETITORS` constant, the press spawns one per **bound spawner** (`getBoundSpawnerCount()`), so "four" is a property of the place rather than a number this round chose, and that the extra `[Round] debug spawn (auto-bots for debug key 2)` line between the spawn and the transition reads as one press rather than as two.

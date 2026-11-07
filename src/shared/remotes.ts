@@ -183,3 +183,19 @@ export const PICKER_REROLL_REMOTE_NAME = "PickerReroll";
  * The client never sends anything: `InvokeServer()` takes no arguments, so no client can name a body or a player.
  */
 export const DECOY_OUTLINE_REMOTE_NAME = "DecoyOutline";
+
+/**
+ * The leaderboard: **server to client only**, one array of standings, fired on a timer while a round is `Playing`.
+ *
+ * ## Why it is a broadcast of the whole list rather than a per-player message
+ *
+ * Every client sees the same race, so the payload is the same for all of them. The one field that is *not* the same is
+ * "which row am I", and that is deliberately **not in the payload**: an owner id travels with each entry, and a client
+ * compares it with its own `LocalPlayer.UserId`. The alternative - `isMe` computed on the server - would need a separate
+ * `FireClient` per player for a boolean the client already knows, and would make the payload a function of its recipient
+ * rather than of the race.
+ *
+ * Nothing is sent while the phase is not `Playing`: there is no race to rank, and a client that kept the last array would
+ * be showing a leaderboard for a round that ended.
+ */
+export const LEADERBOARD_UPDATE_REMOTE_NAME = "LeaderboardUpdate";

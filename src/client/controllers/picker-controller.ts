@@ -11,11 +11,31 @@ import {
 	REMOTES_FOLDER_NAME,
 	ROUND_STATE_VALUE_NAME,
 } from "shared/remotes";
-import { FONT, SPACING, TYPOGRAPHY } from "shared/ui/scale";
-import { surfaceOpaqueTheme, Theme } from "shared/ui/theme";
+import { FONT, SPACING, TYPOGRAPHY, typographyOneStepUp } from "shared/ui/scale";
+import { chunkyDarkTheme, Theme } from "shared/ui/theme";
 import { getScreenGui } from "shared/ui/layers";
+import { addChunkyRing, applyChunkyChrome, ChunkyChrome, dimChunkyChrome, shadowOf } from "shared/ui/chunky-chrome";
+import { buildChunkyPanel } from "shared/ui/chunky-panel";
+import { outlineText } from "shared/ui/text";
 import { attachClickSound } from "shared/ui/sounds";
 import { capToViewport } from "shared/ui/viewport";
+
+/**
+ * **Placeholder.** Draw order for the sheet's labels.
+ *
+ * Above `applyChunkyChrome`'s face, which takes `button.ZIndex + 1` for whatever button a label sits in: a label at the
+ * same order as its button's face is drawn *underneath* it and vanishes. One number for the whole sheet, because no label
+ * here is nested inside another label's stack.
+ */
+const LABEL_Z_INDEX = 6;
+
+/**
+ * **Placeholder.** Base draw order for a card's plates.
+ *
+ * Below `LABEL_Z_INDEX` so the card's own labels sit above its face, and above the sheet's face so the cards are drawn on
+ * the sheet rather than behind it. The chrome adds one for the face and the ring adds one more.
+ */
+const CARD_Z_INDEX = 3;
 
 /** The one phase the picker belongs to. A client cannot import the server's `RoundPhase`. */
 const PHASE_WAITING = "Waiting";
@@ -58,8 +78,10 @@ const BORDER = 1;
 /** **Placeholder.** Border weight of the selected card. Thicker, not larger: a size change would reflow the row. */
 const SELECTED_BORDER = 3;
 
-/** **Placeholder.** How far a disabled button fades, so it does not read as pressable. */
-const DISABLED_WASH = 0.55;
+/*
+ * The disabled fade is no longer a constant here. `dimChunkyChrome` carries its own wash (0.45), and the two numbers
+ * disagreeing is exactly how a screen ends up with one button dimmer than another - see `shared/ui/chunky-chrome`.
+ */
 
 /** **Placeholder.** Seconds after which an unanswered call stops blocking the buttons. */
 const REPLY_TIMEOUT_SECONDS = 10;
@@ -84,7 +106,10 @@ const DIAMOND_SIZE = 10;
 interface BallCard {
 	readonly ballId: string;
 	readonly button: TextButton;
-	readonly stroke: UIStroke;
+	/** The card's plates and pressed state, so the selection pass restyles without rebuilding. */
+	readonly chrome: ChunkyChrome;
+	/** The rarity ring's frame. The `UIStroke` lives on this, not on the card's face - see the ring's creation site. */
+	readonly ring: Frame;
 	readonly nameLabel: TextLabel;
 }
 
@@ -123,7 +148,15 @@ interface BallCard {
  */
 @Controller()
 export class PickerController implements OnStart {
-	private readonly light: Theme = surfaceOpaqueTheme();
+	private readonly theme: Theme = chunkyDarkTheme();
+
+	/**
+	 * The sheet's type scale: every variant one step larger than the game scale.
+	 *
+	 * Same table the store and the inventory use, for the same reason - one decision, one table, and the bands that size
+	 * themselves from a label's line height grow with it. Read `typographyOneStepUp`.
+	 */
+	private readonly type = typographyOneStepUp();
 	private readonly player = Players.LocalPlayer;
 
 	private phase = "unknown";
@@ -132,9 +165,9 @@ export class PickerController implements OnStart {
 	private countdownLabel?: TextLabel;
 	private choices?: ScrollingFrame;
 	private loadingLabel?: TextLabel;
-	private allBallsButton?: TextButton;
+	private allBallsButton?: GuiButton;
 	private allBallsReason?: TextLabel;
-	private rerollButton?: TextButton;
+	private rerollButton?: GuiButton;
 	private rerollCostLabel?: TextLabel;
 	private rerollReason?: TextLabel;
 
@@ -297,33 +330,37 @@ export class PickerController implements OnStart {
 	 */
 	private buildCard(parent: Instance, ballId: string, order: number): BallCard {
 		const rarity: Rarity = rarityOfBall(ballId) ?? "common";
-		const tint = this.light.colors.rarity[rarity];
+		const tint = this.theme.colors.rarity[rarity];
 
 		const button = new Instance("TextButton");
 		button.Name = `Card_${order}`;
 		button.Size = UDim2.fromOffset(CARD_WIDTH, CARD_HEIGHT);
-		button.BackgroundColor3 = this.light.paint.card.color;
-		button.BackgroundTransparency = this.light.paint.card.transparency;
 		button.BorderSizePixel = 0;
 		button.AutoButtonColor = false;
 		button.Text = "";
 		button.LayoutOrder = order;
 		button.Parent = parent;
 
+		// **A card is clickable, so it gets the depth.** The picker's "nine cards you cannot tell apart" problem is the
+		// same one the inventory had: a flat rectangle with a hairline in its rarity colour says nothing about being
+		// pressable, and an offer screen is the one place a player must understand that immediately.
+		const chrome = applyChunkyChrome(button, {
+			color: this.theme.paint.card.color,
+			shadowColor: shadowOf(this.theme.paint.card.color),
+			zIndex: CARD_Z_INDEX,
+			corner: SPACING.sm,
+		});
+
 		// A card is a button, so it clicks like one. Attached here rather than at the call site because the cards are
 		// built in a loop: one call covers every card in every offer, including the nine-card premium set.
 		attachClickSound(button);
-
-		const buttonCorner = new Instance("UICorner");
-		buttonCorner.CornerRadius = new UDim(0, SPACING.sm);
-		buttonCorner.Parent = button;
 
 		const cardPadding = new Instance("UIPadding");
 		cardPadding.PaddingTop = new UDim(0, SPACING.sm);
 		cardPadding.PaddingBottom = new UDim(0, SPACING.sm);
 		cardPadding.PaddingLeft = new UDim(0, SPACING.sm);
 		cardPadding.PaddingRight = new UDim(0, SPACING.sm);
-		cardPadding.Parent = button;
+		cardPadding.Parent = chrome.face;
 
 		const layout = new Instance("UIListLayout");
 		layout.FillDirection = Enum.FillDirection.Vertical;
@@ -332,10 +369,10 @@ export class PickerController implements OnStart {
 		layout.VerticalAlignment = Enum.VerticalAlignment.Center;
 		layout.SortOrder = Enum.SortOrder.LayoutOrder;
 		layout.Padding = new UDim(0, SPACING.xs);
-		layout.Parent = button;
+		layout.Parent = chrome.face;
 
 		// 1. Name.
-		const nameLabel = this.label(button, ballName(ballId), "body2", "primary", 1);
+		const nameLabel = this.label(chrome.face, ballName(ballId), "body2", "primary", 1);
 		nameLabel.TextWrapped = true;
 
 		// 2. The ball placeholder: a tinted circle, not an invented asset.
@@ -346,25 +383,24 @@ export class PickerController implements OnStart {
 		ball.BackgroundTransparency = 0.1;
 		ball.BorderSizePixel = 0;
 		ball.LayoutOrder = 2;
-		ball.Parent = button;
+		ball.Parent = chrome.face;
 
 		const ballCorner = new Instance("UICorner");
 		ballCorner.CornerRadius = new UDim(1, 0);
 		ballCorner.Parent = ball;
 
 		// 3. The description slot: the rarity, because no ball has a power, an effect or any other text to put here.
-		const description = this.label(button, rarityLabel(rarity), "caption", "secondary", 3);
+		const description = this.label(chrome.face, rarityLabel(rarity), "caption", "secondary", 3);
 		description.TextXAlignment = Enum.TextXAlignment.Center;
 
-		const stroke = new Instance("UIStroke");
-		stroke.Color = tint;
-		stroke.Thickness = BORDER;
-		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
-		stroke.Parent = button;
+		// **A ring on its own frame, not a stroke on the face.** A GuiObject honours one `UIStroke` and the newer wins, so a
+		// rarity stroke parented to the face would replace the chunky black outline instead of sitting inside it - the
+		// failure that made every inventory card change colour once (item 118).
+		const ring = addChunkyRing(chrome.face, tint, BORDER);
 
 		button.Activated.Connect(() => this.pick(ballId));
 
-		return { ballId, button, stroke, nameLabel };
+		return { ballId, button, chrome, ring, nameLabel };
 	}
 
 	/** Loading, not empty: before an offer arrives the band says so rather than showing zero cards. */
@@ -385,13 +421,26 @@ export class PickerController implements OnStart {
 		for (const card of this.cards) {
 			const selected = ballId !== undefined && card.ballId === ballId;
 
-			card.stroke.Thickness = selected ? SELECTED_BORDER : BORDER;
-			card.stroke.Color = selected
-				? this.light.colors.accent
-				: this.light.colors.rarity[rarityOfBall(card.ballId) ?? "common"];
-			card.button.BackgroundColor3 = selected ? this.light.colors.accent : this.light.paint.card.color;
-			card.button.BackgroundTransparency = selected ? 0 : this.light.paint.card.transparency;
-			card.nameLabel.TextColor3 = selected ? this.light.colors.onAccent : this.light.colors.textPrimary;
+			// **Selection is depth, plus one face tint.** The card's plates are children now, so `button.BackgroundColor3`
+			// would paint a surface nothing can see; the face is what changes. And a selected card is drawn *pressed* - the
+			// same cue the rail and the sheet tabs use - so the state reads even for a player who cannot tell two blues
+			// apart.
+			card.chrome.setRaised(!selected);
+			const face = selected ? this.theme.colors.accent : this.theme.paint.card.color;
+			card.chrome.face.BackgroundColor3 = face;
+			// The plate behind follows the face. A neutral shadow under an accent face is the "two different materials"
+			// mistake the style guide's colour section warns about, and `shadowOf` cannot drift out of hue.
+			card.chrome.shadow.BackgroundColor3 = shadowOf(face);
+
+			const ringStroke = card.ring.FindFirstChildOfClass("UIStroke");
+			if (ringStroke !== undefined) {
+				ringStroke.Thickness = selected ? SELECTED_BORDER : BORDER;
+				ringStroke.Color = selected
+					? this.theme.colors.onAccent
+					: this.theme.colors.rarity[rarityOfBall(card.ballId) ?? "common"];
+			}
+
+			card.nameLabel.TextColor3 = selected ? this.theme.colors.onAccent : this.theme.colors.textPrimary;
 		}
 	}
 
@@ -523,7 +572,10 @@ export class PickerController implements OnStart {
 
 		if (this.allBallsButton !== undefined && this.allBallsReason !== undefined) {
 			this.allBallsButton.Active = false;
-			this.allBallsButton.BackgroundTransparency = DISABLED_WASH;
+			// **The wash goes through the chrome, not through the button.** `BackgroundTransparency` on the button no longer
+			// paints anything - the plates are its children now - so the old line would have left a disabled button looking
+			// fully enabled. `dimChunkyChrome` walks the face and its labels instead.
+			dimChunkyChrome(this.allBallsButton, true);
 			this.allBallsReason.Text = "random per round";
 		}
 
@@ -539,7 +591,7 @@ export class PickerController implements OnStart {
 		const enabled = !this.busy && !premium && affordable && offer !== undefined;
 
 		rerollButton.Active = enabled;
-		rerollButton.BackgroundTransparency = enabled ? 0 : DISABLED_WASH;
+		dimChunkyChrome(rerollButton, !enabled);
 
 		if (premium) {
 			costLabel.Text = "-";
@@ -571,7 +623,7 @@ export class PickerController implements OnStart {
 
 		const remaining = math.max(0, offer.deadline - Workspace.GetServerTimeNow());
 		label.Text = tostring(math.ceil(remaining));
-		label.TextColor3 = remaining <= 3 ? this.light.colors.error : this.light.colors.textSecondary;
+		label.TextColor3 = remaining <= 3 ? this.theme.colors.error : this.theme.colors.textSecondary;
 	}
 
 	// #endregion
@@ -579,57 +631,50 @@ export class PickerController implements OnStart {
 	// #region construction
 
 	private buildMainFrame(parent: Instance): Frame {
-		const frame = new Instance("Frame");
-		frame.Name = "BallPicker";
-		frame.AnchorPoint = new Vector2(0.5, 0.5);
-		frame.Position = UDim2.fromScale(0.5, 0.5);
+		// **The sheet, through the same builder as the store and the inventory.** Before this round the picker was the last
+		// panel built by hand - a translucent card with a hairline outline - so a player who opened the store and then
+		// reached the `Waiting` phase saw two different games.
+		//
 		// **An offset, not a share of the screen.** A 60%-wide sheet with three cards left a third of the panel empty on the
 		// right, which reads as a card that failed to load; the reference's panel is only as wide as its content. The row of
 		// `PICKER_OPTION_COUNT` cards *is* the content, and a premium offer wider than that scrolls inside this width.
 		// `capToViewport` supplies the ceiling on a narrow window, where an offset would otherwise overflow.
-		frame.Size = new UDim2(
-			0,
-			SHEET_WIDTH,
-			0,
-			HEADER_HEIGHT + CARD_HEIGHT + CHOICES_SCROLLBAR_ROOM + FOOTER_HEIGHT + BAND_GAP * 2 + SHEET_PADDING * 2,
-		);
-		// **Belt and braces against leaking.** The bands are fixed-height and their contents are laid out, not positioned, so
-		// a child taller than its band escapes the sheet entirely — the first build had a footer line drawn below the panel.
-		// Clipping means a mistake costs a few clipped pixels inside the sheet instead of text floating on the game world.
-		frame.ClipsDescendants = true;
-		frame.AutomaticSize = Enum.AutomaticSize.Y;
-		frame.BackgroundColor3 = this.light.paint.panel.color;
-		frame.BackgroundTransparency = this.light.paint.panel.transparency;
-		frame.BorderSizePixel = 0;
+		//
+		// **Clipping, deliberately, and this is the one panel that does.** The bands are fixed-height and their contents are
+		// laid out rather than positioned, so a child taller than its band escapes the sheet entirely - the first build had a
+		// footer line drawn below the panel. `buildChunkyPanel` exposes that as a flag instead of deciding it.
+		const panel = buildChunkyPanel({
+			name: "BallPicker",
+			parent,
+			size: new UDim2(
+				0,
+				SHEET_WIDTH,
+				0,
+				HEADER_HEIGHT + CARD_HEIGHT + CHOICES_SCROLLBAR_ROOM + FOOTER_HEIGHT + BAND_GAP * 2 + SHEET_PADDING * 2,
+			),
+			autoHeight: true,
+			clipsDescendants: true,
+		});
+
+		const frame = panel.frame;
 		frame.Visible = false;
-		frame.Parent = parent;
-
-		const corner = new Instance("UICorner");
-		corner.CornerRadius = new UDim(0, SPACING.md);
-		corner.Parent = frame;
-
-		const stroke = new Instance("UIStroke");
-		stroke.Color = this.light.colors.border;
-		stroke.Thickness = BORDER;
-		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
-		stroke.Parent = frame;
 
 		const padding = new Instance("UIPadding");
 		padding.PaddingTop = new UDim(0, SHEET_PADDING);
 		padding.PaddingBottom = new UDim(0, SHEET_PADDING);
 		padding.PaddingLeft = new UDim(0, SHEET_PADDING);
 		padding.PaddingRight = new UDim(0, SHEET_PADDING);
-		padding.Parent = frame;
+		padding.Parent = panel.surface;
 
 		const layout = new Instance("UIListLayout");
 		layout.FillDirection = Enum.FillDirection.Vertical;
 		layout.SortOrder = Enum.SortOrder.LayoutOrder;
 		layout.Padding = new UDim(0, BAND_GAP);
-		layout.Parent = frame;
+		layout.Parent = panel.surface;
 
-		this.buildHeader(frame);
-		this.buildChoices(frame);
-		this.buildFooter(frame);
+		this.buildHeader(panel.surface);
+		this.buildChoices(panel.surface);
+		this.buildFooter(panel.surface);
 
 		capToViewport(frame);
 		return frame;
@@ -678,7 +723,7 @@ export class PickerController implements OnStart {
 		choices.BackgroundTransparency = 1;
 		choices.BorderSizePixel = 0;
 		choices.ScrollBarThickness = SPACING.xs;
-		choices.ScrollBarImageColor3 = this.light.colors.border;
+		choices.ScrollBarImageColor3 = this.theme.colors.border;
 		choices.ScrollingDirection = Enum.ScrollingDirection.X;
 		choices.CanvasSize = UDim2.fromOffset(0, 0);
 		choices.AutomaticCanvasSize = Enum.AutomaticSize.X;
@@ -726,11 +771,11 @@ export class PickerController implements OnStart {
 
 		const allBalls = this.footerButton(footer, "AllBalls", 1);
 		// White-on-accent, from the theme's own slot. `textPrimary` here is dark-on-blue, which is what the first build shipped.
-		const free = this.label(allBalls, "FREE", "caption", "onAccent", 1);
-		free.TextColor3 = this.light.colors.success;
-		this.label(allBalls, "All Balls", "body1", "onAccent", 2);
-		this.allBallsReason = this.label(allBalls, "random per round", "caption", "onAccent", 3);
-		this.allBallsButton = allBalls;
+		const free = this.label(allBalls.face, "FREE", "caption", "onAccent", 1);
+		free.TextColor3 = this.theme.colors.success;
+		this.label(allBalls.face, "All Balls", "body1", "onAccent", 2);
+		this.allBallsReason = this.label(allBalls.face, "random per round", "caption", "onAccent", 3);
+		this.allBallsButton = allBalls.button;
 
 		const reroll = this.footerButton(footer, "Reroll", 2);
 
@@ -740,11 +785,11 @@ export class PickerController implements OnStart {
 		costRow.Name = "Cost";
 		// **Explicit height, auto width.** `AutomaticSize.XY` around a child whose height is `1, 0` is circular — the row asks
 		// the label how tall it is and the label asks the row — which squeezed the cost line into a few pixels at the top.
-		costRow.Size = new UDim2(0, 0, 0, TYPOGRAPHY.body2.size + SPACING.xs);
+		costRow.Size = new UDim2(0, 0, 0, this.type.body2.size + SPACING.xs);
 		costRow.AutomaticSize = Enum.AutomaticSize.X;
 		costRow.BackgroundTransparency = 1;
 		costRow.LayoutOrder = 1;
-		costRow.Parent = reroll;
+		costRow.Parent = reroll.face;
 
 		const costLayout = new Instance("UIListLayout");
 		costLayout.FillDirection = Enum.FillDirection.Horizontal;
@@ -757,7 +802,7 @@ export class PickerController implements OnStart {
 		diamond.Name = "Diamond";
 		diamond.Size = UDim2.fromOffset(DIAMOND_SIZE, DIAMOND_SIZE);
 		diamond.Rotation = DIAMOND_ROTATION;
-		diamond.BackgroundColor3 = this.light.colors.coin;
+		diamond.BackgroundColor3 = this.theme.colors.coin;
 		diamond.BorderSizePixel = 0;
 		diamond.LayoutOrder = 1;
 		diamond.Parent = costRow;
@@ -769,45 +814,52 @@ export class PickerController implements OnStart {
 		const cost = this.label(costRow, tostring(REROLL_COST_COINS), "body2", "onAccent", 2);
 		cost.Size = new UDim2(0, 0, 1, 0);
 		cost.AutomaticSize = Enum.AutomaticSize.X;
-		cost.TextColor3 = this.light.colors.coin;
+		cost.TextColor3 = this.theme.colors.coin;
 		this.rerollCostLabel = cost;
 
-		this.label(reroll, "REROLL", "body1", "onAccent", 2);
+		this.label(reroll.face, "REROLL", "body1", "onAccent", 2);
 		// **The caption is a reason, never the button's own name.** The first build wrote "REROLL" into this label as well, so
 		// the footer said it twice — once inside the button and once below the sheet, where the overflow landed.
-		this.rerollReason = this.label(reroll, "", "caption", "onAccent", 3);
+		this.rerollReason = this.label(reroll.face, "", "caption", "onAccent", 3);
 
-		reroll.Activated.Connect(() => this.reroll());
-		this.rerollButton = reroll;
+		reroll.button.Activated.Connect(() => this.reroll());
+		this.rerollButton = reroll.button;
 	}
 
-	/** A footer button: half the row, a nested vertical list for its lines, no engine pressed-tint. */
-	private footerButton(parent: Instance, name: string, order: number): TextButton {
+	/**
+	 * A footer button: half the row, a nested vertical list for its lines, no engine pressed-tint, and the chunky plates.
+	 *
+	 * **Returns the chrome rather than the button**, because both callers put their lines inside it: the chrome turns the
+	 * button into a transparent hit area, so a label parented to the button itself would be drawn underneath the face.
+	 */
+	private footerButton(parent: Instance, name: string, order: number): ChunkyChrome {
 		const button = new Instance("TextButton");
 		button.Name = name;
 		button.Size = new UDim2(0.5, -SPACING.xs, 1, 0);
-		button.BackgroundColor3 = this.light.colors.accent;
 		button.BorderSizePixel = 0;
 		button.AutoButtonColor = false;
 		button.Text = "";
 		button.LayoutOrder = order;
 		button.Parent = parent;
 
-		// Both footer buttons — `All Balls` and `Reroll` — come through here, so one call covers the pair.
-		attachClickSound(button);
+		const chrome = applyChunkyChrome(button, {
+			color: this.theme.colors.accent,
+			shadowColor: shadowOf(this.theme.colors.accent),
+			zIndex: CARD_Z_INDEX,
+			corner: SPACING.sm,
+		});
 
-		const corner = new Instance("UICorner");
-		corner.CornerRadius = new UDim(0, SPACING.sm);
-		corner.Parent = button;
+		// Both footer buttons - `All Balls` and `Reroll` - come through here, so one call covers the pair.
+		attachClickSound(button);
 
 		const layout = new Instance("UIListLayout");
 		layout.FillDirection = Enum.FillDirection.Vertical;
 		layout.HorizontalAlignment = Enum.HorizontalAlignment.Center;
 		layout.VerticalAlignment = Enum.VerticalAlignment.Center;
 		layout.SortOrder = Enum.SortOrder.LayoutOrder;
-		layout.Parent = button;
+		layout.Parent = chrome.face;
 
-		return button;
+		return chrome;
 	}
 
 	/** A label with the sheet's typography. Every size and font comes from `shared/ui/scale.ts`; none is a literal here. */
@@ -820,18 +872,23 @@ export class PickerController implements OnStart {
 	): TextLabel {
 		const label = new Instance("TextLabel");
 		label.Name = `Label_${variant}`;
-		label.Size = new UDim2(1, 0, 0, TYPOGRAPHY[variant].size + SPACING.xs);
+		label.Size = new UDim2(1, 0, 0, this.type[variant].size + SPACING.xs);
 		label.BackgroundTransparency = 1;
 		label.Font = FONT;
-		label.TextSize = TYPOGRAPHY[variant].size;
+		label.TextSize = this.type[variant].size;
 		// `onAccent` for text inside an accent-filled button: `textPrimary` on the accent is dark-on-blue, the low-contrast
 		// pairing the first build shipped. The theme has a slot for exactly this and it was not being used.
+		label.ZIndex = LABEL_Z_INDEX;
+		// The outline every label on the sheet carries - `shared/ui/text.ts`'s one helper, the same stroke the store's
+		// labels get. Without it a pale label on a `h4`-scale title reads as washed out against charcoal.
+		outlineText(label);
+
 		label.TextColor3 =
 			colour === "primary"
-				? this.light.colors.textPrimary
+				? this.theme.colors.textPrimary
 				: colour === "onAccent"
-					? this.light.colors.onAccent
-					: this.light.colors.textSecondary;
+					? this.theme.colors.onAccent
+					: this.theme.colors.textSecondary;
 		label.TextXAlignment = Enum.TextXAlignment.Center;
 		label.TextYAlignment = Enum.TextYAlignment.Center;
 		label.TextTruncate = Enum.TextTruncate.AtEnd;

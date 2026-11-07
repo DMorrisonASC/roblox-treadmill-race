@@ -12,6 +12,7 @@ import {
 	MARKER_LOCAL_UP_ATTRIBUTE,
 	OWNER_DISPLAY_NAME_ATTRIBUTE,
 	OWNER_USER_ID_ATTRIBUTE,
+	hasOwnerIdentity,
 	CHOSEN_BALL_ID_ATTRIBUTE,
 	SPAWNER_KILL_Y_ATTRIBUTE,
 	SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE,
@@ -1214,6 +1215,62 @@ export class BallSpawnerService implements OnStart {
 		}
 
 		return decoy;
+	}
+
+	/**
+	 * Who a body *represents*, which for a twin is its parent.
+	 *
+	 * ## Why this exists
+	 *
+	 * A `decoy` twin is deliberately ownerless - `OwnerUserId` on it would make it a competitor and change the winner rule -
+	 * so anything that names a body from its attributes alone sees a fake as `Decoy` and tells the whole server which body is
+	 * the lie. The leaderboard is exactly that reader, and the fiction of the power depends on it not being able to tell.
+	 *
+	 * **The winner rule is untouched by this.** `RoundService` reads `OwnerUserId` off the *body* to decide who competes; this
+	 * method answers a *display* question and writes nothing. A twin that reports its parent's identity here is still an
+	 * ownerless body everywhere the simulation looks, which is the whole point of keeping the two apart.
+	 *
+	 * ## Why the reverse lookup is a scan
+	 *
+	 * `decoysByParent` is keyed by the parent, so finding a twin's parent means walking its values - at most one entry per
+	 * lane, so a handful. A second map keyed the other way would answer in one step and could disagree with the first after a
+	 * missed delete; `forgetDecoy` already carries the same argument for its own reverse pass, and paying ~40 iterations once
+	 * per body per second is cheaper than a second index that can rot.
+	 *
+	 * Returns `undefined` for a body with no owner and no parent - a debug ball, a stray, or a twin whose parent has already
+	 * been destroyed. The caller falls back to naming the body itself.
+	 */
+	public ownerIdentityFor(ball: BasePart): { userId: number; name: string } | undefined {
+		const own = this.identityOf(ball);
+		if (own !== undefined) {
+			return own;
+		}
+
+		for (const [parent, decoy] of this.decoysByParent) {
+			if (decoy !== ball) {
+				continue;
+			}
+
+			// A destroyed parent reports its defaults, so its identity has to be read before the answer means anything.
+			if (parent.Parent === undefined) {
+				return undefined;
+			}
+
+			return this.identityOf(parent);
+		}
+
+		return undefined;
+	}
+
+	/** A body's own owner attributes, or `undefined` when the pair is missing or half-written. */
+	private identityOf(ball: BasePart): { userId: number; name: string } | undefined {
+		const userId = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);
+		const displayName = ball.GetAttribute(OWNER_DISPLAY_NAME_ATTRIBUTE);
+		if (!hasOwnerIdentity(userId, displayName) || !typeIs(userId, "number") || !typeIs(displayName, "string")) {
+			return undefined;
+		}
+
+		return { userId, name: displayName };
 	}
 
 	/**

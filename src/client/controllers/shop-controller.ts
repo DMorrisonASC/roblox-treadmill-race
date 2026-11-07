@@ -120,12 +120,6 @@ const COIN_SIZE = 20;
  */
 const BULK_REPLY_TIMEOUT_SECONDS = 15;
 
-/** **Placeholder.** How far a purchase button fades when it cannot act, so it does not read as pressable. */
-const DISABLED_WASH = 0.55;
-
-/** **Placeholder.** How far its two labels fade with it. Lower than the background, because the text is the reason. */
-const DISABLED_TEXT_WASH = 0.35;
-
 /** **Placeholder.** Scroll speed of the prize shelf, in pixels per second. */
 const SHELF_SCROLL_SPEED = 26;
 
@@ -2663,10 +2657,20 @@ export class ShopController implements OnStart {
 			const enabled = affordable && !this.busy;
 
 			entry.button.Active = enabled;
-			entry.button.BackgroundTransparency = enabled ? 0 : DISABLED_WASH;
 			entry.priceLabel.Text = affordable || !known ? tostring(price) : `${coins}/${price}`;
-			entry.priceLabel.TextTransparency = enabled ? 0 : DISABLED_TEXT_WASH;
-			entry.actionLabel.TextTransparency = enabled ? 0 : DISABLED_TEXT_WASH;
+
+			// **The wash goes through the chrome, exactly as `applyPolicy` does for the Premium buttons.**
+			//
+			// This block used to write `entry.button.BackgroundTransparency = enabled ? 0 : DISABLED_WASH`, and that one line
+			// is the "pointy white box": `applyChunkyChrome` makes the button a transparent hit area and draws the face and
+			// shadow as its children, so setting a transparency of `0` back onto the button paints **Roblox's default light
+			// grey** behind both plates. The plates cover the middle; what it shows through is the corners, because a rounded
+			// shadow does not cover its own bounding box - pale wedges at every corner of every chest button.
+			//
+			// `dimChunkyChrome` re-washes the face and its labels instead - the only two properties that actually draw - and it
+			// is the same call the Premium buttons use, so all six buttons dim identically instead of two of them using this
+			// file's own pair of constants.
+			dimChunkyChrome(entry.button, !enabled);
 		}
 	}
 

@@ -301,7 +301,22 @@ export class RoundService implements OnStart {
 
 		const spawned = this.startWaitingRound(reason);
 
-		this.enterWaiting(reason, spawned);
+		// **Auto-bots, and the placement is the whole point.**
+		//
+		// A Studio session usually has one player, so `Waiting` used to count down to a `Playing` phase with a single competitor
+		// - which the first tick ended as `last standing`. The workaround was to press `4` inside the countdown, which is a race
+		// against a timer rather than a test harness.
+		//
+		// The call sits **after `startWaitingRound`** because that is what rolls the offers and spawns the players' bodies: a
+		// spawn before it would take a spawner slot first, and the player's own body would arrive second. It sits **before
+		// `enterWaiting`** because that call prints the transition and arms the countdown - bots spawned after it would be
+		// missing from `competitors=` and would appear, in the log, to arrive after the phase they belong to.
+		//
+		// The relaxed phase gate is what makes this legal: `debugSpawnCompetitors` accepts `Waiting` (see its docblock), so the
+		// bots are tracked bodies of the round that is about to begin rather than a second class of body.
+		const bots = this.debugSpawnCompetitors("auto-bots for debug key 2");
+
+		this.enterWaiting(reason, spawned + bots);
 	}
 
 	/**
@@ -497,16 +512,26 @@ export class RoundService implements OnStart {
 	 * ever started". The field is gone (item 72) because the check no longer asks that question, so a debug spawn needs no
 	 * record of its own: the bodies are tracked below, and the next check simply counts them.
 	 *
-	 * ## Why it is refused outside `Playing`
+	 * ## Why `Waiting` is allowed as well as `Playing`
 	 *
-	 * The bodies would be spawned into a phase whose tick is not running, so nothing would ever eliminate
-	 * them, count them or end the round they were added to. Refusing with the phase named is the only
-	 * answer that does not leave orphans — the exact class of body this round exists to stop creating.
+	 * The bodies are only orphans if nothing will ever move them, and `Waiting` is not that: it is the phase in which
+	 * `forceWaiting` already spawns the players' own bodies, and `scheduleWaitingTimeout` is guaranteed to promote it to
+	 * `Playing`, where the tick takes over. A body added here sits on a stopped belt for the length of the countdown - which
+	 * is exactly what the player's body does - and is then raced, eliminated and cleaned up by the same code.
+	 *
+	 * **`Intermission` and `PostGame` stay refused**, for the original reason: neither has a scheduled entry into `Playing`,
+	 * and `Intermission` clears every body on the way in, so a spawn there would be destroyed before anybody saw it.
+	 *
+	 * ## Why it returns a count
+	 *
+	 * `forceWaiting` calls it to populate a solo session automatically, and its transition line prints `competitors=<n>`. If
+	 * the bots were spawned without being counted that line would say `competitors=1` in a round with five bodies, and a log
+	 * that disagrees with the world is worse than no log.
 	 */
-	public debugSpawnCompetitors(): void {
-		if (this.phase !== "Playing") {
-			print(`[Round] debug spawn refused — not Playing (phase=${this.phase})`);
-			return;
+	public debugSpawnCompetitors(reason = "debug key 4"): number {
+		if (this.phase !== "Playing" && this.phase !== "Waiting") {
+			print(`[Round] debug spawn refused - not Playing or Waiting (phase=${this.phase})`);
+			return 0;
 		}
 
 		const owners = this.nextDebugOwners(this.spawner.getBoundSpawnerCount());
@@ -533,8 +558,10 @@ export class RoundService implements OnStart {
 		}
 
 		print(
-			`[Round] debug spawn: ${spawned.size()} competitors (${first === undefined ? "none" : first.displayName}..${last === undefined ? "none" : last.displayName}) balls=${ballIds.join(",")}, live=${this.liveBalls.size()}`,
+			`[Round] debug spawn (${reason}): ${spawned.size()} competitors (${first === undefined ? "none" : first.displayName}..${last === undefined ? "none" : last.displayName}) balls=${ballIds.join(",")}, live=${this.liveBalls.size()}`,
 		);
+
+		return spawned.size();
 	}
 
 	/** Hands out the next `Debug#N` owner, continuing the shared counter. */
