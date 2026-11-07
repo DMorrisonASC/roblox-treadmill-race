@@ -2896,3 +2896,73 @@ Both controllers now call `scaleEffect(clone, effectScaleFor(ball))` and their l
 **Build, lint, prettier and tests green at 289**; `\uXXXX` zero; no `AssemblyAngularVelocity`; no manifest change (no controller added or removed — `vfx-scale.ts` is a shared module, not a service or controller).
 
 **Studio-only:** that `0.1` is right for `tailWind`'s asset as well as `windBoost`'s. The two assets are authored independently and one multiplier assumes they were built to a similar size; if the tail-wind asset is intrinsically larger, the honest fix is to redraw or re-export it, or to pass a deliberate per-effect factor with a comment — not to reintroduce a second global.
+## 102. The belt points at a two-diamond tread asset; the tiling is left alone, with the arithmetic recorded
+
+**`BELT_TEXTURE_ASSET` is `"rbxassetid://95297464580788"`** - the user's upload, a tile holding two diamonds offset left and right, drawn so that scrolling the surface under a fixed camera reads as a tread passing underfoot rather than a texture sliding. The docblock now says that, because the constant itself is a bare id with no story in it.
+
+**The prompt was wrong about the form of the constant, and following it would have broken the texture silently.** It asserted the constant is bare (`"6691394"`) and that "the code prepends the scheme once at the call site". Neither is true: `tuning.ts` held `"rbxassetid://6691394"`, and `createBeltTexture` passes that value verbatim to **both** `Content.fromUri` (which takes a URI) and the legacy `texture.Texture` (a `ContentId` string the engine resolves the same way). There is no prefixing step anywhere for textures - the `soundUri` arrangement is the *sound* module's. A bare id here renders nothing, which is exactly the "looks like an asset problem" failure the round's own closing check was guarding against.
+
+**`StudsPerTileU` and `StudsPerTileV` are both `4`, from one constant, and neither changed.** Two reasons, and the second is the one that decided it:
+
+1. **They are not separate.** `BELT_TEXTURE_STUDS_PER_TILE = 4` feeds both properties ([treadmill-service.ts](/C:/Users/morri/Documents/Coding/roblox-treadmill-race/src/server/services/treadmill-service.ts:402)), so "change U only" is not a one-constant edit, and the brief's "do not change V" and "git diff shows tuning.ts only" cannot both hold if U changes.
+2. **Changing U alone *stretches the image*.** The two properties are independent, so a non-square tile shears whatever is loaded. Whether a wider unit looks right depends on the aspect the diamonds were drawn at, which cannot be measured from here, so a number chosen now would be a guess that shows up as stretched diamonds.
+
+**The arithmetic the user asked for, stated plainly.** The belt is 56 studs long in code-frame terms (`-28 .. +28`), so at 4 studs per tile there are **14 repeats**, and at one left plus one right diamond per tile **fourteen of each are on the belt at any instant**. The alternation is a fine rhythm, not a beat that can be followed. A larger tile fixes that only if the asset's aspect moves with it: `14` gives four repeats (four of each), `56` gives exactly one of each across the whole belt, and both stretch the image 3.5x and 14x on the length axis unless it was drawn that way. **That is a decision about the picture, made by eye in one Studio run** - which is why the docblock now records both the arithmetic and the fact that the tile is deliberately square.
+
+**A stale docblock corrected on the way past.** The tile constant's docblock described the belt as "56 x 1 x 33 ... 14 repeats along its length and 8 across" and gave a crossing argument at `BeltSpeed`. Two independent places in the tree (the lateral bound's docblock and the roll's) describe the belt as 12 studs wide, so the "8 across" figure was arithmetic on a size the tree does not agree with. The rewritten docblock states only the length-axis arithmetic, which is the axis the constant is being judged on, and says the tile is square on purpose rather than quoting a width.
+
+**Constants and comments only.** `git diff --stat` for this round is `src/shared/tuning.ts`, one file, and the code audit (comments stripped, compared against `HEAD`) shows **47 code lines before and after with no changed code line** - the only constant whose value moved is `BELT_TEXTURE_ASSET`. `BeltScrollController`'s wrap still runs modulo `BELT_TEXTURE_STUDS_PER_TILE`, which remains correct because the value did not change.
+
+**Build, lint, prettier, tests green at 289**; `\uXXXX` zero; `flamework.build` unchanged.
+
+**Studio-only:** that `rbxassetid://95297464580788` loads and tiles, and how the two-diamond rhythm reads at 14 repeats. The bind line prints the id (`asset=rbxassetid://95297464580788`), the scroll controller prints `tileU=4` on each belt it tracks, and those two lines are the evidence if the belt looks wrong.
+## 103. The belt scroll sign was inferred and wrong; it is `+1`
+
+**Reported: the tread moves opposite to the balls.** `BELT_TEXTURE_SCROLL_SIGN` was `-1`, shipped on an inference recorded in its own docblock: that on a part's `Top` face the texture's `U` axis runs along local `+X`, so a negative rate would make the pattern travel that way. The same docblock ended with "**This sign is inferred, not verified.** If a Studio run shows the belt texture moving against the balls, flip this one constant to `1`; nothing else needs to change."
+
+**That is exactly what happened, and the instruction was correct.** The constant is now `+1`, the tread travels toward `+X` - the same direction a decaying ball drifts, toward the back edge and elimination, which is the direction a treadmill surface moves under the thing it carries. **One constant, one file, no other change**: `BeltScrollController` multiplies by it and nothing else reads it.
+
+**The docblock now records the observation instead of the reasoning**, because the reasoning was the part that was wrong. It also states plainly that the offset moves the *sampled image* rather than the surface, so the sign that makes the pattern appear to travel one way is the inverse of the sign in the arithmetic - which is why a wrong value animates perfectly and in the wrong direction, and reads as a physics bug rather than a texture one. This is the one visual direction the client owns and cannot check from source; a future re-export or a re-parented belt flipping it again is fixed here and nowhere else.
+
+**The Studio log settles two older uncertainties on the way past**, and both are worth recording because they were argued from docs rather than observed:
+
+- `[Treadmill] bind "Workspace.arena.treadmill.Part" size=(56, 1, 12) origin=(132, 0.5, 138) rightVector=(1, 0, 0)` - so the belt is **56 x 1 x 12**, confirming item 93's two-frame arithmetic and confirming that the deleted "56 x 1 x 33 ... 8 across" line in the tile docblock was stale. The rewritten tile docblock states only the length axis, so it does not depend on this.
+- `[BeltScroll] found ... uri=rbxassetid://95297464580788 face=Top tileU=4` - the new two-diamond asset, on the `Top` face, at the tile size item 102 left unchanged.
+
+**Build, lint, prettier and tests green at 289**; `\uXXXX` zero; code audit shows `tuning.ts` at **47 code lines before and after** with the only changed constant values being the asset id (item 102) and this sign. `flamework.build` untouched.
+
+**Studio-only, still:** that the direction now matches. If it is still wrong, the reading is that the balls' visual drift and the surface are being compared on different axes rather than that this constant has a third value - `BELT_TEXTURE_SCROLL_SIGN` only has two.
+## 104. The belt's visual scroll got its own multiplier, so the tread can be retimed without touching the race
+
+**Reported: the tread wants to read faster, but the only way to make it is `BeltSpeed`, which also changes the game.** That was true, and it was a coupling rather than a design: `BeltScrollController` advanced `OffsetStudsU` at `BeltSpeedActual` because the obvious reading of a treadmill is "the surface moves at the belt's speed", so the picture and the physics shared one number. They should not. `BeltSpeed` is the *reference* the `BALL_SPEED` model compares against, so raising it moves `RELATIVE_SPEED`, the decay arithmetic and the elimination threshold - the whole race - to change how a texture slides.
+
+**`BELT_TEXTURE_SCROLL_MULTIPLIER = 1`** sits directly above `BELT_TEXTURE_SCROLL_SIGN` in [tuning.ts](/C:/Users/morri/Documents/Coding/roblox-treadmill-race/src/shared/tuning.ts:90) and multiplies the scroll rate on its own. Above, not below, because the update now reads as the sentence it is - **rate, then speed scale, then direction** - and a reader who scans `speed * MULTIPLIER * SIGN * dt` gets magnitude before handiness. `1` is "scroll at belt speed", which is exactly what shipped before this constant existed; `2` is twice as fast; `0.5` is half. It is the same shape item 103 established for the sign: one named number, one client, all belts, and no second place that has to be kept in step.
+
+**The rate expression, after the edit** ([belt-scroll-controller.ts](/C:/Users/morri/Documents/Coding/roblox-treadmill-race/src/client/controllers/belt-scroll-controller.ts:132)):
+
+```ts
+let offset =
+	texture.OffsetStudsU + speed * BELT_TEXTURE_SCROLL_MULTIPLIER * BELT_TEXTURE_SCROLL_SIGN * dt;
+```
+
+**At `1` this is the expression that shipped before it** - `x * 1 === x` - so the default behaviour is unchanged, which is the property that makes the constant safe to add to a working belt. The wrap is still `offset % BELT_TEXTURE_STUDS_PER_TILE` (twice, for negative offsets), because the multiplier changes how *fast* the offset advances, not what it wraps at: a factor of `2` makes the wrap fire twice as often, which is correct and needs no arithmetic change.
+
+**A negative multiplier is legal, and the sign stays the direction knob.** `math.abs` was the alternative and it is worse: it would silently turn a deliberate `-1` into `+1` and leave the reader looking for the reason the tread would not reverse. So the multiplier is *documented* as a magnitude but not *enforced* as one - a negative value reverses the scroll and composes with `BELT_TEXTURE_SCROLL_SIGN`, and the two flips cancel. The docblock says so, because a silent double-negative is the only way this constant can surprise someone.
+
+**The log line now prints both numbers** ([belt-scroll-controller.ts](/C:/Users/morri/Documents/Coding/roblox-treadmill-race/src/client/controllers/belt-scroll-controller.ts:88)):
+
+```
+[BeltScroll] found <name> on "<belt>" uri=<uri> face=<face> tileU=<n> scrollScale=<multiplier> sign=<sign>
+```
+
+A run that looks wrong now says which speed and which direction were in effect, which is the pair that has caused the last two belt bugs. `[Treadmill] bind` is untouched: it prints `BELT_SPEED` and `BELT_VISUAL_SPEED` ([treadmill-service.ts](/C:/Users/morri/Documents/Coding/roblox-treadmill-race/src/server/services/treadmill-service.ts:585)), and both are unchanged by this round.
+
+**No second reader of the scroll rate exists, and finding that out took a grep rather than an assumption.** `OffsetStudsU` appears in four places outside comments: this controller's read and write, and one write in [ball-spawner-service.ts](/C:/Users/morri/Documents/Coding/roblox-treadmill-race/src/server/services/ball-spawner-service.ts:1813) - `createBallTextures` setting a **random per-ball phase** so two bodies do not look identical. That is a fixed offset, not a rate, it is on ball textures rather than the belt, and it is deliberately not multiplied: phase is where the pattern starts, not how fast it moves. Had it been a second scroller the multiplier would have had to live in shared code; it is not, so it does not.
+
+**One stale paragraph corrected on the way past.** The sign's docblock described the update as `speed * this * dt`, which stopped being the expression the moment a second factor joined it. It now quotes the real one and names the multiplier, and the line is wrapped properly rather than inheriting the ragged short line the edit first left.
+
+**Constants and one client only.** `git diff --stat` for this round is `src/shared/tuning.ts` and `src/client/controllers/belt-scroll-controller.ts`; **nothing under `src/server/` moved**, so the multiplier did not leak into physics. The code audit (comments stripped, compared against `HEAD`) shows `tuning.ts` at 48 code lines against 47 and the controller at 65 against 64: the additions are the constant, the import, the log field and the factor, and the only other changed code lines in either file are item 102's asset id and item 103's sign, both already recorded.
+
+**Build, lint, prettier and tests green at 289**; `\uXXXX` zero; `flamework.build` unchanged - no controller was added.
+
+**Studio-only:** that `scrollScale=2` reads twice as fast with the balls untouched, which is the one claim the source cannot make. The balls not changing is the part to watch: if they speed up, the multiplier was applied somewhere it should not be.

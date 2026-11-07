@@ -16,38 +16,108 @@ import { DEFAULT_BELT_SPEED } from "./attributes";
  */
 
 /**
- * Belt surface texture.
+ * Belt surface texture: **a two-diamond tread pattern, drawn to read as motion.**
  *
- * **Not verified.** The asset id came from the user and has not been checked for availability,
- * tiling, or being an image at all. Nothing in code can detect a bad asset: a missing id renders as
- * a plain surface and a non-tiling image renders as visible seams. If it looks wrong, change the id
- * here — the code around it is asset-agnostic.
+ * The asset is the user's own upload and is deliberately not a continuous surface. Its tile holds **two diamonds, offset left
+ * and right**, and the point of the design is that scrolling the surface past a fixed camera makes the alternation between
+ * them read as travel - a tread passing underfoot rather than a texture sliding. That intent is why the picture has structure
+ * rather than being a noise or a gradient, and it is recorded here because the constant itself is a bare number with no story
+ * in it.
+ *
+ * **The scheme prefix is required and is part of the constant.** `Content.fromUri` takes a URI, and the legacy `Texture` slot
+ * is a `ContentId` string the engine resolves the same way; `treadmill-service` passes this value to both verbatim. A bare
+ * numeric id here renders nothing at all - the silent failure `BALL_TEXTURE_ASSET` avoids the same way.
+ *
+ * **Not verified from here.** Nothing in code can detect a bad asset: a missing id renders as a plain surface, an image that
+ * does not tile renders as visible seams, and a tile whose *aspect* is not the aspect the diamonds were drawn at renders as
+ * stretched diamonds, because `StudsPerTileU` and `StudsPerTileV` are independent. If the belt looks wrong, the id is one knob
+ * and `BELT_TEXTURE_STUDS_PER_TILE` is the other; the code around both is asset-agnostic.
  */
-export const BELT_TEXTURE_ASSET = "rbxassetid://6691394";
+export const BELT_TEXTURE_ASSET = "rbxassetid://95297464580788";
 
 /**
- * **Placeholder.** Studs covered by one repeat of the belt texture.
+ * **Placeholder.** Studs covered by one repeat of the belt texture, **on both axes**.
  *
- * Arithmetic: the observed belt is 56 × 1 × 33. At 4 studs per tile that is 14 repeats along its
- * length and 8 across, which is enough repeats that motion is visible at `BeltSpeed = 10` (2.5 tiles
- * per second pass a fixed point) without the pattern becoming a shimmer. Halving it would double the
- * apparent speed and put ~29 repeats on a 56-stud belt, where the individual tile stops being
- * legible; doubling it would leave only 7 repeats and make the surface read as a few large panels
- * sliding rather than as a continuous belt.
+ * One constant feeds `StudsPerTileU` and `StudsPerTileV`, which keeps the tile **square**. That is deliberate rather than
+ * lazy: the two are independent properties, and giving them different values stretches whatever image is loaded, so a square
+ * tile is the only setting that cannot distort an asset whose aspect nothing here can measure. A design that wants a wide
+ * repeating unit has to be drawn wide, and then this becomes two constants.
+ *
+ * Arithmetic on the length axis: the belt is 56 studs long in code-frame terms (`-28 .. +28`), so **4 studs per tile is 14
+ * repeats** along it, and `BeltSpeed = 10` passes 2.5 tiles a second under a fixed point - dense enough to read as continuous
+ * motion, slow enough not to shimmer.
+ *
+ * **What that means for the two-diamond asset, stated plainly:** with one left diamond and one right diamond per tile, a
+ * 14-repeat belt shows **fourteen of each at any instant**. The alternation is a fine rhythm rather than a beat that can be
+ * followed - the tread reads as texture rather than as a sequence of passing shapes. Making the beat legible means a larger
+ * tile: `14` gives four repeats, `56` gives exactly one diamond of each across the whole belt. **Both stretch the image on the
+ * length axis** (3.5x and 14x) unless the asset is drawn with that aspect, which is why this is a decision about the picture
+ * rather than a number to guess here. Item 102 records the arithmetic so the choice can be made by eye in one run.
  */
 export const BELT_TEXTURE_STUDS_PER_TILE = 4;
 
 /**
- * **Placeholder.** Sign applied to `OffsetStudsU` per second, × `BeltSpeed`.
+ * **Placeholder.** How fast the belt texture scrolls, as a multiple of the belt's own visual rate.
  *
- * `-1` is the choice being shipped: on a part's `Top` face the texture's `U` axis runs along the
- * part's local +X, which is this belt's `+RightVector` and therefore its drag direction. Increasing
- * `OffsetStudsU` shifts the *sampled* texture the other way, so a **negative** rate is what makes the
- * pattern appear to travel toward `+RightVector` — the direction the surface is dragging. **This sign
- * is inferred, not verified.** If a Studio run shows the belt texture moving against the balls, flip
- * this one constant to `1`; nothing else needs to change.
+ * ## The decoupling, which is the whole point of this constant
+ *
+ * The scroll rate is `BeltSpeedActual * this` - **the belt's visual rate times this multiplier, then signed for direction by
+ * `BELT_TEXTURE_SCROLL_SIGN`, and nothing else.** Before this existed the tread moved at exactly `BeltSpeedActual`, so "make
+ * the belt look faster" and "make the belt carry balls faster" were the same edit. They are not the same thing: `BeltSpeed` is
+ * the *reference number* the `BALL_SPEED` model compares against, so raising it changes `RELATIVE_SPEED`, the decay arithmetic
+ * and therefore the race. This multiplier changes the **apparent** speed of the tread and touches none of that: no
+ * `BALL_SPEED`, no `RELATIVE_SPEED`, no ramp, no physics write, and it lives entirely on the client.
+ *
+ * Read it as a plain scale on the picture:
+ *
+ * - `1` - the tread scrolls at the belt's speed, which is what shipped before this constant existed.
+ * - `2` - the tread reads twice as fast; the balls are untouched.
+ * - `0.5` - the tread reads half as fast; the balls are untouched.
+ *
+ * ## Why not fold it into `BELT_TEXTURE_STUDS_PER_TILE`
+ *
+ * They are two different properties that happen to look similar in a formula. The tile size changes how **big** the pattern is
+ * and how often it repeats; this changes how **fast** it slides past. Raising the tile size to make the motion legible is the
+ * mistake that then requires a scroll multiplier to undo, so the two knobs are kept apart deliberately.
+ *
+ * ## A negative value is legal, and the sign is still the intended direction knob
+ *
+ * `BELT_TEXTURE_SCROLL_SIGN` exists for direction; this is documented as a magnitude. Nothing clamps it, though, because a
+ * clamp (`math.abs`) would silently turn a deliberate `-1` into `+1` and leave the reader wondering why the tread would not
+ * reverse. A negative multiplier therefore works and composes with the sign: the two flips cancel. **Use the sign to choose a
+ * direction and this to choose a speed**, and the combination is the product of two explicit numbers rather than a surprise.
  */
-export const BELT_TEXTURE_SCROLL_SIGN = -1;
+export const BELT_TEXTURE_SCROLL_MULTIPLIER = 1;
+
+/**
+ * The sign applied to `OffsetStudsU` per second, x `BeltSpeed`: **`+1`**, so the tread travels the way the balls do.
+ *
+ * ## What this number means, and why it is the only one
+ *
+ * `BeltScrollController` advances `OffsetStudsU` by `speed * BELT_TEXTURE_SCROLL_MULTIPLIER * this * dt` and wraps it modulo
+ * the tile. The offset moves the *sampled* image rather than the surface, so the sign that makes the pattern appear to travel
+ * one way is the opposite of the sign in the arithmetic. That inversion is the whole reason this is a named constant instead
+ * of a literal: getting it wrong produces a belt that animates perfectly and in the wrong direction, which reads as a physics
+ * bug rather than a texture one.
+ *
+ * ## The direction it now asserts
+ *
+ * **The tread moves toward `+X` - the same way a decaying ball drifts, toward the back edge and elimination.** That is the
+ * direction a treadmill belt surface actually moves under the thing it is carrying, and it is the direction the balls go.
+ *
+ * ## Why it is `+1` and not `-1` (item 103)
+ *
+ * `-1` was shipped on an *inference*: that on a part's `Top` face the texture's `U` axis runs along the part's local `+X`, so
+ * a negative rate would be needed to make the pattern travel that way. **A Studio run with the two-diamond asset showed the
+ * opposite** - the tread ran against the balls' drift - so the inference was wrong about which way `U` maps on the `Top` face
+ * in this engine build, and the constant is now set from what was seen rather than from what was reasoned. The old docblock
+ * said "flip this one constant to `1`; nothing else needs to change", and that turned out to be exactly right: one edit, no
+ * other file.
+ *
+ * **This is the one visual direction the client owns and cannot verify from source.** If a future engine change, a re-exported
+ * asset or a re-parented belt flips it again, this constant is the whole fix.
+ */
+export const BELT_TEXTURE_SCROLL_SIGN = 1;
 
 /**
  * Ball surface texture, applied to all six faces.

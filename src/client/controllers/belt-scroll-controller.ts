@@ -2,7 +2,7 @@ import { CollectionService, RunService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
 import { BELT_VISUAL_SPEED_ATTRIBUTE } from "shared/attributes";
 import { TAGS } from "shared/tags";
-import { BELT_TEXTURE_SCROLL_SIGN, BELT_TEXTURE_STUDS_PER_TILE } from "shared/tuning";
+import { BELT_TEXTURE_SCROLL_MULTIPLIER, BELT_TEXTURE_SCROLL_SIGN, BELT_TEXTURE_STUDS_PER_TILE } from "shared/tuning";
 
 /**
  * TEMPORARY INSTRUMENTATION. How long the controller waits for the server's `Texture` before giving up
@@ -85,7 +85,7 @@ export class BeltScrollController implements OnStart {
 				// expected result of the property being `NotReplicated`. Logging it distinguishes "no
 				// texture instance" from "texture instance with no image".
 				print(
-					`[BeltScroll] found ${found.GetFullName()} on "${instance.GetFullName()}" uri=${tostring(found.ColorMapContent.Uri)} face=${found.Face.Name} tileU=${found.StudsPerTileU}`,
+					`[BeltScroll] found ${found.GetFullName()} on "${instance.GetFullName()}" uri=${tostring(found.ColorMapContent.Uri)} face=${found.Face.Name} tileU=${found.StudsPerTileU} scrollScale=${BELT_TEXTURE_SCROLL_MULTIPLIER} sign=${BELT_TEXTURE_SCROLL_SIGN}`,
 				);
 				textures.set(instance, found);
 			});
@@ -124,7 +124,12 @@ export class BeltScrollController implements OnStart {
 
 				// Negative speed (a reversed belt) reverses the scroll for free, because the sign of the
 				// rate follows the sign of the speed.
-				let offset = texture.OffsetStudsU + speed * BELT_TEXTURE_SCROLL_SIGN * dt;
+				// **The scroll rate is the belt's visual rate times two independent constants**: a multiplier for how fast the
+				// tread appears to move and a sign for which way. Neither touches `BeltSpeed`, so the picture can be retimed
+				// without changing `RELATIVE_SPEED`, the decay or the race - that is the whole reason the multiplier exists.
+				// At `BELT_TEXTURE_SCROLL_MULTIPLIER = 1` this is exactly the expression that shipped before it.
+				let offset =
+					texture.OffsetStudsU + speed * BELT_TEXTURE_SCROLL_MULTIPLIER * BELT_TEXTURE_SCROLL_SIGN * dt;
 
 				// Double modulo rather than a single one: `%` in Luau keeps the sign of the dividend, so a
 				// reversed belt would drift to a negative offset and the wrap would be wrong. Adding the
