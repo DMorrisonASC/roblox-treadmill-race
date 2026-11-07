@@ -6,6 +6,7 @@ import {
 	DEFAULT_BELT_SPEED,
 	DEFAULT_MAX_LIVE_BALLS,
 	BOOSTED_ATTRIBUTE,
+	TAIL_WIND_ATTRIBUTE,
 	MARKER_LOCAL_POSITION_ATTRIBUTE,
 	MARKER_LOCAL_RIGHT_ATTRIBUTE,
 	MARKER_LOCAL_UP_ATTRIBUTE,
@@ -46,6 +47,7 @@ import {
 	BALL_TEXTURE_OFFSET_RANGE_V,
 	BOOST_HYSTERESIS,
 	LATERAL_BOUND,
+	SPIN_DEADBAND_SPEED,
 	LATERAL_BOUND_MIN,
 	Z_DRIFT_SPEED,
 } from "shared/tuning";
@@ -693,7 +695,8 @@ export class BallSpawnerService implements OnStart {
 		for (const ball of this.liveBalls) {
 			if (ball.Parent !== undefined) {
 				ball.SetAttribute(BALL_SPEED_ATTRIBUTE, BALL_SPEED_MIN);
-				this.writeBoosted(ball, BALL_SPEED_MIN, referenceBeltSpeed);
+				const settledBoosted = this.writeBoosted(ball, BALL_SPEED_MIN, referenceBeltSpeed);
+				this.writeTailWind(ball, BALL_SPEED_MIN - referenceBeltSpeed, BALL_SPEED_MIN, settledBoosted);
 			}
 		}
 	}
@@ -1358,7 +1361,10 @@ export class BallSpawnerService implements OnStart {
 			}
 
 			const relative = advanced - beltSpeed;
-			this.writeBoosted(ball, advanced, beltSpeed);
+			// **`Boosted` first, then `TailWind` fed from it.** The ordering is the precedence guarantee: a client reading both
+			// attributes in one frame can never see them both true, because the earlier write is the later write's input.
+			const boosted = this.writeBoosted(ball, advanced, beltSpeed);
+			this.writeTailWind(ball, relative, advanced, boosted);
 			const velocity = ball.AssemblyLinearVelocity;
 			const along = velocity.Dot(right);
 
@@ -1432,8 +1438,12 @@ export class BallSpawnerService implements OnStart {
 	 * changes**: the attribute replicates, and re-writing the same boolean sixty times a second per ball would be traffic
 	 * carrying no information. The write happens in the same tick as the velocity write below it, so a client that reads
 	 * `Boosted` and the body's velocity in one frame cannot see them disagree.
+	 *
+	 * **It returns the settled value**, because `TailWind` (item 100) has to know it without reading the attribute back — see
+	 * `writeTailWind`. `undefined` means "still inside the band and never written", which is not the same as `false` and must
+	 * not be treated as it.
 	 */
-	private writeBoosted(ball: BasePart, speed: number, beltSpeed: number): void {
+	private writeBoosted(ball: BasePart, speed: number, beltSpeed: number): boolean | undefined {
 		// `undefined` is a body that has not ticked yet; it behaves as `false` until the first write, and inside the band it
 		// stays unset rather than being invented — the spawn draw guarantees the first tick is above the band anyway. The
 		// narrowing is explicit because `GetAttribute` returns `AttributeValue`, not `boolean | undefined`.
@@ -1450,6 +1460,50 @@ export class BallSpawnerService implements OnStart {
 
 		if (settled !== current && settled !== undefined) {
 			ball.SetAttribute(BOOSTED_ATTRIBUTE, settled);
+		}
+
+		return settled;
+	}
+
+	/**
+	 * Settles a ball's `TailWind` attribute: the trail for a ball that is **in regular motion** — losing ground, visibly rolling,
+	 * and not boosted.
+	 *
+	 * ## The condition, and why each term is there
+	 *
+	 * `relative < 0` — the ball is slower than the belt reference, so it is drifting toward the back edge. That is "regular
+	 * motion" and it is the opposite of a boost; a ball holding station (`relative = 0`) or gaining ground is not in the state
+	 * this effect describes.
+	 *
+	 * `speed > SPIN_DEADBAND_SPEED` — the ball is rolling fast enough for the roll to be drawn at all. Below it
+	 * `apparentSpinRate` returns `0`, so the skin is visibly still; a trail on a motionless ball would be describing something
+	 * that is not happening. **This is the same threshold the roll renders at, imported rather than restated**, so "visibly
+	 * rolling" means one thing in the tree.
+	 *
+	 * `boosted === false` — **the precedence rule, and it lives here because this is the only place that knows both facts in the
+	 * same tick.** `windBoost` and `tailWind` must never both play, and a client cannot enforce that without a second copy of
+	 * the rule: two controllers each checking the other's attribute is a rule with two owners, and the second one to be edited
+	 * drifts. `boosted` is the value `writeBoosted` has just settled, passed in rather than read back off the attribute, so
+	 * there is no window in which the two can disagree and no second attribute read per ball per tick.
+	 *
+	 * `Boosted` is written **before** this on the same tick, so `Boosted = true` and `TailWind = true` can never be observed
+	 * together: the ordering is the guarantee, not a convention.
+	 *
+	 * ## No hysteresis, and why that is safe here
+	 *
+	 * Every term is monotone between events. `BALL_SPEED` only decays, so it crosses `BELT_SPEED` once on the way down; the
+	 * `Boosted` term already carries `BOOST_HYSTERESIS`, which holds it true until `BELT_SPEED - 0.5`, so the handover from
+	 * `windBoost` to `tailWind` happens once, at `9.5`, rather than at the `10` boundary where a one-tick dither would have
+	 * shown. `SPIN_DEADBAND_SPEED` is crossed once per ride in the same direction. A pickup or a rocket raises the speed and
+	 * hands the state back, which is an event and not a boundary flicker.
+	 */
+	private writeTailWind(ball: BasePart, relative: number, speed: number, boosted: boolean | undefined): void {
+		const raw = ball.GetAttribute(TAIL_WIND_ATTRIBUTE);
+		const current = typeIs(raw, "boolean") ? raw : undefined;
+		const wanted = relative < 0 && speed > SPIN_DEADBAND_SPEED && boosted === false;
+
+		if (wanted !== current) {
+			ball.SetAttribute(TAIL_WIND_ATTRIBUTE, wanted);
 		}
 	}
 

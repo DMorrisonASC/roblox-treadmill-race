@@ -7,11 +7,11 @@ import {
 } from "shared/attributes";
 import { BALL_SPEED_ATTRIBUTE } from "shared/attributes";
 import { TAGS } from "shared/tags";
+import { apparentSpinRate } from "shared/apparent-spin";
 import {
-	APPARENT_SPIN_GAIN,
-	APPARENT_SPIN_MAX_RAD_PER_SEC,
 	APPARENT_SPIN_SIGN,
 	APPARENT_SPIN_SMOOTHING_SECONDS,
+	BALL_PHANTOM_NAME,
 	SPIN_DEADBAND_SPEED,
 } from "shared/tuning";
 
@@ -46,6 +46,15 @@ interface BodySpin {
 	ownerLogged: boolean;
 	/** Frames since `spin` was last re-orthonormalised; see the guard in the frame loop. */
 	framesSinceNormalize: number;
+	/**
+	 * The `BallRenderController` skin for this body, cached so the lookup is not per frame.
+	 *
+	 * When it exists, the markers are posed **inside its frame** and this controller accumulates no angle of its own:
+	 * one rotation, computed once, so the skin and the markers cannot drift apart. `undefined` until the first frame
+	 * after the phantom replicates ? and permanently on a client where that controller has failed, which is why the
+	 * spin path below survives as the fallback rather than as dead code.
+	 */
+	phantom?: BasePart;
 }
 
 /**
@@ -285,6 +294,7 @@ export class MarkerSpinController implements OnStart {
 					writeWarned: false,
 					ownerLogged: false,
 					framesSinceNormalize: 0,
+					phantom: undefined,
 				};
 				bodies.set(body, state);
 			}
@@ -538,6 +548,28 @@ export class MarkerSpinController implements OnStart {
 				// `NaN`: every writer is `math.max(0, ...)` or a constant.
 				const rawBallSpeed = body.GetAttribute(BALL_SPEED_ATTRIBUTE);
 				const ballSpeed = typeIs(rawBallSpeed, "number") && rawBallSpeed === rawBallSpeed ? rawBallSpeed : 0;
+
+				// **Item 98: the skin owns the roll, the markers ride inside its frame.** `BallRenderController` builds one
+				// `BALL_PHANTOM_NAME` part per body and rolls it about the belt's spin axis; posing the markers inside that same
+				// `CFrame` is what keeps the six face textures and the three markers turning together. Two independent
+				// accumulations of the same rate would drift apart within a second of spawn, which is the failure the one-angle
+				// rule at the top of this file exists to prevent.
+				//
+				// Cached on the state rather than looked up every frame, and re-resolved when the cached part has gone (a
+				// re-spawned body under the same tag, or a client-side clear). `undefined` means "this client has no skin", and
+				// the spin path below then runs exactly as it did before item 98 ? the markers still turn, in the ball's own
+				// frame, which is degraded but not frozen.
+				let phantom = state.phantom;
+				if (phantom !== undefined && phantom.Parent === undefined) {
+					phantom = undefined;
+				}
+
+				if (phantom === undefined) {
+					const found = body.FindFirstChild(BALL_PHANTOM_NAME);
+					phantom = found !== undefined && found.IsA("BasePart") ? found : undefined;
+				}
+
+				state.phantom = phantom;
 				// TEMPORARY INSTRUMENTATION. Hoisted so the log lines can report the rate actually applied
 				// this frame, which of the three axis sources produced it, and which branch set the rate.
 				let omegaThisFrame = 0;
@@ -572,9 +604,18 @@ export class MarkerSpinController implements OnStart {
 				// The user's requirement is that the ball never renders a backwards spin. The only way to guarantee
 				// that is to have one source of truth for the rate and one for the axis, both derived from the
 				// model. `omegaPhysical` is still printed as a diagnostic; it no longer decides anything.
+				// **With a phantom, this controller applies no rate at all** ? the skin's own roll is the picture, and adding a
+				// second rotation on top would double the drawn speed. `rateSource=phantom` in the log is how a run says which
+				// path posed the markers.
 				let omega: number;
-				if (ballSpeed > SPIN_DEADBAND_SPEED) {
-					omega = math.min(APPARENT_SPIN_MAX_RAD_PER_SEC, (APPARENT_SPIN_GAIN * ballSpeed) / state.radius);
+				if (phantom !== undefined) {
+					omega = 0;
+					rateSource = "phantom";
+					axisSource = "phantom";
+				} else if (ballSpeed > SPIN_DEADBAND_SPEED) {
+					// One formula, in `shared/apparent-spin.ts`, so this path and the skin cannot disagree about the rate even
+					// though only one of them is accumulating an angle.
+					omega = apparentSpinRate(ballSpeed, state.radius);
 					rateSource = "attribute";
 				} else {
 					omega = 0;
@@ -589,47 +630,55 @@ export class MarkerSpinController implements OnStart {
 				// reverse while `BALL_SPEED` was still climbing. The axis is now a pure function of the belt, so the
 				// ball turns the same way for its whole life: forward at spawn, slower as the attribute decays,
 				// faster on a pickup, never backwards.
-				let axis: Vector3 | undefined;
+				// **Fallback only.** With a skin present the markers are posed inside its frame below, and this whole block is
+				// skipped - running it would be a second rotation stacked on the one the phantom already carries.
+				if (phantom === undefined) {
+					let axis: Vector3 | undefined;
 
-				if (axis === undefined) {
-					// Neither spinning nor moving: a ball at rest on the belt. The rate is `0` here, so nothing
-					// rotates — but the axis is still resolved because the log line reports which source it
-					// came from, and because a ball that starts moving must turn about a defined axis on its
-					// first moving frame rather than one frame later.
-					axis = beltSpinAxis();
-					axisSource = "belt";
-				}
+					if (axis === undefined) {
+						// Neither spinning nor moving: a ball at rest on the belt. The rate is `0` here, so nothing
+						// rotates — but the axis is still resolved because the log line reports which source it
+						// came from, and because a ball that starts moving must turn about a defined axis on its
+						// first moving frame rather than one frame later.
+						axis = beltSpinAxis();
+						axisSource = "belt";
+					}
 
-				// One sign for all three sources, so a ball crossing from sliding to rolling does not reverse.
-				axis = axis.mul(APPARENT_SPIN_SIGN);
+					// One sign for all three sources, so a ball crossing from sliding to rolling does not reverse.
+					axis = axis.mul(APPARENT_SPIN_SIGN);
 
-				// Pre-multiplied because the rotation is expressed in world space and must be applied about
-				// the body's *current* centre, not accumulated in the body's own turning frame.
-				//
-				// `omega = 0` is exactly inert here, which is what makes the deadband a real hold rather than
-				// a near-miss: `fromAxisAngle(axis, 0)` is the identity, so `spin` is multiplied by identity
-				// and `angle += 0 * dt` adds nothing. The accumulated pose is preserved bit-for-bit, so a
-				// parked ball's markers neither advance nor drift and a ball that resumes turns from exactly
-				// the orientation it stopped at.
-				state.spin = CFrame.fromAxisAngle(axis, omega * frameDt).mul(state.spin);
-				state.angle += omega * frameDt;
-				omegaThisFrame = omega;
+					// Pre-multiplied because the rotation is expressed in world space and must be applied about
+					// the body's *current* centre, not accumulated in the body's own turning frame.
+					//
+					// `omega = 0` is exactly inert here, which is what makes the deadband a real hold rather than
+					// a near-miss: `fromAxisAngle(axis, 0)` is the identity, so `spin` is multiplied by identity
+					// and `angle += 0 * dt` adds nothing. The accumulated pose is preserved bit-for-bit, so a
+					// parked ball's markers neither advance nor drift and a ball that resumes turns from exactly
+					// the orientation it stopped at.
+					state.spin = CFrame.fromAxisAngle(axis, omega * frameDt).mul(state.spin);
+					state.angle += omega * frameDt;
+					omegaThisFrame = omega;
 
-				// Re-orthonormalise every five seconds at 60 Hz. **This guard exists because the model
-				// changed:** the earliest model often computed a zero rate, so `spin` was frequently left
-				// untouched and accumulated at most a few hundred multiplies per body. A moving ball now
-				// rotates continuously, which is ~18,000 multiplies a minute and ~288,000 over a ten-minute
-				// session. A product of thousands of float matrices drifts off orthonormal, and a drifted
-				// basis is not a cosmetic problem here: the marker pose is `spunBody * localFrame`, so scale
-				// error in the basis moves the markers off the sphere's surface, which would read as a new
-				// and mysterious bug rather than as accumulated float error.
-				//
-				// `fromMatrix` with two unit columns produces an exactly orthonormal third (`vX:Cross(vY)`),
-				// so this costs two normalisations and one allocation per body per five seconds.
-				state.framesSinceNormalize++;
-				if (state.framesSinceNormalize >= NORMALIZE_SPIN_EVERY_FRAMES) {
-					state.framesSinceNormalize = 0;
-					state.spin = CFrame.fromMatrix(Vector3.zero, state.spin.RightVector.Unit, state.spin.UpVector.Unit);
+					// Re-orthonormalise every five seconds at 60 Hz. **This guard exists because the model
+					// changed:** the earliest model often computed a zero rate, so `spin` was frequently left
+					// untouched and accumulated at most a few hundred multiplies per body. A moving ball now
+					// rotates continuously, which is ~18,000 multiplies a minute and ~288,000 over a ten-minute
+					// session. A product of thousands of float matrices drifts off orthonormal, and a drifted
+					// basis is not a cosmetic problem here: the marker pose is `spunBody * localFrame`, so scale
+					// error in the basis moves the markers off the sphere's surface, which would read as a new
+					// and mysterious bug rather than as accumulated float error.
+					//
+					// `fromMatrix` with two unit columns produces an exactly orthonormal third (`vX:Cross(vY)`),
+					// so this costs two normalisations and one allocation per body per five seconds.
+					state.framesSinceNormalize++;
+					if (state.framesSinceNormalize >= NORMALIZE_SPIN_EVERY_FRAMES) {
+						state.framesSinceNormalize = 0;
+						state.spin = CFrame.fromMatrix(
+							Vector3.zero,
+							state.spin.RightVector.Unit,
+							state.spin.UpVector.Unit,
+						);
+					}
 				}
 
 				// A marker whose parent is no longer this body has left it — reparented, or the body is being
@@ -652,7 +701,15 @@ export class MarkerSpinController implements OnStart {
 				// spin axis' antipodes and the ring in its perpendicular plane — they are moving together
 				// because they share one rotation, not because their geometry is special-cased.
 				const pivot = new CFrame(position);
-				const spunBody = pivot.mul(state.spin).mul(pivot.Inverse()).mul(body.CFrame);
+				// **The skin's frame is the marker's frame.** When a phantom exists it is already at the ball's position carrying the
+				// one roll this round draws, so posing the markers in it is what makes the six face textures and the three markers
+				// turn together. The `body.CFrame` path is the fallback: it rotates the marker set by this controller's own angle
+				// about the ball's centre, which is exactly what item 44 shipped ? degraded (it inherits the body's physical
+				// orientation) but moving, and it is the path a client takes if the skin controller never ran.
+				const spunBody =
+					phantom !== undefined
+						? phantom.CFrame
+						: pivot.mul(state.spin).mul(pivot.Inverse()).mul(body.CFrame);
 
 				for (const entry of state.markers) {
 					entry.marker.CFrame = spunBody.mul(entry.localFrame);

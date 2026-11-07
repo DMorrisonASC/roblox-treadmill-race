@@ -2,6 +2,8 @@ import { CollectionService, ReplicatedStorage, RunService } from "@rbxts/service
 import { Controller, OnStart } from "@flamework/core";
 import { BOOSTED_ATTRIBUTE } from "shared/attributes";
 import { TAGS } from "shared/tags";
+import { VFX_SCALE_MULTIPLIER } from "shared/tuning";
+import { effectScaleFor, scaleEffect } from "shared/vfx-scale";
 
 /**
  * The wind-boost effect's name in `ReplicatedStorage`, and the whole of the contract with it: a `BasePart` carrying an
@@ -10,25 +12,6 @@ import { TAGS } from "shared/tags";
  * says so once.
  */
 const ASSET_NAME = "windBoost";
-
-/**
- * **Placeholder.** The ball radius the asset was drawn against, in studs.
- *
- * The VFX pack is authored for a 1x1x1 ball (radius 0.5). Every distance in a clone is multiplied by
- * `(ball.Size.X / 2) / BASE_BALL_RADIUS`, so changing the ball's `Size` in `ball-spawner-service` resizes the effect with
- * no edit here or in the asset. This constant is the *assumption that can go stale*: if the pack is redrawn for a
- * different ball, this is the number to change, and it is the only one.
- */
-const BASE_BALL_RADIUS = 0.5;
-
-/**
- * **Placeholder.** A flat multiplier on the whole effect, on top of the ball ratio.
- *
- * `1` means "exactly the ball's scale". The knob exists because "the effect is right in shape but wrong in size" is a
- * judgement no ratio can encode — a trail that reads well at 1:1 on a 1-stud ball may want to be wider. Anything other
- * than `1` here is a design change, not a fix.
- */
-const WIND_BOOST_SCALE_MULTIPLIER = 0.1;
 
 /**
  * The wind trail: a persistent effect that follows every ball at or above belt speed.
@@ -130,7 +113,9 @@ export class WindBoostController implements OnStart {
 		// something that is not the asset the reader meant only if a second instance of that name exists, and the path is
 		// how that is noticed rather than inferred. It is also how a `windBoost` that ended up somewhere other than beside
 		// `hitEffect` becomes visible in one line instead of as a missing effect.
-		print(`[WindBoost] mounted on ${found.GetFullName()} (${found.ClassName})`);
+		print(
+			`[WindBoost] mounted on ${found.GetFullName()} (${found.ClassName}) scale=${VFX_SCALE_MULTIPLIER} (shared, see shared/vfx-scale.ts)`,
+		);
 
 		// Both discovery paths, for the reason `marker-spin-controller` keeps both: the tag signal is the one that works,
 		// and the startup scan catches the reconnect case where the server's bodies already exist when this client's
@@ -231,11 +216,9 @@ export class WindBoostController implements OnStart {
 		// has to be applied unchanged or the effect tumbles with the body it is attached to.
 		clone.CFrame = this.frameFor(ball);
 
-		// **The scale is derived from the ball, not from the asset.** `ball.Size.X / 2` is the ball's radius today (the tree is
-		// spheres-only), and the ratio against the radius the pack was drawn at is what lets a designer change `Size` in
-		// `ball-spawner-service` without touching this file or the asset.
-		const radius = ball.Size.X / 2;
-		scaleEffect(clone, (radius / BASE_BALL_RADIUS) * WIND_BOOST_SCALE_MULTIPLIER);
+		// **The scale comes from `shared/vfx-scale.ts`**, which owns both the arithmetic and the one multiplier ? item 101 found
+		// that a copy of each per controller had already drifted tenfold between the two effects.
+		scaleEffect(clone, effectScaleFor(ball));
 
 		clone.Parent = ball;
 		this.trails.set(ball, clone);
@@ -303,53 +286,5 @@ export class WindBoostController implements OnStart {
 		}
 
 		this.trails.delete(ball);
-	}
-}
-
-/**
- * Scales one cloned effect by `ratio`, on **the five properties that are distances**.
- *
- * ## Why `Size` is not `emitter.Size = emitter.Size * ratio`
- *
- * `ParticleEmitter.Size` is a `NumberSequence`, not a number — `new NumberSequence(0.5, 1.5)` is a ramp, and a later reader
- * who writes `emitter.Size = 2` gets a type error that reads as a mystery because the property *looks* like a scalar.
- * Scaling it means rebuilding the sequence: every `NumberSequenceKeypoint`'s `Value` **and** `Envelope` multiplied, with
- * `Time` left alone (time is not a distance). `NumberSequence` is immutable in the typings, so there is no in-place path.
- *
- * ## What is scaled, and why only these
- *
- * `Size` (a `NumberSequence`), `Speed` (a `NumberRange`), `Acceleration` (a `Vector3`), `Attachment.Position` (a `Vector3`)
- * and the clone's own root `Size` — every one of them is measured in studs. **`Rate`, `Lifetime`, `Color`, `Transparency`,
- * `LightEmission`, `Rotation`, `RotSpeed`, `SpreadAngle`, `EmissionDirection` and `Drag` are deliberately not scaled**:
- * they are design and time, not distance. A bigger ball does not want a faster or longer-lived particle, it wants the same
- * effect stretched — scaling `Rate` would make the trail denser purely because the ball grew, which is a different effect,
- * not a larger one.
- *
- * The invisible root `BasePart` is scaled too even though nothing renders it: a part with a stale size shows up in hitbox
- * visualisations and tells a later reader the wrong thing about the effect.
- */
-function scaleEffect(root: BasePart, ratio: number): void {
-	if (ratio === 1) {
-		return;
-	}
-
-	root.Size = root.Size.mul(ratio);
-
-	for (const descendant of root.GetDescendants()) {
-		if (descendant.IsA("Attachment")) {
-			descendant.Position = descendant.Position.mul(ratio);
-		} else if (descendant.IsA("ParticleEmitter")) {
-			const keypoints = new Array<NumberSequenceKeypoint>();
-
-			for (const keypoint of descendant.Size.Keypoints) {
-				keypoints.push(
-					new NumberSequenceKeypoint(keypoint.Time, keypoint.Value * ratio, keypoint.Envelope * ratio),
-				);
-			}
-
-			descendant.Size = new NumberSequence(keypoints);
-			descendant.Speed = new NumberRange(descendant.Speed.Min * ratio, descendant.Speed.Max * ratio);
-			descendant.Acceleration = descendant.Acceleration.mul(ratio);
-		}
 	}
 }

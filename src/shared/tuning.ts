@@ -698,3 +698,37 @@ export const PICKUPS_FOLDER_NAME = "SpawnedPickups";
  * holds anything — its members destroy themselves.
  */
 export const HIT_EFFECTS_FOLDER_NAME = "SpawnedHitEffects";
+
+/**
+ * The name of the client-only part that carries a ball's **visible skin**, created by `BallRenderController` as a child of
+ * the ball it stands in for.
+ *
+ * A name rather than a folder path because the phantom belongs to one body: as a child of the ball it is destroyed with it,
+ * and the marker controller — which poses both the markers and this skin — finds it with one `FindFirstChild`. The markers
+ * themselves are children of the same ball for the same reason, so this is the existing pattern rather than a new one.
+ */
+export const BALL_PHANTOM_NAME = "BallPhantom";
+
+/**
+ * **Placeholder.** The ball radius, in studs, that the VFX pack was drawn against.
+ *
+ * The two effect controllers that scale a cloned asset (`windBoost`, `tailWind`) divide the ball's actual radius by this and
+ * multiply every distance in their clone by the result, so changing the ball's `Size` in `ball-spawner-service` resizes the
+ * effects without touching an asset or a controller. It lives here rather than in either controller because it is a property of
+ * **the pack**, not of one effect: a single number both read is one number that can go stale, and it goes stale for both at
+ * once.
+ */
+export const BASE_BALL_RADIUS = 0.5;
+
+/**
+ * **Placeholder.** The one scale every cloned VFX effect is drawn at, on top of its ball ratio.
+ *
+ * `0.1` is the value `windBoost` was tuned to **in Studio**: at `1` the pack's effects are drawn for a ball hundreds of times
+ * larger than a 1-stud body and read as a sheet of particles across the arena. It is single and shared because item 101 found
+ * the cost of two: `windBoost` at `0.1` beside `tailWind` at `1` put a tail wind ten times the size of the boost trail on the
+ * same ball, with both files looking correct. See `shared/vfx-scale.ts`.
+ *
+ * **Placeholder** in the honest sense: this is a starting point judged by eye, and the number to change is this one ? both
+ * effects move together, which is the point.
+ */
+export const VFX_SCALE_MULTIPLIER = 0.1;

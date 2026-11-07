@@ -84,6 +84,17 @@ export const BALL_SPEED_ATTRIBUTE = "BALL_SPEED";
 export const BOOSTED_ATTRIBUTE = "Boosted";
 
 /**
+ * Attribute on a ball: whether it is in **regular motion** and should wear the tail-wind trail.
+ *
+ * `true` when the ball is slower than the belt reference (losing ground), faster than `SPIN_DEADBAND_SPEED` (so its roll is
+ * actually drawn), and **not** `Boosted`. Written by `BallSpawnerService.stepBallSpeeds` immediately after `Boosted`, on the
+ * same tick, from the same numbers ? which is what makes the two effects mutually exclusive at the source rather than on each
+ * client. A client reads this attribute and plays a trail; it never re-derives the condition, because a second copy of a
+ * precedence rule is a rule that will disagree with itself.
+ */
+export const TAIL_WIND_ATTRIBUTE = "TailWind";
+
+/**
  * `Radius` is retired. There is deliberately no constant for it below.
  *
  * ## Why the sphere radius stopped being an attribute
