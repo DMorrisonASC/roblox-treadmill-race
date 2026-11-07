@@ -1,4 +1,5 @@
-import { SPACING, TYPOGRAPHY, FONT } from "./scale";
+import { SPACING, TYPOGRAPHY, FONT, Typography } from "./scale";
+import { outlineText } from "./text";
 import { Theme } from "./theme";
 import { attachPressFeedback } from "./press";
 import { attachClickSound } from "./sounds";
@@ -142,11 +143,24 @@ export function Panel(options: PanelOptions): PanelParts {
 }
 
 /** What a caller may pass to `PanelHeader`. */
+
+/**
+ * **Optional type scale and glyph outline, for a caller that has moved the sheet to its own scale.**
+ *
+ * Both default to the generic behaviour - `TYPOGRAPHY` and no outline - so a band built by any other caller is byte-for-byte
+ * what it was. The shop passes `typographyOneStepUp()` and `true`, because the sheet's text is one size larger than the HUD's
+ * and every label in it carries the black outline; a band that skipped either would be the only text on the sheet without
+ * them, which is the sort of half-migration that reads as a bug.
+ */
 export interface PanelHeaderOptions {
 	theme: Theme;
 	parent: Instance;
 	title: string;
 	onClose: () => void;
+	/** Overrides `TYPOGRAPHY` for the heading and the close glyph. */
+	typeScale?: Typography;
+	/** Outlines the heading and the close glyph in black. */
+	outline?: boolean;
 }
 
 /**
@@ -158,6 +172,7 @@ export interface PanelHeaderOptions {
  */
 export function PanelHeader(options: PanelHeaderOptions): Frame {
 	const { theme, parent, title, onClose } = options;
+	const scale = options.typeScale ?? TYPOGRAPHY;
 
 	const band = new Instance("Frame");
 	band.Name = "Header";
@@ -177,7 +192,7 @@ export function PanelHeader(options: PanelHeaderOptions): Frame {
 	heading.Size = new UDim2(1, -(CLOSE_BUTTON_SIZE + SPACING.sm), 1, 0);
 	heading.BackgroundTransparency = 1;
 	heading.Font = FONT;
-	heading.TextSize = TYPOGRAPHY.h6.size;
+	heading.TextSize = scale.h6.size;
 	heading.TextColor3 = theme.colors.textPrimary;
 	heading.TextXAlignment = Enum.TextXAlignment.Left;
 	heading.TextYAlignment = Enum.TextYAlignment.Center;
@@ -195,7 +210,7 @@ export function PanelHeader(options: PanelHeaderOptions): Frame {
 	close.BorderSizePixel = 0;
 	close.AutoButtonColor = false;
 	close.Font = FONT;
-	close.TextSize = TYPOGRAPHY.body1.size;
+	close.TextSize = scale.body1.size;
 	close.TextColor3 = theme.colors.textSecondary;
 	close.Text = "×";
 	close.ZIndex = CONTENT_Z_INDEX;
@@ -206,6 +221,11 @@ export function PanelHeader(options: PanelHeaderOptions): Frame {
 	const closeCorner = new Instance("UICorner");
 	closeCorner.CornerRadius = new UDim(1, 0);
 	closeCorner.Parent = close;
+
+	if (options.outline === true) {
+		outlineText(heading);
+		outlineText(close);
+	}
 
 	attachPressFeedback(close);
 	attachClickSound(close);
@@ -219,6 +239,10 @@ export interface PanelFooterOptions {
 	theme: Theme;
 	parent: Instance;
 	text: string;
+	/** Overrides `TYPOGRAPHY` for the status line. */
+	typeScale?: Typography;
+	/** Outlines the status line's glyphs in black. */
+	outline?: boolean;
 }
 
 /**
@@ -230,13 +254,14 @@ export interface PanelFooterOptions {
  */
 export function PanelFooter(options: PanelFooterOptions): TextLabel {
 	const { theme, parent, text } = options;
+	const scale = options.typeScale ?? TYPOGRAPHY;
 
 	const label = new Instance("TextLabel");
 	label.Name = "Footer";
 	label.Size = new UDim2(1, 0, 0, PANEL_FOOTER_HEIGHT);
 	label.BackgroundTransparency = 1;
 	label.Font = FONT;
-	label.TextSize = TYPOGRAPHY.caption.size;
+	label.TextSize = scale.caption.size;
 	label.TextColor3 = theme.colors.textSecondary;
 	label.TextXAlignment = Enum.TextXAlignment.Left;
 	label.TextYAlignment = Enum.TextYAlignment.Center;
@@ -249,6 +274,10 @@ export function PanelFooter(options: PanelFooterOptions): TextLabel {
 	padding.PaddingLeft = new UDim(0, PANEL_SIDE_PADDING);
 	padding.PaddingRight = new UDim(0, PANEL_SIDE_PADDING);
 	padding.Parent = label;
+
+	if (options.outline === true) {
+		outlineText(label);
+	}
 
 	return label;
 }

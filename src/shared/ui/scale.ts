@@ -106,3 +106,60 @@ export const TYPOGRAPHY: Typography = {
 	caption: { size: 12, lineHeight: 16 },
 	overline: { size: 11, lineHeight: 14 },
 };
+
+/**
+ * The size ladder, one entry per **distinct size**, smallest first.
+ *
+ * The variants that share a size (`body2`/`subtitle2`/`button` are all 14) appear once, because "one step up" that lands on
+ * another name for the same number is not a step. Named below as the variant each step is read *as*, so the map from any
+ * variant - including the aliases - to the next real size is explicit rather than a search through the table.
+ */
+const NEXT_TEXT_VARIANT: Record<TypographyVariant, TypographyVariant> = {
+	overline: "caption", // 11 -> 12
+	caption: "body2", // 12 -> 14
+	body2: "body1", // 14 -> 16
+	subtitle2: "body1", // 14 -> 16
+	button: "body1", // 14 -> 16
+	body1: "h6", // 16 -> 18
+	subtitle1: "h6", // 16 -> 18
+	h6: "h5", // 18 -> 24
+	h5: "h4", // 24 -> 32
+	// The top of the ladder has nowhere to go. Stated rather than left undefined so the map stays total and a caller
+	// asking for the largest variant gets the largest variant instead of `nil`.
+	h4: "h4",
+};
+
+/** The next variant **up** the size ladder from `variant`, or `variant` itself at the top. */
+export function nextTextVariant(variant: TypographyVariant): TypographyVariant {
+	return NEXT_TEXT_VARIANT[variant];
+}
+
+/**
+ * The whole scale, one step larger: every variant's spec replaced by its next size up.
+ *
+ * ## Why this exists instead of editing the call sites
+ *
+ * A panel that wants its type one size larger everywhere is making **one** decision, and the way to express one decision is
+ * one table. Rewriting two hundred `TYPOGRAPHY.body2` reads into `TYPOGRAPHY.body1` would spread that decision across the
+ * file, where the next element added would silently keep the old size and the panel would slowly go back to two scales.
+ *
+ * It also keeps the **bands** in step: a caller sizing a row at `lineHeight` of its label's variant reads the same table,
+ * so bumping the type bumps the space it needs. A table that changed fonts but not heights would clip every label it grew.
+ *
+ * **Not a mutation of `TYPOGRAPHY`.** The base scale is what the HUD, the banner and the picker read, and they are not
+ * being rescaled; this returns a new table and changes nothing for anyone who keeps importing `TYPOGRAPHY`.
+ */
+export function typographyOneStepUp(): Typography {
+	return {
+		h4: TYPOGRAPHY[NEXT_TEXT_VARIANT.h4],
+		h5: TYPOGRAPHY[NEXT_TEXT_VARIANT.h5],
+		h6: TYPOGRAPHY[NEXT_TEXT_VARIANT.h6],
+		subtitle1: TYPOGRAPHY[NEXT_TEXT_VARIANT.subtitle1],
+		subtitle2: TYPOGRAPHY[NEXT_TEXT_VARIANT.subtitle2],
+		body1: TYPOGRAPHY[NEXT_TEXT_VARIANT.body1],
+		body2: TYPOGRAPHY[NEXT_TEXT_VARIANT.body2],
+		button: TYPOGRAPHY[NEXT_TEXT_VARIANT.button],
+		caption: TYPOGRAPHY[NEXT_TEXT_VARIANT.caption],
+		overline: TYPOGRAPHY[NEXT_TEXT_VARIANT.overline],
+	};
+}

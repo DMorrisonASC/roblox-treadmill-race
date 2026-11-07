@@ -32,17 +32,31 @@ import {
 	REMOTES_FOLDER_NAME,
 	ROUND_STATE_VALUE_NAME,
 } from "shared/remotes";
-import { FONT, SPACING, TYPOGRAPHY } from "shared/ui/scale";
-import { surfaceOpaqueTheme, Theme } from "shared/ui/theme";
+import { FONT, SPACING, TYPOGRAPHY, typographyOneStepUp } from "shared/ui/scale";
+import { outlineText } from "shared/ui/text";
+import { chunkyDarkTheme, Theme } from "shared/ui/theme";
 import { fusionOddsForBall, OwnedBall, ownedBallsFrom } from "shared/inventory";
 import { policyAllowsPurchase, PolicyState, policyStateFrom } from "shared/policy";
 import { getScreenGui } from "shared/ui/layers";
-import { Panel, PanelFooter, PANEL_FOOTER_HEIGHT, PANEL_HEADER_HEIGHT, PanelHeader } from "shared/ui/panel";
+import { PanelFooter, PANEL_FOOTER_HEIGHT, PANEL_HEADER_HEIGHT, PanelHeader } from "shared/ui/panel";
 import { TabStrip, TAB_STRIP_HEIGHT } from "shared/ui/tabs";
+import { buildChunkyButton, ChunkyButton } from "shared/ui/chunky-button";
+import { buildChunkyPanel } from "shared/ui/chunky-panel";
 import { attachPressFeedback } from "shared/ui/press";
 import { attachClickSound, playPurchaseSound } from "shared/ui/sounds";
 import { capToViewport } from "shared/ui/viewport";
 import { ballName as displayName, rarityLabel as tierName } from "shared/ball-name";
+
+/**
+ * **The sheet's type scale: every variant one step larger than the game scale.**
+ *
+ * One table, built from one decision - read `typographyOneStepUp` for why it is not a hundred edited call sites. Every
+ * `PANEL_TYPE` read below is what `TYPOGRAPHY` used to be, so a label that asked for `body2` now renders at `body1`, and the
+ * band that sized itself at `body2`'s line height grew with it.
+ *
+ * `TYPOGRAPHY` is still imported for the `variant` **type** in `text()`, which is the same closed set.
+ */
+const PANEL_TYPE = typographyOneStepUp();
 
 /** The one phase the tabs belong to. A client cannot import the server's `RoundPhase`. */
 const PHASE_INTERMISSION = "Intermission";
@@ -180,8 +194,67 @@ const INVENTORY_PANEL_SIZE = UDim2.fromOffset(
 	PANEL_HEADER_HEIGHT + TAB_STRIP_HEIGHT + INVENTORY_ROW_HEIGHT + PANEL_FOOTER_HEIGHT,
 );
 
-/** **Placeholder.** Height of one rail tab, in pixels. */
-const RAIL_TAB_HEIGHT = 34;
+/**
+ * **Placeholder.** One rail tab's footprint, in pixels.
+ *
+ * A square card rather than the previous 34-pixel pill: the art has an icon above a title and a shadow plate behind
+ * both, so the tab needs room in two dimensions. The size is the **whole** card including its shadow - `buildChunkyButton`
+ * insets the face inside this box rather than hanging it outside, so the list layout's cells are exactly what they say.
+ */
+const RAIL_TAB_SIZE = UDim2.fromOffset(84, 84);
+
+/**
+ * **Placeholder.** The store's icon. **This is not an asset you own** - the tree ships no icon art, so this id renders
+ * nothing until it is replaced with the shop icon.
+ */
+const RAIL_STORE_ICON = "rbxassetid://123456789";
+
+/**
+ * **Placeholder.** The inventory's icon, same caveat as `RAIL_STORE_ICON`.
+ */
+const RAIL_INVENTORY_ICON = "rbxassetid://123456788";
+
+/** One rail tab, as data. A new tab is a row here, not another branch in `buildRail`. */
+interface RailTabSpec {
+	readonly id: PanelId;
+	readonly title: string;
+	readonly icon: string;
+	/** The bright face of the card. */
+	readonly color: Color3;
+	/** The plate behind it. Always the same hue, dark: the shadow is a shade of the card, never a second colour. */
+	readonly shadow: Color3;
+}
+
+/**
+ * **Placeholder.** The rail's tabs, in draw order.
+ *
+ * **The shadow is a shade of its own card, not a near-black.** It has to be dark enough to read as "the same surface, in
+ * shadow" and light enough not to merge with the `CHUNKY_DEPTH`-pixel outline that runs along its inner edge: the first
+ * pass used shadows dark enough that the two read as one border and the card looked flat.
+ *
+ * **The colours live here and not in the theme.** They are the card's identity - the store is red because the store is
+ * red, not because the palette has an "accent" - and a theme entry would be three one-use colours in a file every
+ * panel reads. `buildChunkyButton` takes them as arguments for exactly this reason.
+ *
+ * **The labels stay `STORE` and `INVENTORY`**, the words the rail already used, rather than the brief's `SHOP`: renaming
+ * a tab is a copy decision, not a visual one, and the sheets behind them are still the store and the inventory.
+ */
+const RAIL_TABS: Array<RailTabSpec> = [
+	{
+		id: "shop",
+		title: "STORE",
+		icon: RAIL_STORE_ICON,
+		color: Color3.fromRGB(232, 68, 68),
+		shadow: Color3.fromRGB(170, 34, 34),
+	},
+	{
+		id: "inventory",
+		title: "INVENTORY",
+		icon: RAIL_INVENTORY_ICON,
+		color: Color3.fromRGB(64, 140, 240),
+		shadow: Color3.fromRGB(26, 82, 160),
+	},
+];
 
 /** **Placeholder.** Rail inset from the screen edge, in pixels, so a rounded corner is not clipped. */
 const RAIL_INSET = SPACING.sm;
@@ -278,8 +351,10 @@ type PanelId = "shop" | "inventory";
  * The previous version used big-ui's `Text` for every label and every one of them rendered **invisible**. The cause is
  * structural, not a typo: `Text` resolves `TextColor3` and `TextTransparency` from big-ui's module-level `Palette`,
  * `getTheme()` is the only direction ever pushed into that table, and it is the **dark** HUD palette — pale ink. The
- * light direction deliberately pushes nothing (it would repaint the phase banner), so a store label asking big-ui for
- * "primary" gets white on paper. Assigning `TextColor3` after construction does not reliably survive the library's own
+ * light direction pushed nothing either (it would repaint the phase banner), so a store label asking big-ui for
+ * "primary" got whichever palette the HUD had pushed - and, on the old paper sheet, white ink that vanished. The colour
+ * clash is gone now that the sheet is dark, but the other half of the reason stands: assigning `TextColor3` after
+ * construction does not reliably survive the library's own hydration. Assigning `TextColor3` after construction does not reliably survive the library's own
  * hydration.
  *
  * So the store builds plain `TextLabel`s through Fusion and sets font, size and colour itself. That is one less layer
@@ -287,11 +362,11 @@ type PanelId = "shop" | "inventory";
  */
 @Controller()
 export class ShopController implements OnStart {
-	private readonly light: Theme = surfaceOpaqueTheme();
+	private readonly theme: Theme = chunkyDarkTheme();
 	private readonly player = Players.LocalPlayer;
 
 	private readonly panels = new Map<PanelId, Frame>();
-	private readonly railButtons = new Map<PanelId, TextButton>();
+	private readonly railButtons = new Map<PanelId, ChunkyButton>();
 
 	private rail!: Frame;
 	private open: "shop" | "inventory" | "none" = "none";
@@ -670,56 +745,54 @@ export class ShopController implements OnStart {
 		layout.HorizontalAlignment = Enum.HorizontalAlignment.Left;
 		layout.Parent = rail;
 
-		this.buildRailTab(rail, "shop", "Store", 1);
-		this.buildRailTab(rail, "inventory", "Inventory", 2);
+		// An indexed loop rather than `entries()`: roblox-ts compiles against a Lua table, and the array iterator's tuple form
+		// is not in its lib. The array order is the draw order, so a tab inserted in the middle of the table needs no
+		// renumbering here.
+		for (let index = 0; index < RAIL_TABS.size(); index++) {
+			const tab = RAIL_TABS[index];
+			const button = buildChunkyButton({
+				name: `${tab.title}Tab`,
+				size: RAIL_TAB_SIZE,
+				title: tab.title,
+				iconAssetId: tab.icon,
+				color: tab.color,
+				shadowColor: tab.shadow,
+				layoutOrder: index + 1,
+				zIndex: RAIL_Z_INDEX,
+				onActivated: () => this.toggle(tab.id),
+				parent: rail,
+			});
+
+			this.railButtons.set(tab.id, button);
+		}
+
 		this.restyleRail();
+
+		// **A placeholder icon id renders nothing while still occupying its slot**, which looks exactly like a layout
+		// mistake - an unexplained empty square in the upper half of every card. Saying so once at mount is the cheapest
+		// way to stop that being diagnosed as a bug; the ids are the only thing to change.
+		for (const tab of RAIL_TABS) {
+			if (tab.icon === RAIL_STORE_ICON || tab.icon === RAIL_INVENTORY_ICON) {
+				warn(
+					`[Shop] rail tab ${tab.title} is still using a placeholder icon (${tab.icon}) - its icon slot is reserved and empty until that id is swapped.`,
+				);
+			}
+		}
 
 		return rail;
 	}
 
-	private buildRailTab(parent: Instance, id: PanelId, label: string, order: number): void {
-		const button = new Instance("TextButton");
-		button.Name = `${label}Tab`;
-		button.Size = new UDim2(0, 0, 0, RAIL_TAB_HEIGHT);
-		button.AutomaticSize = Enum.AutomaticSize.X;
-		button.BorderSizePixel = 0;
-		button.AutoButtonColor = false;
-		button.Font = FONT;
-		button.TextSize = TYPOGRAPHY.body1.size;
-		button.Text = label;
-		button.LayoutOrder = order;
-		button.ZIndex = RAIL_Z_INDEX;
-		button.Parent = parent;
-
-		const padding = new Instance("UIPadding");
-		padding.PaddingLeft = new UDim(0, SPACING.md);
-		padding.PaddingRight = new UDim(0, SPACING.md);
-		padding.Parent = button;
-
-		const corner = new Instance("UICorner");
-		corner.CornerRadius = new UDim(0, RAIL_INSET);
-		corner.Parent = button;
-
-		const stroke = new Instance("UIStroke");
-		stroke.Color = this.light.colors.border;
-		stroke.Thickness = HAIRLINE;
-		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
-		stroke.Parent = button;
-
-		attachPressFeedback(button);
-		attachClickSound(button);
-		button.Activated.Connect(() => this.toggle(id));
-
-		this.railButtons.set(id, button);
-	}
-
-	/** Which rail tab looks selected is a statement about `open`, derived from it and never stored twice. */
+	/**
+	 * Which rail tab looks selected is a statement about `open`, derived from it and never stored twice.
+	 *
+	 * The chunky card expresses selection by **depth rather than colour**: the tab whose panel is open is drawn pressed,
+	 * its face flush with the shadow plate, and the others sit proud. That is why this loop no longer touches a
+	 * `BackgroundColor3` - the card owns its own colours, and inverting them here would be a second palette to keep in
+	 * step with `RAIL_TABS`.
+	 */
 	private restyleRail(): void {
 		for (const [id, button] of this.railButtons) {
-			const selected = this.open === id;
-			button.BackgroundColor3 = selected ? this.light.colors.accent : this.light.paint.card.color;
-			button.BackgroundTransparency = selected ? 0 : this.light.paint.card.transparency;
-			button.TextColor3 = selected ? this.light.colors.onAccent : this.light.colors.textPrimary;
+			button.setRaised(this.open !== id);
 		}
 	}
 
@@ -794,82 +867,39 @@ export class ShopController implements OnStart {
 	 * `AutomaticSize = Y` means the panel hugs the chest section; `capToViewport` supplies a pixel ceiling so a short
 	 * window scrolls nothing and a tall one is not stretched. That single change removes the empty space.
 	 *
-	 * Light paper throughout: `surfaceOpaqueTheme()` supplies every colour, and the only literals are the geometry
-	 * constants above.
+	 * **Charcoal throughout: `chunkyDarkTheme()` supplies every colour**, chrome included, and the only literals in this
+	 * method are the geometry constants above.
 	 */
 	private buildStore(parent: Instance): Frame {
 		const scope = Fusion.scoped(Fusion);
 		this.scope = scope;
 
-		const shell = Fusion.New(
-			scope,
-			"Frame",
-		)({
-			Name: "Store",
-			AnchorPoint: new Vector2(CENTRE, CENTRE),
-			Position: UDim2.fromScale(CENTRE, CENTRE),
-			Size: UDim2.fromOffset(STORE_MAX_WIDTH, 0),
-			AutomaticSize: Enum.AutomaticSize.Y,
-			BackgroundTransparency: 1,
-			BorderSizePixel: 0,
-			ZIndex: STORE_Z_INDEX,
-			Parent: parent,
+		// **The chunky chrome is one call now.** The container, the offset shadow plate, the face, the corner and the thick
+		// outline all come from `buildChunkyPanel`, so the store and the inventory cannot drift apart again - and the
+		// face colour is a neutral charcoal rather than the store's red, because the red already did its job on the tab
+		// that opened this sheet.
+		//
+		// **`autoHeight`, and the reason is a resolved circular size.** The face used to be a child at `fromScale(1, 1)`
+		// inside an `AutomaticSize.Y` container: the container waited for the child's height, the child asked for the
+		// container's, and the engine resolved it by leaving the face at its floor height - which clipped the purchase
+		// buttons at the bottom of the sheet. Auto-height on the container with content-driven sizing on the face is the
+		// shape that resolves, and it is what `capToViewport` is then applied to.
+		const panel = buildChunkyPanel({
+			name: "Store",
+			parent,
+			size: UDim2.fromOffset(STORE_MAX_WIDTH, 0),
+			autoHeight: true,
+			cornerRadius: SPACING.md,
+			// Not clipping, deliberately: every child is inset by `SHEET_INSET`, so the rounded corner has nothing to cut,
+			// and a sheet that visibly overflows is a bug somebody reports rather than one nobody ever sees.
+			clipsDescendants: false,
+			zIndex: STORE_Z_INDEX,
 		});
 
-		capToViewport(shell);
+		const surface = panel.surface;
+		capToViewport(panel.frame);
 
-		// The one shadow, a sibling of the sheet: a child cannot draw behind its own parent.
-		Fusion.New(
-			scope,
-			"Frame",
-		)({
-			Name: "Shadow",
-			Position: UDim2.fromOffset(SPACING.xs, SPACING.xs),
-			Size: UDim2.fromScale(1, 1),
-			BackgroundColor3: this.light.colors.shadow,
-			BackgroundTransparency: 0.8,
-			BorderSizePixel: 0,
-			Active: false,
-			ZIndex: STORE_Z_INDEX,
-			Parent: shell,
-		});
-
-		const sheet = Fusion.New(
-			scope,
-			"Frame",
-		)({
-			Name: "Sheet",
-			// **Height is 0 and driven by `AutomaticSize`, not 100% of the shell — this is the clipping fix.** A sheet at
-			// `fromScale(1, 1)` inside a shell that is itself `AutomaticSize.Y` is circular: the shell waits for the
-			// child's height, the child asks for the parent's. Roblox resolves it by leaving the sheet at its floor, so
-			// the content overflowed the sheet and `ClipsDescendants` cut the bottom band — the purchase buttons — off.
-			// Auto-height here makes the sheet report its real content height, and the shell follows it.
-			Size: new UDim2(1, 0, 0, 0),
-			AutomaticSize: Enum.AutomaticSize.Y,
-			BackgroundColor3: this.light.paint.panel.color,
-			BackgroundTransparency: this.light.paint.panel.transparency,
-			BorderSizePixel: 0,
-			// **Deliberately not clipping.** Every child is inset by `SHEET_INSET`, so the rounded corner has nothing to
-			// cut; leaving `ClipsDescendants` on would re-introduce silent amputation if the content ever outgrew the
-			// cap, and a panel that overflows visibly is a bug somebody reports rather than one they never see.
-			ClipsDescendants: false,
-			ZIndex: STORE_Z_INDEX + 1,
-			Parent: shell,
-		});
-
-		this.corners(scope, sheet, SPACING.md);
-
-		Fusion.New(
-			scope,
-			"UIStroke",
-		)({
-			Color: this.light.colors.border,
-			Thickness: HAIRLINE,
-			ApplyStrokeMode: Enum.ApplyStrokeMode.Border,
-			Parent: sheet,
-		});
-
-		// Level 0: the store's own vertical list. Header, tabs, content — in that order, nothing positioned by hand.
+		// Level 0: the store's own vertical list. Header, tabs, content - in that order, nothing positioned by hand.
 		Fusion.New(
 			scope,
 			"UIListLayout",
@@ -877,7 +907,7 @@ export class ShopController implements OnStart {
 			FillDirection: Enum.FillDirection.Vertical,
 			SortOrder: Enum.SortOrder.LayoutOrder,
 			Padding: new UDim(0, BAND_GAP),
-			Parent: sheet,
+			Parent: surface,
 		});
 
 		Fusion.New(
@@ -888,22 +918,22 @@ export class ShopController implements OnStart {
 			PaddingBottom: new UDim(0, SHEET_INSET),
 			PaddingLeft: new UDim(0, SHEET_INSET),
 			PaddingRight: new UDim(0, SHEET_INSET),
-			Parent: sheet,
+			Parent: surface,
 		});
 
-		this.buildHeader(scope, sheet);
-		this.buildContent(scope, sheet);
+		this.buildHeader(scope, surface);
+		this.buildContent(scope, surface);
 
 		// The status band: one line at the foot, where a refusal or a result appears. Part of the same vertical list,
 		// so it sits under the content rather than floating at a fixed offset.
 		this.statusLabel = this.text(
 			scope,
-			sheet,
+			surface,
 			"",
 			"caption",
 			"secondary",
 			4,
-			new UDim2(1, 0, 0, TYPOGRAPHY.caption.lineHeight + SPACING.xs),
+			new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight + SPACING.xs),
 			false,
 		);
 		this.statusLabel.TextXAlignment = Enum.TextXAlignment.Center;
@@ -918,7 +948,7 @@ export class ShopController implements OnStart {
 		// allowing policy. Applying the cached state here is what makes the two orders equivalent.
 		this.applyPolicy(this.policy);
 
-		return shell;
+		return panel.frame;
 	}
 
 	/** Header: title left, coin balance right, close at the far right. */
@@ -971,8 +1001,8 @@ export class ShopController implements OnStart {
 			Name: "Coins",
 			Size: new UDim2(0, 0, 0, COIN_SIZE + SPACING.md),
 			AutomaticSize: Enum.AutomaticSize.X,
-			BackgroundColor3: this.light.paint.trough.color,
-			BackgroundTransparency: this.light.paint.trough.transparency,
+			BackgroundColor3: this.theme.paint.trough.color,
+			BackgroundTransparency: this.theme.paint.trough.transparency,
 			BorderSizePixel: 0,
 			LayoutOrder: 3,
 			ZIndex: STORE_Z_INDEX + 2,
@@ -1013,13 +1043,13 @@ export class ShopController implements OnStart {
 		)({
 			Name: "Close",
 			Size: UDim2.fromOffset(HEADER_HEIGHT - SPACING.md, HEADER_HEIGHT - SPACING.md),
-			BackgroundColor3: this.light.paint.trough.color,
-			BackgroundTransparency: this.light.paint.trough.transparency,
+			BackgroundColor3: this.theme.paint.trough.color,
+			BackgroundTransparency: this.theme.paint.trough.transparency,
 			BorderSizePixel: 0,
 			AutoButtonColor: false,
 			Font: FONT,
-			TextSize: TYPOGRAPHY.h6.size,
-			TextColor3: this.light.colors.textSecondary,
+			TextSize: PANEL_TYPE.h6.size,
+			TextColor3: this.theme.colors.textSecondary,
 			Text: "X",
 			LayoutOrder: 4,
 			ZIndex: STORE_Z_INDEX + 2,
@@ -1032,11 +1062,15 @@ export class ShopController implements OnStart {
 			scope,
 			"UIStroke",
 		)({
-			Color: this.light.colors.border,
+			Color: this.theme.colors.border,
 			Thickness: HAIRLINE,
 			ApplyStrokeMode: Enum.ApplyStrokeMode.Border,
 			Parent: close,
 		});
+
+		// The "X" is the button's own `Text`, so it needs the glyph outline directly - the border `UIStroke` above strokes
+		// the button's box, not its glyphs, and one instance cannot do both jobs.
+		outlineText(close);
 
 		attachPressFeedback(close);
 		attachClickSound(close);
@@ -1190,8 +1224,8 @@ export class ShopController implements OnStart {
 			// **A card, not a bare stack.** Two sections floating on one sheet with no boundary read as one long list
 			// rather than as two things you can buy, and the player has to infer where one product ends. The outline is
 			// the section's own button colour, so the box and the control that buys from it are visibly the same offer.
-			BackgroundColor3: this.light.paint.card.color,
-			BackgroundTransparency: this.light.paint.card.transparency,
+			BackgroundColor3: this.theme.paint.card.color,
+			BackgroundTransparency: this.theme.paint.card.transparency,
 			BorderSizePixel: 0,
 			LayoutOrder: order,
 			ZIndex: STORE_Z_INDEX + 2,
@@ -1204,7 +1238,7 @@ export class ShopController implements OnStart {
 			scope,
 			"UIStroke",
 		)({
-			Color: this.light.colors.accent,
+			Color: this.theme.colors.accent,
 			Thickness: SECTION_STROKE_THICKNESS,
 			ApplyStrokeMode: Enum.ApplyStrokeMode.Border,
 			Parent: section,
@@ -1276,8 +1310,8 @@ export class ShopController implements OnStart {
 			// Same card treatment as the coin section, in `premium` rather than `accent`: two boxes outlined in one
 			// colour would look like one product split in half, and the whole point of the premium tint is that the paid
 			// offer is identifiable before the price is read.
-			BackgroundColor3: this.light.paint.card.color,
-			BackgroundTransparency: this.light.paint.card.transparency,
+			BackgroundColor3: this.theme.paint.card.color,
+			BackgroundTransparency: this.theme.paint.card.transparency,
 			BorderSizePixel: 0,
 			LayoutOrder: order,
 			ZIndex: STORE_Z_INDEX + 2,
@@ -1290,7 +1324,7 @@ export class ShopController implements OnStart {
 			scope,
 			"UIStroke",
 		)({
-			Color: this.light.colors.premium,
+			Color: this.theme.colors.premium,
 			Thickness: SECTION_STROKE_THICKNESS,
 			ApplyStrokeMode: Enum.ApplyStrokeMode.Border,
 			Parent: section,
@@ -1351,7 +1385,7 @@ export class ShopController implements OnStart {
 			Name: "RobuxBadge",
 			Size: new UDim2(0, 0, 0, COIN_SIZE + SPACING.xs),
 			AutomaticSize: Enum.AutomaticSize.X,
-			BackgroundColor3: this.light.colors.premium,
+			BackgroundColor3: this.theme.colors.premium,
 			BackgroundTransparency: 0.85,
 			BorderSizePixel: 0,
 			LayoutOrder: 2,
@@ -1371,7 +1405,7 @@ export class ShopController implements OnStart {
 		});
 
 		const badgeLabel = this.text(scope, badge, "R$", "caption", "primary", 1, new UDim2(0, 0, 1, 0), true);
-		badgeLabel.TextColor3 = this.light.colors.premium;
+		badgeLabel.TextColor3 = this.theme.colors.premium;
 		badgeLabel.TextYAlignment = Enum.TextYAlignment.Center;
 
 		this.buildPreviewRow(scope, section, 2, robuxChestOdds());
@@ -1460,7 +1494,7 @@ export class ShopController implements OnStart {
 		)({
 			Name: `Premium${slot}`,
 			Size: new UDim2(0.5, -SPACING.xs / 2, 1, 0),
-			BackgroundColor3: this.light.colors.premium,
+			BackgroundColor3: this.theme.colors.premium,
 			BorderSizePixel: 0,
 			AutoButtonColor: false,
 			Text: "",
@@ -1492,10 +1526,10 @@ export class ShopController implements OnStart {
 			"body1",
 			"primary",
 			1,
-			new UDim2(1, 0, 0, TYPOGRAPHY.body1.size),
+			new UDim2(1, 0, 0, PANEL_TYPE.body1.size),
 			false,
 		);
-		top.TextColor3 = this.light.colors.onAccent;
+		top.TextColor3 = this.theme.colors.onAccent;
 		top.TextXAlignment = Enum.TextXAlignment.Center;
 
 		const priceLabel = this.text(
@@ -1505,10 +1539,10 @@ export class ShopController implements OnStart {
 			"body2",
 			"primary",
 			2,
-			new UDim2(1, 0, 0, TYPOGRAPHY.body2.size),
+			new UDim2(1, 0, 0, PANEL_TYPE.body2.size),
 			false,
 		);
-		priceLabel.TextColor3 = this.light.colors.onAccent;
+		priceLabel.TextColor3 = this.theme.colors.onAccent;
 		priceLabel.TextXAlignment = Enum.TextXAlignment.Center;
 
 		// **The gate is checked inside the handler, not only by the styling.** A state that changed between mount and
@@ -1565,8 +1599,8 @@ export class ShopController implements OnStart {
 		)({
 			Name: "ChestPreview",
 			Size: UDim2.fromOffset(CHEST_SQUARE, CHEST_SQUARE),
-			BackgroundColor3: this.light.paint.trough.color,
-			BackgroundTransparency: this.light.paint.trough.transparency,
+			BackgroundColor3: this.theme.paint.trough.color,
+			BackgroundTransparency: this.theme.paint.trough.transparency,
 			BorderSizePixel: 0,
 			LayoutOrder: 1,
 			ZIndex: STORE_Z_INDEX + 2,
@@ -1579,7 +1613,7 @@ export class ShopController implements OnStart {
 			scope,
 			"UIStroke",
 		)({
-			Color: this.light.colors.border,
+			Color: this.theme.colors.border,
 			Thickness: HAIRLINE,
 			ApplyStrokeMode: Enum.ApplyStrokeMode.Border,
 			Parent: preview,
@@ -1632,7 +1666,7 @@ export class ShopController implements OnStart {
 			"Frame",
 		)({
 			Name: `Stat_${rarity}`,
-			Size: new UDim2(1, 0, 0, TYPOGRAPHY.body2.size + SPACING.xs),
+			Size: new UDim2(1, 0, 0, PANEL_TYPE.body2.size + SPACING.xs),
 			BackgroundTransparency: 1,
 			LayoutOrder: order,
 			ZIndex: STORE_Z_INDEX + 2,
@@ -1646,7 +1680,7 @@ export class ShopController implements OnStart {
 		value.Position = UDim2.fromScale(0.7, 0);
 		value.TextXAlignment = Enum.TextXAlignment.Right;
 		value.TextYAlignment = Enum.TextYAlignment.Center;
-		value.TextColor3 = this.light.colors.rarity[rarity];
+		value.TextColor3 = this.theme.colors.rarity[rarity];
 	}
 
 	/** `Prize Preview` on the left, a `View All >` placeholder on the right. */
@@ -1704,8 +1738,8 @@ export class ShopController implements OnStart {
 		)({
 			Name: "PrizeShelf",
 			Size: new UDim2(1, 0, 0, SHELF_HEIGHT),
-			BackgroundColor3: this.light.paint.surface.color,
-			BackgroundTransparency: this.light.paint.surface.transparency,
+			BackgroundColor3: this.theme.paint.surface.color,
+			BackgroundTransparency: this.theme.paint.surface.transparency,
 			BorderSizePixel: 0,
 			ClipsDescendants: true,
 			ScrollBarThickness: 0,
@@ -1780,9 +1814,9 @@ export class ShopController implements OnStart {
 			"Frame",
 		)({
 			Name: `Prize_${ballId}_${order}`,
-			Size: UDim2.fromOffset(CARD_WIDTH, CARD_ART + TYPOGRAPHY.caption.lineHeight + SPACING.xs * 2),
-			BackgroundColor3: this.light.paint.card.color,
-			BackgroundTransparency: this.light.paint.card.transparency,
+			Size: UDim2.fromOffset(CARD_WIDTH, CARD_ART + PANEL_TYPE.caption.lineHeight + SPACING.xs * 2),
+			BackgroundColor3: this.theme.paint.card.color,
+			BackgroundTransparency: this.theme.paint.card.transparency,
 			BorderSizePixel: 0,
 			LayoutOrder: order,
 			ZIndex: STORE_Z_INDEX + 2,
@@ -1795,7 +1829,7 @@ export class ShopController implements OnStart {
 			scope,
 			"UIStroke",
 		)({
-			Color: this.light.colors.rarity[rarity],
+			Color: this.theme.colors.rarity[rarity],
 			Thickness: HAIRLINE,
 			ApplyStrokeMode: Enum.ApplyStrokeMode.Border,
 			Parent: card,
@@ -1808,7 +1842,7 @@ export class ShopController implements OnStart {
 			Name: "Art",
 			Size: new UDim2(1, -SPACING.xs * 2, 0, CARD_ART),
 			Position: UDim2.fromOffset(SPACING.xs, SPACING.xs),
-			BackgroundColor3: this.light.colors.rarity[rarity],
+			BackgroundColor3: this.theme.colors.rarity[rarity],
 			BackgroundTransparency: 0.84,
 			BorderSizePixel: 0,
 			ZIndex: STORE_Z_INDEX + 3,
@@ -1825,7 +1859,7 @@ export class ShopController implements OnStart {
 			AnchorPoint: new Vector2(CENTRE, CENTRE),
 			Position: UDim2.fromScale(CENTRE, CENTRE),
 			Size: UDim2.fromOffset(SWATCH, SWATCH),
-			BackgroundColor3: this.light.colors.rarity[rarity],
+			BackgroundColor3: this.theme.colors.rarity[rarity],
 			BorderSizePixel: 0,
 			ZIndex: STORE_Z_INDEX + 4,
 			Parent: art,
@@ -1840,7 +1874,7 @@ export class ShopController implements OnStart {
 			"caption",
 			"primary",
 			2,
-			new UDim2(1, -SPACING.xs * 2, 0, TYPOGRAPHY.caption.lineHeight),
+			new UDim2(1, -SPACING.xs * 2, 0, PANEL_TYPE.caption.lineHeight),
 			false,
 		);
 		name.Position = UDim2.fromOffset(SPACING.xs, CARD_ART + SPACING.xs);
@@ -1905,7 +1939,7 @@ export class ShopController implements OnStart {
 		)({
 			Name: `Open${count}`,
 			Size: new UDim2(0.5, -SPACING.xs, 1, 0),
-			BackgroundColor3: this.light.colors.accent,
+			BackgroundColor3: this.theme.colors.accent,
 			BackgroundTransparency: 0,
 			BorderSizePixel: 0,
 			AutoButtonColor: false,
@@ -1941,10 +1975,10 @@ export class ShopController implements OnStart {
 			"body1",
 			"primary",
 			1,
-			new UDim2(1, 0, 0, TYPOGRAPHY.body1.size),
+			new UDim2(1, 0, 0, PANEL_TYPE.body1.size),
 			false,
 		);
-		top.TextColor3 = this.light.colors.onAccent;
+		top.TextColor3 = this.theme.colors.onAccent;
 		top.TextXAlignment = Enum.TextXAlignment.Center;
 
 		const priceRow = Fusion.New(
@@ -1972,7 +2006,7 @@ export class ShopController implements OnStart {
 		});
 
 		const amount = this.text(scope, priceRow, tostring(price), "body2", "primary", 1, new UDim2(0, 0, 1, 0), true);
-		amount.TextColor3 = this.light.colors.onAccent;
+		amount.TextColor3 = this.theme.colors.onAccent;
 		amount.TextYAlignment = Enum.TextYAlignment.Center;
 
 		this.coinDot(scope, priceRow, COIN_SIZE, 2);
@@ -1988,7 +2022,7 @@ export class ShopController implements OnStart {
 		)({
 			Name: "Coin",
 			Size: UDim2.fromOffset(size, size),
-			BackgroundColor3: this.light.colors.coin,
+			BackgroundColor3: this.theme.colors.coin,
 			BorderSizePixel: 0,
 			LayoutOrder: order,
 			ZIndex: STORE_Z_INDEX + 4,
@@ -2011,10 +2045,11 @@ export class ShopController implements OnStart {
 	/**
 	 * A plain `TextLabel`, built directly rather than through big-ui.
 	 *
-	 * See the class comment: big-ui's `Text` paints from the dark palette and the light direction never reaches it, so
-	 * every label it produced was invisible on paper. This builder sets font, size and colour from `scale.ts` and
-	 * `surfaceOpaqueTheme()` with nothing in between — and `autoWidth` says the caller wants the label to shrink-wrap,
-	 * which a fixed-size label cannot do.
+	 * See the class comment: big-ui's `Text` takes its ink from whatever palette the HUD pushed, not from the sheet's own
+	 * direction, and it never reaches this one - so every label it produced on the old paper sheet rendered in the HUD's
+	 * white and disappeared. The colour clash is gone now that the sheet is dark, but the hydration problem is not: this
+	 * builder sets font, size and colour from `scale.ts` and the sheet's `Theme` with nothing in between, and `autoWidth`
+	 * says the caller wants the label to shrink-wrap, which a fixed-size label cannot do.
 	 */
 	private text(
 		scope: Fusion.Scope<unknown>,
@@ -2036,13 +2071,13 @@ export class ShopController implements OnStart {
 			BackgroundTransparency: 1,
 			BorderSizePixel: 0,
 			Font: FONT,
-			TextSize: TYPOGRAPHY[variant].size,
+			TextSize: PANEL_TYPE[variant].size,
 			TextColor3:
 				colour === "primary"
-					? this.light.colors.textPrimary
+					? this.theme.colors.textPrimary
 					: colour === "secondary"
-						? this.light.colors.textSecondary
-						: this.light.colors.textDisabled,
+						? this.theme.colors.textSecondary
+						: this.theme.colors.textDisabled,
 			TextXAlignment: Enum.TextXAlignment.Left,
 			TextYAlignment: Enum.TextYAlignment.Top,
 			TextTruncate: Enum.TextTruncate.AtEnd,
@@ -2051,6 +2086,10 @@ export class ShopController implements OnStart {
 			ZIndex: STORE_Z_INDEX + 3,
 			Parent: parent,
 		});
+
+		// Every label the panel builds through this factory gets the black glyph outline, so the sheets read the same on any
+		// surface they are painted on. The handful of labels built by hand are outlined at their own creation sites.
+		outlineText(label);
 
 		return label;
 	}
@@ -2121,14 +2160,14 @@ export class ShopController implements OnStart {
 
 		if (typeIs(coins, "number")) {
 			label.Text = tostring(coins);
-			label.TextColor3 = this.light.colors.textPrimary;
+			label.TextColor3 = this.theme.colors.textPrimary;
 			return;
 		}
 
 		// Three situations share "no number": still loading, locked elsewhere, never loaded. Naming them is the
 		// difference between a store that looks broken and one that says why it cannot act.
 		label.Text = state === "readonly" ? "read-only" : state === "loading" ? "..." : "0";
-		label.TextColor3 = this.light.colors.textSecondary;
+		label.TextColor3 = this.theme.colors.textSecondary;
 	}
 
 	/**
@@ -2189,20 +2228,20 @@ export class ShopController implements OnStart {
 
 	/** One ball in the `Balls` grid. Clicking inspects it; it does not choose it for fusion. */
 	private buildBallCard(parent: Instance, ball: OwnedBall, order: number): TextButton {
-		const tint = this.light.colors.rarity[ball.rarity];
+		const tint = this.theme.colors.rarity[ball.rarity];
 		const selected = ball.id === this.inspectBallId;
-		const artHeight = INVENTORY_CARD_HEIGHT - TYPOGRAPHY.caption.lineHeight - SPACING.xs * 2;
+		const artHeight = INVENTORY_CARD_HEIGHT - PANEL_TYPE.caption.lineHeight - SPACING.xs * 2;
 
 		const card = new Instance("TextButton");
 		card.Name = `Ball_${ball.id}`;
 		card.Size = UDim2.fromOffset(INVENTORY_CARD_WIDTH, INVENTORY_CARD_HEIGHT);
-		card.BackgroundColor3 = selected ? this.light.colors.accent : this.light.paint.card.color;
-		card.BackgroundTransparency = selected ? 0 : this.light.paint.card.transparency;
+		card.BackgroundColor3 = selected ? this.theme.colors.accent : this.theme.paint.card.color;
+		card.BackgroundTransparency = selected ? 0 : this.theme.paint.card.transparency;
 		card.BorderSizePixel = 0;
 		card.AutoButtonColor = false;
 		card.Font = FONT;
-		card.TextSize = TYPOGRAPHY.caption.size;
-		card.TextColor3 = selected ? this.light.colors.onAccent : this.light.colors.textPrimary;
+		card.TextSize = PANEL_TYPE.caption.size;
+		card.TextColor3 = selected ? this.theme.colors.onAccent : this.theme.colors.textPrimary;
 		card.Text = displayName(ball.id);
 		card.TextTruncate = Enum.TextTruncate.AtEnd;
 		card.TextYAlignment = Enum.TextYAlignment.Bottom;
@@ -2219,6 +2258,10 @@ export class ShopController implements OnStart {
 		stroke.Thickness = selected ? 2 : HAIRLINE;
 		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
 		stroke.Parent = card;
+
+		// The card's name is its own `Text`, so the glyph outline is a second stroke on the same button: the one above
+		// strokes the card's border, this one strokes the letters.
+		outlineText(card);
 
 		const art = new Instance("Frame");
 		art.Name = "Art";
@@ -2255,12 +2298,14 @@ export class ShopController implements OnStart {
 		countLabel.Size = UDim2.fromOffset(SPACING.xl, SPACING.lg);
 		countLabel.BackgroundTransparency = 1;
 		countLabel.Font = FONT;
-		countLabel.TextSize = TYPOGRAPHY.caption.size;
-		countLabel.TextColor3 = this.light.colors.textPrimary;
+		countLabel.TextSize = PANEL_TYPE.caption.size;
+		countLabel.TextColor3 = this.theme.colors.textPrimary;
 		countLabel.TextXAlignment = Enum.TextXAlignment.Right;
 		countLabel.Text = `x${ball.count}`;
 		countLabel.ZIndex = STORE_Z_INDEX + 6;
 		countLabel.Parent = art;
+
+		outlineText(countLabel);
 
 		attachPressFeedback(card);
 		attachClickSound(card);
@@ -2279,15 +2324,15 @@ export class ShopController implements OnStart {
 	 * choice followed by one action, and a list leaves room for the count and the resulting tier beside the name.
 	 */
 	private buildFusionRow(parent: Instance, ball: OwnedBall, order: number): TextButton {
-		const tint = this.light.colors.rarity[ball.rarity];
+		const tint = this.theme.colors.rarity[ball.rarity];
 		const selected = ball.id === this.fusionMaterialId;
 		const rule = FUSION_TABLE[ball.rarity];
 
 		const row = new Instance("TextButton");
 		row.Name = `Material_${ball.id}`;
 		row.Size = new UDim2(1, 0, 0, FUSION_ROW_HEIGHT);
-		row.BackgroundColor3 = selected ? this.light.colors.accent : this.light.paint.card.color;
-		row.BackgroundTransparency = selected ? 0 : this.light.paint.card.transparency;
+		row.BackgroundColor3 = selected ? this.theme.colors.accent : this.theme.paint.card.color;
+		row.BackgroundTransparency = selected ? 0 : this.theme.paint.card.transparency;
 		row.BorderSizePixel = 0;
 		row.AutoButtonColor = false;
 		row.Text = "";
@@ -2325,13 +2370,15 @@ export class ShopController implements OnStart {
 		nameLabel.Size = new UDim2(1, -(SWATCH + SPACING.xl), 1, 0);
 		nameLabel.BackgroundTransparency = 1;
 		nameLabel.Font = FONT;
-		nameLabel.TextSize = TYPOGRAPHY.body2.size;
-		nameLabel.TextColor3 = selected ? this.light.colors.onAccent : this.light.colors.textPrimary;
+		nameLabel.TextSize = PANEL_TYPE.body2.size;
+		nameLabel.TextColor3 = selected ? this.theme.colors.onAccent : this.theme.colors.textPrimary;
 		nameLabel.TextXAlignment = Enum.TextXAlignment.Left;
 		nameLabel.TextTruncate = Enum.TextTruncate.AtEnd;
 		nameLabel.Text = rule === undefined ? `${displayName(ball.id)} (top tier)` : displayName(ball.id);
 		nameLabel.ZIndex = STORE_Z_INDEX + 4;
 		nameLabel.Parent = row;
+
+		outlineText(nameLabel);
 
 		const countLabel = new Instance("TextLabel");
 		countLabel.Name = "Count";
@@ -2340,12 +2387,14 @@ export class ShopController implements OnStart {
 		countLabel.Size = UDim2.fromOffset(SPACING.xl, FUSION_ROW_HEIGHT);
 		countLabel.BackgroundTransparency = 1;
 		countLabel.Font = FONT;
-		countLabel.TextSize = TYPOGRAPHY.caption.size;
-		countLabel.TextColor3 = selected ? this.light.colors.onAccent : this.light.colors.textSecondary;
+		countLabel.TextSize = PANEL_TYPE.caption.size;
+		countLabel.TextColor3 = selected ? this.theme.colors.onAccent : this.theme.colors.textSecondary;
 		countLabel.TextXAlignment = Enum.TextXAlignment.Right;
 		countLabel.Text = `x${ball.count}`;
 		countLabel.ZIndex = STORE_Z_INDEX + 4;
 		countLabel.Parent = row;
+
+		outlineText(countLabel);
 
 		attachPressFeedback(row);
 		attachClickSound(row);
@@ -2367,11 +2416,11 @@ export class ShopController implements OnStart {
 		const ball = this.ownedBall(this.inspectBallId);
 		if (ball === undefined) {
 			if (this.detailBall !== undefined) {
-				this.detailBall.BackgroundColor3 = this.light.colors.textDisabled;
+				this.detailBall.BackgroundColor3 = this.theme.colors.textDisabled;
 			}
 
 			label.Text = "Nothing selected";
-			label.TextColor3 = this.light.colors.textSecondary;
+			label.TextColor3 = this.theme.colors.textSecondary;
 
 			if (this.detailRarity !== undefined) {
 				this.detailRarity.Text = "";
@@ -2388,14 +2437,14 @@ export class ShopController implements OnStart {
 			return;
 		}
 
-		const tint = this.light.colors.rarity[ball.rarity];
+		const tint = this.theme.colors.rarity[ball.rarity];
 
 		if (this.detailBall !== undefined) {
 			this.detailBall.BackgroundColor3 = tint;
 		}
 
 		label.Text = displayName(ball.id);
-		label.TextColor3 = this.light.colors.textPrimary;
+		label.TextColor3 = this.theme.colors.textPrimary;
 
 		if (this.detailRarity !== undefined) {
 			this.detailRarity.Text = tierName(ball.rarity);
@@ -2404,12 +2453,12 @@ export class ShopController implements OnStart {
 
 		if (this.detailCount !== undefined) {
 			this.detailCount.Text = `Owned: ${ball.count}`;
-			this.detailCount.TextColor3 = this.light.colors.textSecondary;
+			this.detailCount.TextColor3 = this.theme.colors.textSecondary;
 		}
 
 		if (this.detailHint !== undefined) {
 			this.detailHint.Text = fusionHint(ball);
-			this.detailHint.TextColor3 = this.light.colors.textSecondary;
+			this.detailHint.TextColor3 = this.theme.colors.textSecondary;
 		}
 	}
 
@@ -2424,7 +2473,7 @@ export class ShopController implements OnStart {
 		if (ball === undefined) {
 			if (this.fusionMaterialLabel !== undefined) {
 				this.fusionMaterialLabel.Text = "Select a ball";
-				this.fusionMaterialLabel.TextColor3 = this.light.colors.textSecondary;
+				this.fusionMaterialLabel.TextColor3 = this.theme.colors.textSecondary;
 			}
 
 			if (this.fusionOddsLabel !== undefined) {
@@ -2434,7 +2483,7 @@ export class ShopController implements OnStart {
 					ownedBallsFrom(this.ownedAttribute()).size() === 0
 						? INVENTORY_FUSION_EMPTY
 						: `Fusing costs ${FUSION_INPUT_COUNT} of one ball, win or lose.`;
-				this.fusionOddsLabel.TextColor3 = this.light.colors.textSecondary;
+				this.fusionOddsLabel.TextColor3 = this.theme.colors.textSecondary;
 			}
 
 			button.Text = "Select a ball";
@@ -2443,7 +2492,7 @@ export class ShopController implements OnStart {
 			return;
 		}
 
-		const tint = this.light.colors.rarity[ball.rarity];
+		const tint = this.theme.colors.rarity[ball.rarity];
 		const rule = FUSION_TABLE[ball.rarity];
 
 		if (this.fusionMaterialLabel !== undefined) {
@@ -2454,10 +2503,10 @@ export class ShopController implements OnStart {
 		if (this.fusionOddsLabel !== undefined) {
 			if (rule === undefined) {
 				this.fusionOddsLabel.Text = "Legendary is the top tier. Nothing is above it.";
-				this.fusionOddsLabel.TextColor3 = this.light.colors.textSecondary;
+				this.fusionOddsLabel.TextColor3 = this.theme.colors.textSecondary;
 			} else {
 				this.fusionOddsLabel.Text = `One ${tierName(rule.nextRarity)} on a ${rule.successPercent}% roll. Both are spent either way.`;
-				this.fusionOddsLabel.TextColor3 = this.light.colors.textSecondary;
+				this.fusionOddsLabel.TextColor3 = this.theme.colors.textSecondary;
 			}
 		}
 
@@ -2744,32 +2793,62 @@ export class ShopController implements OnStart {
 	 * supplies the two tabs and their selected/unselected styling.
 	 */
 	private buildInventory(parent: Instance): Frame {
-		const light = this.light;
 		const scope = Fusion.scoped(Fusion);
 		this.inventoryScope = scope;
 
-		const parts = Panel({ theme: light, parent, size: INVENTORY_PANEL_SIZE });
+		// **The same chunky chrome as the store**, through the same builder: neutral charcoal face, offset shadow plate,
+		// thick outline. The sheet is a fixed size here rather than content-driven, so `autoHeight` stays off.
+		const parts = buildChunkyPanel({
+			name: "Inventory",
+			parent,
+			size: INVENTORY_PANEL_SIZE,
+			// The row scrolls, so this one *does* clip - the opposite of the store, which lets an overgrown sheet show.
+			clipsDescendants: true,
+		});
 		const surface = parts.surface;
 
 		this.inventoryFrame = parts.frame;
 		capToViewport(parts.frame);
 
+		// The bands below stack by `LayoutOrder`, so the face needs the list `Panel` used to bring with it. Reproduced
+		// here rather than built into `buildChunkyPanel`, because the store brings its own list with its own padding and
+		// a builder that supplied one would give the store two.
+		Fusion.New(
+			scope,
+			"UIListLayout",
+		)({
+			FillDirection: Enum.FillDirection.Vertical,
+			SortOrder: Enum.SortOrder.LayoutOrder,
+			HorizontalAlignment: Enum.HorizontalAlignment.Center,
+			Parent: surface,
+		});
+
 		PanelHeader({
-			theme: light,
+			theme: this.theme,
 			parent: surface,
 			title: "Inventory",
 			onClose: () => this.setOpen("none"),
+			typeScale: PANEL_TYPE,
+			outline: true,
 		});
 
 		TabStrip({
-			theme: light,
+			theme: this.theme,
 			parent: surface,
 			tabs: INVENTORY_TABS,
 			selected: this.inventoryTab,
 			onSelect: (tab) => this.selectInventoryTab(tab === "Fusion" ? "Fusion" : "Balls"),
+			typeScale: PANEL_TYPE,
+			outline: true,
 		});
 
-		this.inventoryStatus = PanelFooter({ theme: light, parent: surface, text: INVENTORY_FOOTER });
+		this.inventoryStatus = PanelFooter({
+			theme: this.theme,
+			parent: surface,
+			text: INVENTORY_FOOTER,
+			typeScale: PANEL_TYPE,
+			outline: true,
+		});
 
 		const row = Fusion.New(
 			scope,
@@ -2837,12 +2916,12 @@ export class ShopController implements OnStart {
 		)({
 			Name: "Collection",
 			Size: new UDim2(INVENTORY_COLLECTION_FRACTION, -STORE_COLUMN_GAP / 2, 1, 0),
-			BackgroundColor3: this.light.paint.surface.color,
-			BackgroundTransparency: this.light.paint.surface.transparency,
+			BackgroundColor3: this.theme.paint.surface.color,
+			BackgroundTransparency: this.theme.paint.surface.transparency,
 			BorderSizePixel: 0,
 			ClipsDescendants: true,
 			ScrollBarThickness: SPACING.xs,
-			ScrollBarImageColor3: this.light.colors.border,
+			ScrollBarImageColor3: this.theme.colors.border,
 			ScrollingDirection: Enum.ScrollingDirection.Y,
 			CanvasSize: UDim2.fromOffset(0, 0),
 			AutomaticCanvasSize: Enum.AutomaticSize.Y,
@@ -2886,8 +2965,8 @@ export class ShopController implements OnStart {
 		)({
 			Name: "Preview",
 			Size: new UDim2(1, 0, 0, INVENTORY_PREVIEW_HEIGHT),
-			BackgroundColor3: this.light.paint.trough.color,
-			BackgroundTransparency: this.light.paint.trough.transparency,
+			BackgroundColor3: this.theme.paint.trough.color,
+			BackgroundTransparency: this.theme.paint.trough.transparency,
 			BorderSizePixel: 0,
 			LayoutOrder: 1,
 			ZIndex: STORE_Z_INDEX,
@@ -2904,7 +2983,7 @@ export class ShopController implements OnStart {
 			AnchorPoint: new Vector2(CENTRE, CENTRE),
 			Position: UDim2.fromScale(CENTRE, CENTRE),
 			Size: UDim2.fromOffset(INVENTORY_PREVIEW_BALL, INVENTORY_PREVIEW_BALL),
-			BackgroundColor3: this.light.colors.textDisabled,
+			BackgroundColor3: this.theme.colors.textDisabled,
 			BorderSizePixel: 0,
 			ZIndex: STORE_Z_INDEX + 1,
 			Parent: this.detailPreview,
@@ -2920,7 +2999,7 @@ export class ShopController implements OnStart {
 			"h6",
 			"primary",
 			2,
-			new UDim2(1, 0, 0, TYPOGRAPHY.h6.size),
+			new UDim2(1, 0, 0, PANEL_TYPE.h6.size),
 			false,
 		);
 		this.detailRarity = this.text(
@@ -2930,7 +3009,7 @@ export class ShopController implements OnStart {
 			"body2",
 			"secondary",
 			3,
-			new UDim2(1, 0, 0, TYPOGRAPHY.body2.size),
+			new UDim2(1, 0, 0, PANEL_TYPE.body2.size),
 			false,
 		);
 		this.detailCount = this.text(
@@ -2940,7 +3019,7 @@ export class ShopController implements OnStart {
 			"body2",
 			"secondary",
 			4,
-			new UDim2(1, 0, 0, TYPOGRAPHY.body2.size),
+			new UDim2(1, 0, 0, PANEL_TYPE.body2.size),
 			false,
 		);
 		this.detailHint = this.text(
@@ -2950,7 +3029,7 @@ export class ShopController implements OnStart {
 			"caption",
 			"secondary",
 			5,
-			new UDim2(1, 0, 0, TYPOGRAPHY.caption.lineHeight * 3),
+			new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight * 3),
 			false,
 		);
 		this.detailHint.TextWrapped = true;
@@ -2979,12 +3058,12 @@ export class ShopController implements OnStart {
 		)({
 			Name: "Materials",
 			Size: new UDim2(INVENTORY_COLLECTION_FRACTION, -STORE_COLUMN_GAP / 2, 1, 0),
-			BackgroundColor3: this.light.paint.surface.color,
-			BackgroundTransparency: this.light.paint.surface.transparency,
+			BackgroundColor3: this.theme.paint.surface.color,
+			BackgroundTransparency: this.theme.paint.surface.transparency,
 			BorderSizePixel: 0,
 			ClipsDescendants: true,
 			ScrollBarThickness: SPACING.xs,
-			ScrollBarImageColor3: this.light.colors.border,
+			ScrollBarImageColor3: this.theme.colors.border,
 			ScrollingDirection: Enum.ScrollingDirection.Y,
 			CanvasSize: UDim2.fromOffset(0, 0),
 			AutomaticCanvasSize: Enum.AutomaticSize.Y,
@@ -3029,7 +3108,7 @@ export class ShopController implements OnStart {
 			"h6",
 			"primary",
 			1,
-			new UDim2(1, 0, 0, TYPOGRAPHY.h6.size),
+			new UDim2(1, 0, 0, PANEL_TYPE.h6.size),
 			false,
 		);
 
@@ -3040,7 +3119,7 @@ export class ShopController implements OnStart {
 			"body2",
 			"secondary",
 			2,
-			new UDim2(1, 0, 0, TYPOGRAPHY.body2.size * 2),
+			new UDim2(1, 0, 0, PANEL_TYPE.body2.size * 2),
 			false,
 		);
 		this.fusionOddsLabel.TextWrapped = true;
@@ -3051,12 +3130,12 @@ export class ShopController implements OnStart {
 		)({
 			Name: "Fuse",
 			Size: new UDim2(1, 0, 0, BUTTON_ROW_HEIGHT),
-			BackgroundColor3: this.light.colors.accent,
+			BackgroundColor3: this.theme.colors.accent,
 			BorderSizePixel: 0,
 			AutoButtonColor: false,
 			Font: FONT,
-			TextSize: TYPOGRAPHY.button.size,
-			TextColor3: this.light.colors.onAccent,
+			TextSize: PANEL_TYPE.button.size,
+			TextColor3: this.theme.colors.onAccent,
 			Text: "Select a ball",
 			LayoutOrder: 3,
 			ZIndex: STORE_Z_INDEX + 1,
@@ -3064,6 +3143,7 @@ export class ShopController implements OnStart {
 		});
 
 		this.corners(factsScope, this.fusionButton, SPACING.sm);
+		outlineText(this.fusionButton);
 		attachPressFeedback(this.fusionButton);
 		attachClickSound(this.fusionButton);
 		this.fusionButton.Activated.Connect(() => this.pressFusion());

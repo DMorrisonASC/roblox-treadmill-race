@@ -1,4 +1,5 @@
-import { SPACING, TYPOGRAPHY, FONT } from "./scale";
+import { SPACING, TYPOGRAPHY, FONT, Typography } from "./scale";
+import { outlineText } from "./text";
 import { Theme } from "./theme";
 import { attachPressFeedback } from "./press";
 import { attachClickSound } from "./sounds";
@@ -22,6 +23,15 @@ export interface TabStripOptions {
 	tabs: Array<string>;
 	selected: string;
 	onSelect: (tab: string) => void;
+	/**
+	 * Overrides `TYPOGRAPHY` for the tab labels, and outlines them in black when set.
+	 *
+	 * Same pair of optional decisions `PanelHeader` takes, and for the same reason: the strip's only consumer is the
+	 * sheet, which scales its type one step up and outlines every label - a strip that kept the generic scale would be the
+	 * one row of text on the sheet that did not match.
+	 */
+	typeScale?: Typography;
+	outline?: boolean;
 }
 
 /** The strip container plus its buttons, so a caller can restyle or read them if it ever needs to. */
@@ -52,6 +62,7 @@ export interface TabStripParts {
  */
 export function TabStrip(options: TabStripOptions): TabStripParts {
 	const { theme, parent, tabs, selected, onSelect } = options;
+	const scale = options.typeScale ?? TYPOGRAPHY;
 
 	const frame = new Instance("Frame");
 	frame.Name = "Tabs";
@@ -105,7 +116,7 @@ export function TabStrip(options: TabStripOptions): TabStripParts {
 		button.BorderSizePixel = 0;
 		button.AutoButtonColor = false;
 		button.Font = FONT;
-		button.TextSize = TYPOGRAPHY.body2.size;
+		button.TextSize = scale.body2.size;
 		button.Text = name;
 		button.LayoutOrder = order;
 		button.ZIndex = TAB_Z_INDEX;
@@ -120,6 +131,10 @@ export function TabStrip(options: TabStripOptions): TabStripParts {
 		const corner = new Instance("UICorner");
 		corner.CornerRadius = new UDim(0, TAB_CORNER_RADIUS);
 		corner.Parent = button;
+
+		if (options.outline === true) {
+			outlineText(button);
+		}
 
 		attachPressFeedback(button);
 		// Every tab in every strip: `TabStrip` is the only place a tab button is built, so this covers the inventory's

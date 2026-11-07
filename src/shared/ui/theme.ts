@@ -364,6 +364,82 @@ export function surfaceOpaqueTheme(): Theme {
 	};
 }
 
+/**
+ * The chunky direction: neutral charcoal surfaces and pale ink, for the sheet the `buildChunkyPanel` chrome draws.
+ *
+ * ## Why a third direction exists
+ *
+ * The paper direction is opaque and light, and **its cards are `#FFFFFF`**. That was right while the sheet was paper;
+ * the moment the sheet's face became a charcoal plate with a thick outline and an offset shadow, every white card inside
+ * it read as something nobody had got round to changing - a light UI sitting in a dark frame. This direction is the
+ * contents of that frame.
+ *
+ * **Same `Theme` interface, same type and spacing.** `SPACING` and `TYPOGRAPHY` are separate exports and are untouched,
+ * and no call site changed beyond which theme instance it reads.
+ *
+ * ## Why neutral rather than the HUD's browns
+ *
+ * The HUD direction is warm brown at `0.15` transparency, designed to be looked *past* over a moving scene. A sheet is
+ * looked *at*, and its chrome is a **neutral** charcoal: brown cards over a neutral plate would tint the plate and the two
+ * would disagree about what colour the furniture is. So the four surfaces are greys with a slight cool cast, and every
+ * surface is **opaque** for the same reason the paper direction's are - the scene must not show through text a player is
+ * reading.
+ *
+ * ## The three values that had to move, and why
+ *
+ * - **`border` is lighter** (`#4E4E5A`), not the near-black the other two directions use. A near-black edge between a
+ *   dark card and a dark plate is not an edge; on charcoal the separator has to be *above* the surfaces it separates.
+ *   The sheet's own thick outline is drawn by the chrome module, in its own darker value, so the two never argue.
+ * - **`accent` and `premium` are brighter.** The paper direction's `#2F5E8C` was chosen to sit on `#ECE8DF`; on charcoal
+ *   it collapses into the background. These are fills carrying `onAccent` white text, so they only have to clear the
+ *   surface, not the ink.
+ * - **`rarity` is a step brighter each.** Same territory as the paper ladder, raised because these are read as *text and
+ *   2-pixel borders* on a dark plate rather than on paper. `common` stays the least interesting of the four.
+ *
+ * `paint.panel` is deliberately the same value as `CHUNKY_PANEL_FACE` in `./chunky-panel`, so the sheet's face and the
+ * surfaces its contents believe they are standing on cannot drift apart.
+ */
+export function chunkyDarkTheme(): Theme {
+	const opaque = (color: Color3): Paint => ({ color, transparency: 0 });
+
+	return {
+		paint: {
+			surface: opaque(Color3.fromHex("#2A2A31")), // the page behind everything: a well, darker than the face
+			panel: opaque(Color3.fromHex("#34343A")), // the sheet's face - equal to CHUNKY_PANEL_FACE
+			card: opaque(Color3.fromHex("#3E3E47")), // a tile inside the sheet, one step up again
+			trough: opaque(Color3.fromHex("#232329")), // a recessed well, e.g. a scrolling list's interior
+		},
+		colors: {
+			textPrimary: BASE.white,
+			textSecondary: Color3.fromHex("#C6C6D0"),
+			textDisabled: Color3.fromHex("#7C7C88"),
+
+			accent: Color3.fromHex("#3F82C9"),
+			onAccent: BASE.white,
+
+			success: Color3.fromHex("#2FA36B"),
+			warning: Color3.fromHex("#E0A93B"),
+			error: Color3.fromHex("#D24A4A"),
+
+			border: Color3.fromHex("#4E4E5A"),
+			shadow: BASE.black,
+
+			specialRobux: BASE.robux,
+			coin: Color3.fromHex("#E9B949"),
+			// The premium green, raised for charcoal: the paper direction's `#2E7D5B` was chosen against paper and reads as
+			// a dark smear here. Kept distinguishable from `success` by being the same green the chest header already uses.
+			premium: Color3.fromHex("#2FA36B"),
+
+			rarity: {
+				common: Color3.fromHex("#9AA0A6"), // grey, still the floor of the ladder
+				rare: Color3.fromHex("#4C93D6"), // blue
+				epic: Color3.fromHex("#9B72F5"), // violet
+				legendary: Color3.fromHex("#E0A93B"), // amber, the only warm colour in the set
+			},
+		},
+	};
+}
+
 let cachedTheme: Theme | undefined;
 
 /**
