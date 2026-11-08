@@ -2,12 +2,14 @@ import { describe, expect, it } from "@rbxts/jest-globals";
 import {
 	canPlay,
 	CLICK_SOUND_ASSET_ID,
+	COIN_SOUND_ASSET_ID,
 	DEFAULT_SOUND_TUNING,
 	ELIMINATION_SOUND_ASSET_ID,
 	HIT_SOUND_ASSET_ID,
 	PICKUP_SOUND_ASSET_ID,
 	PICKUP_SOUND_MIN_INTERVAL_SECONDS,
 	PURCHASE_SOUND_ASSET_ID,
+	SONG_ASSET_ID,
 	SOUND_MIN_INTERVAL_SECONDS,
 	SOUND_TUNING,
 	soundTuningFor,
@@ -18,7 +20,7 @@ import {
  * The three rules a spec can prove about the sound config: the scheme is added in exactly one place, the throttle's
  * boundary is where it says it is, and every id answers with playback values.
  *
- * Nothing here can prove a sound is audible, or that 0.6 is the right volume for the hit — that is Studio's job. What it
+ * Nothing here can prove a sound is audible, or that 0.8 is the right volume for the coin — that is Studio's job. What it
  * can prove is the arithmetic and the tables the audio code is built on, so a later edit cannot quietly turn "half a
  * second" into "half a minute" or a missing tuning row into a silent sound.
  */
@@ -28,6 +30,8 @@ const ALL_IDS: ReadonlyArray<string> = [
 	CLICK_SOUND_ASSET_ID,
 	HIT_SOUND_ASSET_ID,
 	PICKUP_SOUND_ASSET_ID,
+	COIN_SOUND_ASSET_ID,
+	SONG_ASSET_ID,
 ];
 
 /** The ids that deliberately keep the engine's defaults, so a tuning row that drifts fails here rather than in the mix. */
@@ -56,7 +60,35 @@ describe("sounds.config", () => {
 		expect(soundUri(PICKUP_SOUND_ASSET_ID)).toBe("rbxassetid://111254855668531");
 	});
 
-	it("keeps the five ids bare and distinct", () => {
+	it("turns the real coin id into the uri the engine loads", () => {
+		// The third of the user's own uploads, and the one item 138 added. Pinned digit for digit because the asset id is
+		// quoted from a chat message: a transposed pair loads a different asset, or nothing, and reports no error either way.
+		expect(COIN_SOUND_ASSET_ID).toBe("79302475372626");
+		expect(soundUri(COIN_SOUND_ASSET_ID)).toBe("rbxassetid://79302475372626");
+	});
+
+	it("turns the round song's id into the uri the engine loads", () => {
+		// The same argument as the other two user uploads, and it matters more here: a music bed that fails to load is a round
+		// of silence with no error, and the loop points would be the first thing blamed.
+		expect(SONG_ASSET_ID).toBe("130554552490423");
+		expect(soundUri(SONG_ASSET_ID)).toBe("rbxassetid://130554552490423");
+	});
+
+	it("gives the round song a tuning row, which is the fade's target", () => {
+		// Criterion 2. The row is not decoration: `createSongHandle` reads `sound.Volume` back **after** `buildSound` applied
+		// this row and ramps the fade to *that*, so a missing row would silently ramp to `1.0` — a music bed at effect level,
+		// which is the loudest possible failure of a mix and the quietest possible failure of a config.
+		const song = soundTuningFor(SONG_ASSET_ID);
+
+		expect(song).toEqual({ volume: 0.35, playbackSpeed: 1 });
+		expect(song.volume < DEFAULT_SOUND_TUNING.volume).toBe(true);
+
+		// No pitch shift, and this is load-bearing rather than tidy: `playbackSpeed` scales wall-clock time, so a value other
+		// than 1 would invalidate both loop points without changing either constant.
+		expect(song.playbackSpeed).toBe(1);
+	});
+
+	it("keeps the seven ids bare and distinct", () => {
 		// The constants must not carry the scheme themselves: `soundUri` is the one place it is written, and a constant
 		// that already had it would produce `rbxassetid://rbxassetid://…` at the only call site.
 		//
@@ -140,6 +172,17 @@ describe("sounds.config", () => {
 		expect(soundTuningFor(HIT_SOUND_ASSET_ID).volume).toBe(0.6);
 	});
 
+	it("gives the coin sound an entry of its own", () => {
+		// The sixth row, and the one this round added. The failure this guards is the one item 89 named: an absent row plays
+		// at 1/1 and looks perfectly correct, so a **Placeholder.** volume would never be reached and nothing would say why.
+		expect(soundTuningFor(COIN_SOUND_ASSET_ID)).toEqual({ volume: 0.8, playbackSpeed: 1 });
+
+		// Distinct from the pickup row it currently shares a volume with: a kind-keyed record would put "reward" in one slot,
+		// so the assertion is that editing one leaves the other alone.
+		expect(soundTuningFor(COIN_SOUND_ASSET_ID)).toEqual(soundTuningFor(PICKUP_SOUND_ASSET_ID));
+		expect(soundTuningFor(COIN_SOUND_ASSET_ID).volume).toBe(0.8);
+	});
+
 	it("answers an id it has never heard of with the default", () => {
 		// The forward-compatibility property: a fifth sound added later without a tuning row still plays, at 1/1, rather
 		// than arriving silent because the lookup threw or answered `nil`. The near-miss id is deliberate — a lookup that
@@ -148,7 +191,7 @@ describe("sounds.config", () => {
 		expect(soundTuningFor("")).toBe(DEFAULT_SOUND_TUNING);
 	});
 
-	it("keys every tuning row by one of the four real ids", () => {
+	it("keys every tuning row by one of the seven real ids", () => {
 		// A key that is not an id is a row nothing reads, and the sound it meant to configure stays at the default — the
 		// quietest possible failure. Counting as well as checking membership catches both directions: a stray key and a
 		// missing row.

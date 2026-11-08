@@ -8,6 +8,7 @@ import { getScreenGui } from "shared/ui/layers";
 import { capToViewport } from "shared/ui/viewport";
 import { CHUNKY_CONTROL_OUTLINE, CHUNKY_CONTROL_STROKE } from "shared/ui/chunky-chrome";
 import { buildChunkyPanel } from "shared/ui/chunky-panel";
+import { playCoinSound } from "shared/ui/sounds";
 import { outlineText } from "shared/ui/text";
 
 /** **Placeholder.** The poster weight the chunky titles use. A local literal for the same reason as in `payout-controller`. */
@@ -108,6 +109,18 @@ export class RewardToastController implements OnStart {
 			if (parsed === undefined) {
 				warn(`[Toast] ignored a malformed ${REWARD_TOAST_REMOTE_NAME} payload.`);
 				return;
+			}
+
+			// **The card always; the sound only when money moved.** A Studio preview (item 135) fires this same payload with
+			// `preview = true` and grants nothing, so a coin sound there would announce coins that were never added — the one
+			// thing a reward notification must not do. Everything else about the two paths is identical, which is why the flag
+			// is a field on the payload rather than a second remote.
+			//
+			// Unthrottled and safe: the schedules behind it are 20 hours and 15 minutes, and `playtimeBaselineAtLoad` moves a
+			// stale stipend stamp forward at load rather than paying it, so the two cannot land in the same second. See
+			// `playCoinSound`.
+			if (!parsed.preview) {
+				playCoinSound();
 			}
 
 			this.show(parsed);
@@ -337,6 +350,10 @@ export class RewardToastController implements OnStart {
  *
  * `label` is checked for emptiness as well as type: an empty string would build a card with a coin and an amount and no
  * statement of what paid, which is worse than no card at all.
+ *
+ * `preview` is required rather than defaulted to `false`: both sides of the wire ship together, and a default here would
+ * turn a payload that lost the field into a **sound for money that did not move**. The validator is the one place a
+ * malformed message is caught, so it is the place to be strict.
  */
 function asToastMessage(value: unknown): RewardToastMessage | undefined {
 	if (!typeIs(value, "table")) {
@@ -346,12 +363,13 @@ function asToastMessage(value: unknown): RewardToastMessage | undefined {
 	const record = value as Record<string, unknown>;
 	const label = record.label;
 	const amount = record.amount;
+	const preview = record.preview;
 
-	if (!typeIs(label, "string") || label.size() === 0 || !typeIs(amount, "number")) {
+	if (!typeIs(label, "string") || label.size() === 0 || !typeIs(amount, "number") || !typeIs(preview, "boolean")) {
 		return undefined;
 	}
 
-	return { label, amount };
+	return { label, amount, preview };
 }
 
 /** Linear interpolation, in the one direction this file needs. */

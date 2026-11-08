@@ -48,7 +48,7 @@ export const DEFAULT_BELT_SPEED = 10;
  *
  * They were one number for one round, and that was a bug: `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED` briefly
  * read `+10`, `+6`, `+2` during the ramp, so **every ball drifted forward at the start of every round with no
- * pickup involved** ? the one thing only a triangle is supposed to cause. A value that ramps is a value the
+ * pickup involved** ? the one thing only a pad is supposed to cause. A value that ramps is a value the
  * physics model did not consent to; the reference is the comparison, the visual is the effect.
  *
  * The wire name stays `BeltSpeedActual` so nothing already reading it has to change.

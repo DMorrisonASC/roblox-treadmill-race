@@ -550,16 +550,19 @@ export const APPARENT_SPIN_SMOOTHING_SECONDS = 0.15;
  */
 export const APPARENT_SPIN_SIGN = -1;
 
-// #region pickups (boost triangles)
+// #region pickups (boost pads)
 
 /**
- * **Placeholder.** A triangle's size.
+ * **Placeholder.** A pickup's collider size: the box `Touched` is measured against.
  *
- * **It was `(1.5, 0.1, 1.5)` and that was invisible in Studio.** A 0.1-stud-thick part on a brown belt, a few
- * studs from the camera, is a sliver ? and a `SpecialMesh` prism of that thickness is thinner still. The first
- * Studio run reported five pickups spawning and being collected while nothing at all was visible on the belt,
- * which is exactly what a 0.1-stud slab looks like. `Y = 1` makes it a standing wedge a player can see from the
- * chase camera; the ball passes through it (`CanCollide = false`) so the height costs nothing physically.
+ * **The part it sizes is invisible** (item 144). `Size` is no longer a visual decision at all - it is the volume a ball has to
+ * enter for the pad to fire, and it is kept at the wedge's old value so collection behaves exactly as it did.
+ *
+ * **The history is worth keeping, because it is why this constant exists.** It was `(1.5, 0.1, 1.5)` and that was invisible in
+ * Studio: a 0.1-stud-thick part, a few studs from the chase camera, is a sliver. `Y = 1` made it a standing wedge a player
+ * could see; the ball passes through it (`CanCollide = false`) so the height cost nothing physically. Now that the body is a
+ * collider behind a billboard, `Y = 1` still matters - it is what a ball's height has to intersect - but nothing about the
+ * *appearance* depends on it.
  */
 export const PICKUP_SIZE = new Vector3(2, 1, 2);
 
@@ -577,7 +580,7 @@ export const PICKUP_SIZE = new Vector3(2, 1, 2);
  * committed to leaving the belt.
  *
  * **Both numbers are code-frame X**, from `PointToObjectSpace` with the belt's centre as origin; user-frame they are `10`
- * and `51`. Both ends are inside the belt's own code-frame `-28 .. +28`, so a triangle is always on the surface rather than
+ * and `51`. Both ends are inside the belt's own code-frame `-28 .. +28`, so a pad is always on the surface rather than
  * floating past an end. The lane (`Z`) is not random: it is read from the bound spawner parts, so every round covers
  * every lane a ball can spawn in.
  */
@@ -586,18 +589,150 @@ export const PICKUP_X_MIN = -18;
 /** **Placeholder.** The near end of the random `X` band. See `PICKUP_X_MIN` for why both bounds exist. */
 export const PICKUP_X_MAX = 23;
 
-/** **Placeholder.** Triangle colour — red, because nothing else on the belt is red. */
-export const PICKUP_COLOR = Color3.fromRGB(200, 30, 30);
-
 /**
  * **Placeholder.** Seconds between top-up attempts while `Playing`.
  *
  * A top-up never exceeds the bound-spawner count, so this is a *replacement* cadence, not a spawn rate: a
- * round that runs forever holds at most five triangles, and a triangle taken at `t = 3 s` is replaced at the
+ * round that runs forever holds at most five pads, and a pad taken at `t = 3 s` is replaced at the
  * next multiple of 15. Longer than a ball takes to cross the belt, so a replacement never appears in front of
  * the ball that just took the last one.
  */
 export const PICKUP_SPAWN_INTERVAL_SECONDS = 15;
+
+/**
+ * **Placeholder.** The pickup sprite's image, used when no Studio instance provides one.
+ *
+ * ## The visible half of a pickup, and why the id lives here
+ *
+ * Since item 144 the pickup body is an **invisible collider**; everything a player sees is a billboard the client builds,
+ * and a billboard needs an image id. The id is a repo value for the reason `sounds.config.ts` argues about its own ids: it
+ * is one string, and an edit here is the whole of a change.
+ *
+ * A `Decal`/`Texture`/`ImageHandleAdornment` named `pickupSprite` under `ReplicatedStorage` **overrides** this, because a
+ * designer swapping a sprite should not need a rebuild and because a `Decal` is how an image lands in the place to begin
+ * with. Both inputs produce a `ContentId` handed to the same `ImageLabel.Image`, so there is no second render path - only
+ * two sources for one string, and the client's boot line names which one won.
+ */
+export const PICKUP_SPRITE_ASSET_ID = "135266450823195";
+
+/**
+ * **Placeholder.** The sprite's width and height, in studs.
+ *
+ * A `BillboardGui` reads the two components of `Size` differently, and reading them the wrong way round is what made the
+ * first pass invisible (item 145). Per the engine's own guide: *"the scale components of the BillboardGui.Size property
+ * set the billboard's stud size in 3D space... [and it] scales larger or smaller depending on its distance from the
+ * camera"*, while the offset components are screen pixels held at a fixed on-screen size. `UDim2.fromOffset(2.6, 2.6)`
+ * is therefore a **2.6-pixel** smudge rather than a 2.6-stud sign, which is exactly the pale dot a playtest reported on
+ * the belt. This number is only meaningful through `UDim2.fromScale`: as a scale value it is studs, and it shrinks with
+ * distance the way the pad it sits on does.
+ *
+ * Slightly wider than the 2-stud pad on purpose - the sprite is a marker, and a marker the pad's own size or smaller is hard
+ * to tell from the pad it marks. It is not a lane-crowding risk in practice: `PickupService` spreads the live pads along the
+ * belt's length, so two of them rarely share an X, and the sprite is centred on its own pad rather than reaching sideways.
+ */
+export const PICKUP_SPRITE_STUDS = 2.6;
+
+/**
+ * **Placeholder.** How far above the pad's centre the sprite floats, in studs.
+ *
+ * The pad is `PICKUP_SIZE.Y` tall and a ball is a stud across, so a sprite sitting at the pad's origin would be behind the
+ * ball that is collecting it. This lifts it clear without putting it above the camera's eye line.
+ */
+export const PICKUP_SPRITE_LIFT_STUDS = 1.2;
+
+/**
+ * The pickup footprint ring's colour: `#00BFFF`, "deep sky blue" in the web palette — the user's hex, not a placeholder.
+ *
+ * ## Why it is written as `fromRGB` and not as a `Color3.new` decimal
+ *
+ * Because the hex is the source of truth: `(0, 191, 255)` is the number a colour picker shows, and a reader comparing this
+ * line against the design cannot check `Color3.new(0, 0.749, 1)` without a calculator. This file is full of the same
+ * argument applied to studs and seconds — the value is stored in the unit a human reads it in.
+ *
+ * ## What it is a colour *of*, and what it is not
+ *
+ * The ring is a filled disc — one `Frame` at `BackgroundTransparency = RING_TRANSPARENCY` inside a `SurfaceGui` on the pad's
+ * footprint (see `PickupSpriteController`) — so this colour is the fill and nothing else. On a dark belt at
+ * `RING_TRANSPARENCY` it reads as a saturated cyan zone rather than as a soft haze: the palette's "sky blue" is `#87CEEB`,
+ * which is markedly paler than this. That is deliberate — it is a marked area on a dark surface, not a light.
+ *
+ * The shape was an annulus in item 146 and became a disc in item 147; this hex survived both, which is the point of it living
+ * here rather than at the call site.
+ */
+export const RING_COLOR = Color3.fromRGB(0, 191, 255);
+
+/**
+ * **Placeholder.** How transparent the footprint disc is, from `0` (solid) to `1` (invisible).
+ *
+ * **This is the knob if the ring reads as too electric, not `RING_COLOR`.** The colour is the user's hex and is fixed; how
+ * much of it lands on the belt is this number. `0.6` is the user's starting point, and it stays marked `Placeholder.` because
+ * a *fill* is far more sensitive to it than the 6-pixel outline it replaced: the same value reads heavier on a bright asset
+ * than on a dark one, and heavier from a low pitch than from above. Toward `0.75` softens it toward a tint; toward `0.4`
+ * turns the belt under it into a plate.
+ */
+export const RING_TRANSPARENCY = 0.6;
+
+/**
+ * **Placeholder.** How densely the ring's `SurfaceGui` is rasterised, in canvas pixels per stud.
+ *
+ * A `SurfaceGui` does not draw vectors: the disc is rasterised at `PixelsPerStud x studs` and the circle's smoothness is that
+ * resolution. At the default `50` a 2-stud ring is a `100 x 100` canvas, whose circle is a visible polygon at the game
+ * camera's distance; `200` gives a `400 x 400` canvas, which is still trivial for one gui per pad and reads as a circle.
+ *
+ * **Item 147 kept `200` after the fill replaced the outline, and the argument is not the same one.** The annulus's
+ * legibility *was* its stroke width in canvas pixels, so the density and the thickness were coupled; a filled disc's edge is
+ * a boundary between `RING_COLOR` at `RING_TRANSPARENCY` and whatever is under it, so the density now only decides how
+ * smooth that edge is. `200` draws a 400-pixel circle, where the corner tessellation is finer than a stud by an order of
+ * magnitude — there is nothing left to buy by raising it, and the cost of a higher value is paid once per pad.
+ */
+export const RING_PIXELS_PER_STUD = 200;
+
+/**
+ * **Placeholder.** The footprint ring's own vertical thickness, in studs.
+ *
+ * It exists only because a `SurfaceGui` needs a face to sit on, and a `Part` needs a size on all three axes. `0.05` is a
+ * twentieth of a stud: thin enough that the ring reads as paint on the floor rather than as a plate, thick enough that the
+ * disc it makes is not degenerate.
+ */
+export const RING_THICKNESS_STUDS = 0.05;
+
+/**
+ * **Placeholder.** How far above the pad's bottom face the ring floats, in studs.
+ *
+ * **Not zero, and the reason is a coplanarity, not a look.** `PickupService.positionFor` puts the pad's bottom face exactly
+ * on the surface a ball rests on — the invisible moving collider, itself `BELT_SURFACE_THICKNESS` thick and sitting on the
+ * belt. A ring at exactly that height z-fights with the thing it is lying on: two coplanar surfaces, decided per frame, per
+ * pixel. `0.02` studs is below the perceptual floor and above the depth buffer's.
+ */
+export const RING_LIFT_STUDS = 0.02;
+
+/**
+ * **Placeholder.** How long one collection spin takes, in seconds.
+ *
+ * One full turn on an `Exponential`/`Out` curve: fast at the start, easing to a stop. The curve is what reads as "this was
+ * taken" rather than as "this is rotating" - a linear spin looks mechanical and reads as an idle animation.
+ */
+export const PICKUP_SPIN_SECONDS = 1;
+
+/**
+ * **Placeholder.** The **floor** under a spin's visible duration, in seconds.
+ *
+ * The effective duration is `math.max(PICKUP_SPIN_SECONDS, PICKUP_SPIN_VISIBLE_SECONDS)`, so a later "make it snappier" edit
+ * that set the tween to `0.2` cannot cut the cue below the time it takes to notice. It is a floor and not a second timer:
+ * one duration comes out of the pair, and the tween uses it. The name is the brief's; what it really protects is
+ * *perceptibility*, since the sprite is always visible and nothing hides it.
+ */
+export const PICKUP_SPIN_VISIBLE_SECONDS = 0.6;
+
+/**
+ * **Placeholder.** The shortest gap between two spins on one pad, in seconds.
+ *
+ * A `recycle` ball resting on its surviving pad re-touches it every **14-24 ms** (item 91's measurement, taken for the pickup
+ * sound). Half a second is the same order as the sound's own 0.3 s and the shared sound interval's 0.5 s, and it is shorter
+ * than one spin - so a genuine second collection, which takes a ball longer than half a second to produce, still restarts the
+ * cue, while a resting ball produces one spin rather than fifty.
+ */
+export const PICKUP_SPIN_MIN_INTERVAL_SECONDS = 0.5;
 
 /**
  * **Placeholder.** The speed a ball starts `Playing` with, in studs/second.
@@ -814,7 +949,7 @@ export const SWAY_PHASE_JITTER = math.pi;
  */
 export const SWAY_TRACK_SECONDS = 1.5;
 
-/** **Placeholder.** The folder `PickupService` parents its triangles into, created on demand. */
+/** **Placeholder.** The folder `PickupService` parents its pads into, created on demand. */
 export const PICKUPS_FOLDER_NAME = "SpawnedPickups";
 
 /**
@@ -825,6 +960,23 @@ export const PICKUPS_FOLDER_NAME = "SpawnedPickups";
  * holds anything — its members destroy themselves.
  */
 export const HIT_EFFECTS_FOLDER_NAME = "SpawnedHitEffects";
+
+/**
+ * The folder the **client** parents its round-wide `motionBlur` clone into, created on demand.
+ *
+ * A folder rather than `Workspace` itself for the reason `SpawnedHitEffects` and `SpawnedPickups` exist: an arena-wide
+ * particle tree among the arena's own parts is indistinguishable from scene geometry in the Explorer, and the one debugging
+ * session that matters is exactly when somebody is looking there.
+ *
+ * **Not a child of the `EliminationZone`**, even though the clone sits at the zone's position: a `BasePart` child's `CFrame`
+ * is world-space, so parenting it to the zone would not make it follow anything, and it *would* make the effect a
+ * `Destroying` casualty if the zone is ever replaced in Studio. The zone's transform is read once per `Playing`; the effect
+ * does not belong to it.
+ *
+ * Unlike `SpawnedHitEffects`, this folder holds **one** member at a time and is empty between rounds — the clone is destroyed
+ * on the fade-out rather than by `Debris`.
+ */
+export const MOTION_BLUR_FOLDER_NAME = "SpawnedMotionBlur";
 
 /**
  * The name of the client-only part that carries a ball's **visible skin**, created by `BallRenderController` as a child of

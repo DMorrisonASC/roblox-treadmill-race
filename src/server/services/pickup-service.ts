@@ -5,7 +5,6 @@ import { PICKUP_SOUND_REMOTE_NAME, REMOTES_FOLDER_NAME, ROUND_STATE_VALUE_NAME }
 import { TAGS } from "shared/tags";
 import {
 	BELT_SURFACE_THICKNESS,
-	PICKUP_COLOR,
 	PICKUP_SIZE,
 	PICKUP_SPAWN_INTERVAL_SECONDS,
 	PICKUP_X_MAX,
@@ -26,7 +25,7 @@ function formatNumber(value: number): string {
 const ROUND_STATE_WAIT_SECONDS = 10;
 
 /**
- * Puts consumable boost triangles on the belt and raises a ball's speed when one is touched.
+ * Puts consumable boost pads on the belt and raises a ball's speed when one is touched.
  *
  * ## Why the boost is applied on the server
  *
@@ -40,7 +39,7 @@ const ROUND_STATE_WAIT_SECONDS = 10;
  * An impulse would need a mass to be comparable between shapes, and it would overshoot for a light body and
  * undershoot for a heavy one. Setting the along-belt component to a target makes the outcome the same for
  * every ball — which is what "the pickup gives you 8" has to mean — while leaving the other two components
- * alone, so a ball crossing the triangle at an angle keeps its sideways drift.
+ * alone, so a ball crossing the pad at an angle keeps its sideways drift.
  *
  * ## Why there is no decay code
  *
@@ -52,7 +51,7 @@ const ROUND_STATE_WAIT_SECONDS = 10;
  * ## Why the cluster is capped rather than rate-limited
  *
  * `PLAYING_CAP_SECONDS` was deleted, so a round can run forever and a timed spawner would accumulate
- * triangles without bound — hundreds of parts on a 56-stud belt, and a ball hitting five at once. The cap is
+ * pads without bound — hundreds of parts on a 56-stud belt, and a ball hitting five at once. The cap is
  * the bound-spawner count; the 15 s tick only ever *replaces* what was taken.
  */
 @Service()
@@ -63,7 +62,7 @@ export class PickupService implements OnStart {
 	 */
 	constructor(private readonly spawner: BallSpawnerService) {}
 
-	/** Live triangles, so the cap is counted rather than inferred from the folder. */
+	/** Live pads, so the cap is counted rather than inferred from the folder. */
 	private readonly live = new Array<BasePart>();
 
 	/**
@@ -154,7 +153,7 @@ export class PickupService implements OnStart {
 	 * `Playing` is the only phase that spawns. Every other phase clears, and clearing on all of them rather than
 	 * only on the two named in the brief is deliberate: the brief names `PostGame → Intermission` and
 	 * `Playing → Waiting`, but `Playing → PostGame` and the debug restarts pass through the same door, and a
-	 * triangle left behind in any of them is a triangle that outlives the round it belongs to.
+	 * pad left behind in any of them is a pad that outlives the round it belongs to.
 	 */
 	private onPhaseChanged(phase: string): void {
 		if (phase === "Playing") {
@@ -283,7 +282,7 @@ export class PickupService implements OnStart {
 	 * `BALL_SPEED` decays, and a pickup in the last few studs before **code-frame** `+28` (user-X `56`) would be collected
 	 * after the ball had already committed to leaving.
 	 *
-	 * Both ends are inside the belt's own code-frame `X` range of `-28 .. +28` (user `0 .. 56`), so the triangle is always
+	 * Both ends are inside the belt's own code-frame `X` range of `-28 .. +28` (user `0 .. 56`), so the pad is always
 	 * on the surface rather than floating past an end.
 	 *
 	 * `Y` is the **floor's** top face, not the belt's: the floor is what a ball rests on, so a pickup placed on
@@ -297,44 +296,46 @@ export class PickupService implements OnStart {
 	}
 
 	/**
-	 * Builds one triangle.
+	 * Builds one pickup: **an invisible collider, not a shape.**
 	 *
-	 * ## The shape, and why it is a `SpecialMesh`
+	 * ## What changed, and why the wedge's reasoning no longer holds (item 144)
 	 *
-	 * **`Enum.PartType.Triangle` does not exist.** The installed typings' `Enum.PartType` has `Ball`, `Block`,
-	 * `Cylinder` and `Wedge` and no triangle member, so a `Part` cannot be told to be a triangle directly.
-	 * `SpecialMesh` with `MeshType = Enum.MeshType.Prism` is the asset-free way to get one: it is a built-in
-	 * mesh type (no `MeshId`, no upload), and a prism's triangular faces are its top and bottom, so a thin flat
-	 * prism reads as a triangle from above — which is the view the player has of the belt.
+	 * This used to be a red `Wedge` — and the comment here argued for it at length, against a `SpecialMesh` prism that had
+	 * proved invisible in Studio. Both halves of that essay were right *for a pickup that had to be its own visual*. It does
+	 * not any more: the visible half is a billboard the client builds (`PickupSpriteController`), so the body's only job is to
+	 * be a `Touched` volume, and a shape that is a shape for the sake of being seen is now a shape that is *only* seen when
+	 * something goes wrong.
 	 *
-	 * `Wedge` was the other candidate and is rejected on that last point: a wedge is triangular from the
-	 * *side*, and from above it is a rectangle, so five of them would look like five red tiles rather than
-	 * five arrows.
+	 * The three conclusions that survive: `Anchored` because a pickup must not be pushed by the balls it boosts; `CanTouch`
+	 * explicitly `true` because it is the entire mechanism; `CanQuery = false` so it stays out of raycasts. `CanCollide` was
+	 * already `false` and stays `false` — the brief for this round says the wedge was collidable, and that is wrong: a
+	 * collidable pad would be a wall across a lane.
 	 *
-	 * `Anchored = true` because a pickup must not be pushed by the balls it boosts; `CanCollide = false`
-	 * because it is a marker, not a barrier; `CanTouch = true` explicitly because that is the entire mechanism
-	 * and a future default change should not silently disable pickups; `CanQuery = false` so it stays out of
-	 * raycasts, matching the slab's reasoning.
+	 * ## Why the size is unchanged, and the one asymmetry it introduces
+	 *
+	 * `PICKUP_SIZE` is the wedge's bounding box, and a `Block` of the same `Size` occupies that box completely — so the
+	 * collection volume *grows* by the half of the box the wedge's slope left empty. That is the safe direction: a pad that
+	 * fires slightly early is forgiving of a ball clipping its corner, while one that fires late drops a boost the player
+	 * drove at. `positionFor` still lifts the pad by `PICKUP_SIZE.Y / 2`, so its centre is where it always was.
+	 *
+	 * `Transparency = 1` rather than a hidden mesh: the part is real, `Touched` works, and nothing draws. No `Color` or
+	 * `Material` is set at all — a colour on an invisible part is a value with no reader, and this tree removes those.
 	 */
 	private createPickup(belt: BasePart, folder: Folder, position: Vector3, slot: number): BasePart | undefined {
 		const pickup = new Instance("Part");
 		pickup.Name = `Pickup${slot + 1}`;
-		// **`Wedge`, not a `SpecialMesh` prism.** The first version used
-		// `SpecialMesh(MeshType = Prism)` on a `Block`, sized `(1.5, 0.1, 1.5)` - and Studio reported five
-		// pickups spawning and being collected with nothing visible on the belt. A 0.1-stud-thick mesh is a
-		// sliver from the chase camera. `Wedge` is a real `PartType` (verified in the typings, unlike
-		// `Triangle`) that always renders, and a wedge is triangular from the side, which is the silhouette a
-		// "boost pad" wants anyway.
-		pickup.Shape = Enum.PartType.Wedge;
+		// A `Block` is the default shape; it is left implicit rather than set, because the only reason to write the
+		// property is to *change* it and this part is deliberately the plainest collider there is.
 		pickup.Size = PICKUP_SIZE;
+		pickup.Transparency = 1;
 		pickup.Anchored = true;
 		pickup.CanCollide = false;
 		pickup.CanTouch = true;
 		pickup.CanQuery = false;
-		pickup.Color = PICKUP_COLOR;
-		pickup.Material = Enum.Material.Neon;
 		pickup.TopSurface = Enum.SurfaceType.Smooth;
 		pickup.BottomSurface = Enum.SurfaceType.Smooth;
+		// The orientation is kept from the wedge: it no longer changes what is drawn, but it keeps the pad's own axes aligned
+		// with the belt's, which is what a future directional marker or a debug arrow would want to read.
 		pickup.CFrame = new CFrame(position, position.add(belt.CFrame.RightVector));
 
 		pickup.Parent = folder;
@@ -342,7 +343,7 @@ export class PickupService implements OnStart {
 
 		// One connection per pickup, disconnected on collection. `Once` is not used because the handler must
 		// also decide whether the body was a ball at all — a `Once` would burn the connection on the first
-		// ball-shaped touch and leave the triangle uncollected if that touch was a marker or the slab.
+		// ball-shaped touch and leave the pad uncollected if that touch was a marker or the slab.
 		const connection = pickup.Touched.Connect((other) => this.onPickupTouched(pickup, other, connection));
 		this.live.push(pickup);
 
@@ -350,11 +351,11 @@ export class PickupService implements OnStart {
 	}
 
 	/**
-	 * Boost the ball, consume the triangle.
+	 * Boost the ball, consume the pad.
 	 *
 	 * ## Why the connection is disconnected before the boost
 	 *
-	 * `Touched` fires on every contact *and* on the triangle's own partners, and a fast ball can generate two
+	 * `Touched` fires on every contact *and* on the pad's own partners, and a fast ball can generate two
 	 * contacts in the same physics step (leading edge, then trailing edge as it passes through). Destroying the
 	 * part stops further events, but the destroy is not instantaneous within the step, so a second invocation
 	 * in the same step would boost the ball twice and print two lines for one pickup. Disconnecting first makes
@@ -375,7 +376,7 @@ export class PickupService implements OnStart {
 		}
 
 		if (!CollectionService.HasTag(other, TAGS.ball)) {
-			// Not a ball: re-arm, because a marker, the slab or a wall brushing the triangle must not consume
+			// Not a ball: re-arm, because a marker, the slab or a wall brushing the pad must not consume
 			// it. Reconnecting the same handler is cheaper than testing the tag before a `Once` connection can
 			// be made, and it keeps the connection count at one per pickup.
 			this.reconnect(pickup);
@@ -421,7 +422,7 @@ export class PickupService implements OnStart {
 
 		if (decision.consume) {
 			// Removed before the destroy so the cap sees the slot free immediately, and so a destroy failing for
-			// any reason does not leave a triangle counted as live forever.
+			// any reason does not leave a pad counted as live forever.
 			this.remove(pickup);
 			pickup.Destroy();
 		} else {
@@ -462,7 +463,7 @@ export class PickupService implements OnStart {
 		}
 	}
 
-	/** Destroys every live triangle, and anything tagged `pickup` that outlived the bookkeeping. */
+	/** Destroys every live pad, and anything tagged `pickup` that outlived the bookkeeping. */
 	private clearPickups(): void {
 		const tagged = CollectionService.GetTagged(TAGS.pickup);
 

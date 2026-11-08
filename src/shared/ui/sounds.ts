@@ -2,6 +2,7 @@ import { SoundService } from "@rbxts/services";
 import {
 	canPlay,
 	CLICK_SOUND_ASSET_ID,
+	COIN_SOUND_ASSET_ID,
 	ELIMINATION_SOUND_ASSET_ID,
 	HIT_SOUND_ASSET_ID,
 	PICKUP_SOUND_ASSET_ID,
@@ -12,7 +13,7 @@ import {
 } from "shared/sounds.config";
 
 /**
- * The five UI sounds, played on the local client — and the throttle that guards three of them.
+ * The six UI sounds, played on the local client — and the throttle that guards three of them.
  *
  * ## Why this lives beside `press.ts` rather than under `src/client/`
  *
@@ -74,6 +75,10 @@ import {
  *    which is the buzz a player hears as a fault. `PICKUP_SOUND_MIN_INTERVAL_SECONDS` (0.3 s) collapses that to at most
  *    three starts a second. **The general lesson, which is why it is written here and not only beside the constant: a
  *    condition that rules out "nothing happened" does not rule out "the same thing happened again".**
+ *  - **The coin sound is not throttled, and it is the newest row in this list.** An earn is one grant per round per player
+ *    (the payout remote, fired once from `endPlaying`) or one per schedule (20 hours, 15 minutes), so there is no burst to
+ *    collapse — it is the purchase sound's shape, not the elimination sound's. `playCoinSound` carries the full argument,
+ *    including the two writers that deliberately do not call it.
  *
  * `lastPlayedAt` is keyed by **asset id**, and every sound that has needed a throttle since has been a data change rather
  * than a refactor: the hit sound (item 88) and the pickup sound (item 91) are two more entries, and neither shares the
@@ -99,18 +104,31 @@ const sounds = new Map<string, Sound>();
  * When each sound last *started*, keyed by asset id. The map `canPlay` is asked about; nothing else writes to it.
  *
  * Three entries are ever present today — the elimination, hit and pickup ids — and the key is what keeps them apart. The
- * click and the purchase never write here at all, which is what "unthrottled" means in this file: not an interval of
- * zero, but no read and no write.
+ * click, the purchase and the coin sound never write here at all, which is what "unthrottled" means in this file: not an
+ * interval of zero, but no read and no write.
  */
 const lastPlayedAt = new Map<string, number>();
 
-/** The `Sound` for an asset id, created, tuned and parented on first use. */
-function soundFor(assetId: string): Sound {
-	const existing = sounds.get(assetId);
-	if (existing !== undefined) {
-		return existing;
-	}
-
+/**
+ * **The only place a `Sound` is constructed and tuned** — and it does not cache.
+ *
+ * ## Why this was split out of `soundFor`
+ *
+ * It used to be `soundFor` in full: create, tune, parent, remember. That is the right shape for a sound played through
+ * `PlayLocalSound`, which **copies** the instance it is handed and leaves the original alone — one instance per asset id,
+ * for the session, and nothing to go wrong.
+ *
+ * The round song is the first sound in this tree that is **owned**: it is started, its `Volume` is animated, its
+ * `TimePosition` is moved, and it is destroyed at the end of the phase. Destroying a cached instance would leave a dead
+ * entry behind for the next round, and mutating its `Volume` would change what the next `PlayLocalSound` copy starts at.
+ * So the construction is its own function and the cache is a second, small decision layered on top of it. **The rule
+ * "one construction site" is preserved rather than relaxed**: `soundFor` calls this, and `shared/ui/song` calls this, and
+ * nothing else builds a `Sound` at all — the id → `SoundId` → tuning path exists once.
+ *
+ * The returned instance is parented and tuned to the `SOUND_TUNING` row, so a caller's first act is usually to zero its
+ * `Volume` and ramp it back up — which is exactly what the song does.
+ */
+export function buildSound(assetId: string): Sound {
 	const sound = new Instance("Sound");
 	sound.Name = `UiSound_${assetId}`;
 	sound.SoundId = soundUri(assetId);
@@ -119,6 +137,9 @@ function soundFor(assetId: string): Sound {
 	// writing them per play could not change anything and would only claim the values are allowed to vary per play — they
 	// are not; they are config, and config is read where the thing is built. A play that needs different numbers is a
 	// later round with a named reason, not a second writer here.
+	//
+	// The song reuses that: it reads this value back as its fade **target** rather than hard-coding one, so the tuning row
+	// stays the single knob and the fade cannot disagree with it.
 	const tuning = soundTuningFor(assetId);
 	sound.Volume = tuning.volume;
 	sound.PlaybackSpeed = tuning.playbackSpeed;
@@ -127,6 +148,17 @@ function soundFor(assetId: string): Sound {
 	// rolloff to apply. The instance is created on this client, so it is this client's instance and never one the server
 	// sent.
 	sound.Parent = SoundService;
+	return sound;
+}
+
+/** The cached `Sound` for an asset id, built on first use. The `PlayLocalSound` path's instance, and only its. */
+function soundFor(assetId: string): Sound {
+	const existing = sounds.get(assetId);
+	if (existing !== undefined) {
+		return existing;
+	}
+
+	const sound = buildSound(assetId);
 	sounds.set(assetId, sound);
 	return sound;
 }
@@ -159,6 +191,56 @@ export function playClickSound(play: SoundPlayer = playLocally): void {
  */
 export function playPurchaseSound(play: SoundPlayer = playLocally): void {
 	play(PURCHASE_SOUND_ASSET_ID);
+}
+
+/**
+ * Coins arrived in this player's balance — **not throttled**, because an earn is one deliberate grant rather than a stream.
+ *
+ * ## The two callers, and why neither can arrive in a burst
+ *
+ *  - `payout-controller`, on a `RoundPayout` payload. The server fires that from `RoundService.payOut`, which runs once from
+ *    `endPlaying`, which itself returns immediately unless the phase is `Playing` — so it is **one grant per round per
+ *    player**, not one per body or one per tick.
+ *  - `reward-toast-controller`, on a `RewardToast` payload. Behind it are the daily login (a 20-hour cooldown) and the
+ *    playtime stipend (15 minutes), and item 134's `playtimeBaselineAtLoad` moves a stale stamp **forward** at load rather
+ *    than paying it — so the stipend is never due in the second the daily pays. That is the double *sound* the double
+ *    *grant* fix also removed, and it is worth naming because two coin sounds in one frame read as one louder sound with
+ *    nothing to say which event it belonged to.
+ *
+ * **Two earns *can* genuinely coincide, and both play.** The stipend tick does not look at the round phase, so a stipend
+ * can land in the second a payout fires — roughly one round in nine hundred at these numbers. That is not the failure above:
+ * two real grants are two events, and the whole point of an unthrottled player is that it does not decide for the player
+ * which of their earnings to hear.
+ *
+ * This is the purchase sound's shape (item 83), not the elimination sound's: a grant happens once, so `canPlay` here would
+ * be a third gate behind schedules that are already the gate — and on the day one of those schedules changed, a throttle
+ * would *hide* the double grant instead of letting it be heard.
+ *
+ * ## Why it is called from the controllers rather than from a remote of its own
+ *
+ * The wire already carries both events: `RoundPayout` (item 132) and `RewardToast` (item 134), each a **targeted**
+ * `FireClient` to the one player who earned the coins. One event, two effects — the shape item 88 used to hang the hit
+ * sound on the hit-effect burst. A `CoinSound` remote would be a third channel for a fact the client has already been
+ * told, and it would need its own payload and its own validation.
+ *
+ * ## Why it takes no `now`
+ *
+ * Nothing here reads the clock: there is no interval to compare against, so a `now` parameter would be a value passed and
+ * discarded. `playClickSound` and `playPurchaseSound` — the other two unthrottled players — have the same signature for
+ * the same reason; the throttled three take `now` because they stamp it.
+ *
+ * ## What deliberately does not call it
+ *
+ *  - **The Studio daily-login preview.** Item 135 fires the toast on every playtest and grants nothing; a coin sound there
+ *    would be a sound for money that did not move. The toast payload carries `preview` for exactly this, and the controller
+ *    still draws the card — the panel is what a playtest is looking at.
+ *  - **`/dev setCoins`.** It is an admin verb rather than an earn, it can also *lower* a balance, and it has no client
+ *    signal by design (item 65): a remote whose only job is to tell a client an admin changed its coins would be a new
+ *    channel opened for a debug path. The shop's coin pill still moves, which is the visible feedback an admin needs.
+ *  - **A new profile's `STARTING_COINS`.** The balance exists before the client has a HUD, and there is nothing to react to.
+ */
+export function playCoinSound(play: SoundPlayer = playLocally): void {
+	play(COIN_SOUND_ASSET_ID);
 }
 
 /**

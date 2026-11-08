@@ -8,6 +8,7 @@ import { FONT, SPACING, TextVariant, TYPOGRAPHY } from "shared/ui/scale";
 import { chunkyDarkTheme, Theme } from "shared/ui/theme";
 import { getScreenGui } from "shared/ui/layers";
 import { capToViewport } from "shared/ui/viewport";
+import { playCoinSound } from "shared/ui/sounds";
 import { CHUNKY_CONTROL_OUTLINE, CHUNKY_CONTROL_STROKE } from "shared/ui/chunky-chrome";
 import { buildChunkyPanel, CHUNKY_PANEL_CORNER } from "shared/ui/chunky-panel";
 import { outlineText, TEXT_OUTLINE_THICKNESS } from "shared/ui/text";
@@ -181,6 +182,13 @@ export class PayoutController implements OnStart {
 				warn(`[Payout] ignored a malformed ${ROUND_PAYOUT_REMOTE_NAME} payload.`);
 				return;
 			}
+
+			// **The coin sound hangs on this event rather than on a remote of its own.** One event, two effects — the panel
+			// and the ear — which is the shape item 88 used for the hit sound. Fired before `show` so a panel that fails to
+			// build cannot cost the player the confirmation, and only for a *valid* payload, so a malformed one is silent.
+			//
+			// Unthrottled: the server fires this once per round per player, from `RoundService.payOut`. See `playCoinSound`.
+			playCoinSound();
 
 			this.show(parsed);
 		});

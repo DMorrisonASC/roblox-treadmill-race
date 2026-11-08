@@ -8,7 +8,7 @@ chest), a ball picker, a store and an inventory sheet sit around it.
 Stack: roblox-ts + Rojo + Flamework. Fusion 3 is imported by three controllers — the phase banner,
 the round-transition wipe and the store — and big-ui by the banner's `Text` component plus the theme
 push. Everything else is a hand-built `Instance` tree; neither library is a framework to build on, so
-read *Toolchain notes* before reaching for one.
+read _Toolchain notes_ before reaching for one.
 
 **The load-bearing mechanic is the `BALL_SPEED` reference-speed model, whose docblock sits above
 `BALL_SPEED_DECAY_RATE` in [`src/shared/tuning.ts`](src/shared/tuning.ts). Read it before believing
@@ -17,13 +17,13 @@ repo describes it as one, that document is describing a previous version of the 
 
 ## Layout
 
-| Path | What it is |
-| ---- | ---------- |
-| `src/server/services/` | Six services: `treadmill`, `ball-spawner`, `pickup`, `round`, `economy`, `player-data-store` |
-| `src/client/controllers/` | Twelve controllers: belt scroll, marker spin, round state, transition wipe, phase banner, picker, store + inventory, debug keys, elimination splash, decoy outline, hit effect, pickup sound |
-| `src/server/powers/` | The ten powers — pure rules plus one instance-level wrapper, deliberately a module rather than a service |
-| `src/server/{round-outcome,debug-balls,decoy-outline,elimination-signal,picker,admin}.ts` | Plain modules with specs beside the code; no Flamework, so a spec can import them |
-| `src/shared/` | Tag names, attribute names + defaults, remote names, gameplay constants, the economy / powers / models configs and the UI theme |
+| Path                                                                                      | What it is                                                                                                                                                                                   |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/server/services/`                                                                    | Six services: `treadmill`, `ball-spawner`, `pickup`, `round`, `economy`, `player-data-store`                                                                                                 |
+| `src/client/controllers/`                                                                 | Twenty-one controllers: belt scroll, marker spin, ball render, wind boost, tail wind, motion blur, pickup sprite, pickup sound, hit effect, elimination splash, decoy outline, round state, phase banner, transition wipe, picker, shop, leaderboard, payout, reward toast, round song, debug keys |
+| `src/server/powers/`                                                                      | The ten powers — pure rules plus one instance-level wrapper, deliberately a module rather than a service                                                                                     |
+| `src/server/{round-outcome,debug-balls,decoy-outline,elimination-signal,picker,admin}.ts` | Plain modules with specs beside the code; no Flamework, so a spec can import them                                                                                                            |
+| `src/shared/`                                                                             | Tag names, attribute names + defaults, remote names, gameplay constants, the economy / powers / models configs and the UI theme                                                              |
 
 ## Scene ownership
 
@@ -36,8 +36,10 @@ Four things are hand-placed and tagged: a `TreadmillBelt`, a `BallSpawner` per l
 `EliminationZone` around the playable area. **A wall needs no tag** — it blocks balls as ordinary scene geometry, and the
 only thing that ever looked for a wall tag (an inert "wall assist") was deleted in item 94. Everything else on the belt
 is created by code and destroyed with the round: the ball bodies, their welded markers, one
-frictionless floor just above each belt's top face, the pickup triangles, and the `decoy` twin. Do not
-place those by hand — no service would look for them.
+frictionless floor just above each belt's top face, the pickup pads, and the `decoy` twin. Do not
+place those by hand — no service would look for them. The pickup **pad** is an invisible collider; the
+sprite above it and the filled disc on the floor under it are both built per client (`PickupSpriteController`), so nothing
+about how a pickup looks is in the place file.
 
 Connect with `npm run serve` from your own place. Do **not** open `build/game.rbxlx` for playtesting —
 that is a freshly composed place with no parts in it (it exists only to prove the project file
@@ -54,7 +56,7 @@ npm test               # pretest builds the place, then jest-roblox runs the sui
 npm run build:place    # compose build/game.rbxlx, proving the Rojo tree resolves
 ```
 
-`npm test` is self-sufficient: its `pretest` step rebuilds TypeScript *and* the place file, because the
+`npm test` is self-sufficient: its `pretest` step rebuilds TypeScript _and_ the place file, because the
 runner launches a place and a stale `build/game.rbxlx` would silently test the previous build. The
 `studio-cli` backend starts its own headless Studio and quits it, so an open Studio does not need
 closing; a normal run is about ninety seconds.
@@ -92,14 +94,14 @@ Studio and it survives re-tagging.
 
 ### Belt — any `BasePart` tagged `TreadmillBelt`
 
-| Attribute         | Type                 | Written if absent       |
-| ----------------- | -------------------- | ----------------------- |
-| `BeltSpeed`       | number, studs/second | **Placeholder** 10      |
+| Attribute         | Type                 | Written if absent        |
+| ----------------- | -------------------- | ------------------------ |
+| `BeltSpeed`       | number, studs/second | **Placeholder** 10       |
 | `BeltSpeedActual` | number, studs/second | by the round, each frame |
 
 The part must be `Anchored` with `CanCollide = true`. **Axis semantics, once, for the whole project.** The belt's long
 axis is world **X** and its short axis is world **Z**, and the belt's `RightVector` is world `+X` — the along-belt axis,
-*not* the lateral one, which is the naming trap behind every direction comment in `src/`. Looking from the **front toward
+_not_ the lateral one, which is the naming trap behind every direction comment in `src/`. Looking from the **front toward
 the back** (view direction `+X`, up `+Y`), **positive Z is on your right (quad 1) and negative Z on your left (quad 4)**;
 the belt spans both because its origin is its centreline in Z. Two frames are in use and every number in this repo says
 which: the **code frame** is `PointToObjectSpace` against the belt, measured from its **geometric centre** — a 56×1×12 belt
@@ -145,7 +147,7 @@ engine's so the bookkeeping is cleaned deterministically, without deleting balls
 
 Bodies are `Part` spheres tagged `Ball`, created on the server only, and parented to a
 `SpawnedBalls` folder in `Workspace`. The spawner itself is never reskinned or moved. A body's centre
-spawns one *rotated* half-height plus 0.5 studs above the part's origin, so its lowest point starts
+spawns one _rotated_ half-height plus 0.5 studs above the part's origin, so its lowest point starts
 0.5 studs clear and a spawn can never land inside the belt.
 
 `KillY` is recorded per ball at spawn; with several spawners the effective cap is the smallest
@@ -163,12 +165,12 @@ is not an elimination and notifies nobody.
 
 Four debug keys drive it, one per phase, in phase order:
 
-| Key | Effect |
-| --- | ------ |
-| `1` | Force `Intermission` from any phase: belt ramp stops, simulation stops, every body is cleared, the timer re-arms |
-| `2` | Force `Waiting`: clears, then spawns one owned competitor per player and opens the picker |
+| Key | Effect                                                                                                                                                                |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `1` | Force `Intermission` from any phase: belt ramp stops, simulation stops, every body is cleared, the timer re-arms                                                      |
+| `2` | Force `Waiting`: clears, then spawns one owned competitor per player and opens the picker                                                                             |
 | `3` | Force `Playing`. From `Playing` it restarts the competitors in place without restarting the round clock; from `PostGame` it refuses while the result is being cleared |
-| `4` | Spawn one competitor per bound spawner, each with a **different** ball, refused outside `Playing` |
+| `4` | Spawn one competitor per bound spawner, each with a **different** ball, refused outside `Playing`                                                                     |
 
 The client never decides a phase: every refusal is the server's, logged with the phase that caused
 it, so a key that "did nothing" says why in one line rather than looking broken. Input is ignored
@@ -194,7 +196,7 @@ plus the theme tokens; there is no component library underneath the rest.
   `PolicyService` gate; and an inventory with `Balls` and `Fusion` tabs. Fusion takes two balls and
   spends both, win or lose, and every chance shown is derived from the roll rather than written next
   to it.
-- **Profiles** are DataStore-backed behind a per-player session lock: every verb saves *before* it
+- **Profiles** are DataStore-backed behind a per-player session lock: every verb saves _before_ it
   reports, a failed save spends nothing, and a profile that cannot be loaded — or is locked by
   another session — goes read-only rather than retrying into it.
 - **`/dev` admin** is a server-side chat command, `/dev setCoins <player> <amount>` or
@@ -215,18 +217,18 @@ ticks), or a change to the body the model cannot overwrite. A force, or a veloci
 frame. `BALL_SPEED_MAX` in [`src/shared/tuning.ts`](src/shared/tuning.ts) is a safety net against a bully chain
 accumulating without bound; it sits above every designed value and never binds in normal play.
 
-| ball | power | kind | what it does |
-| --- | --- | --- | --- |
-| `bully_ball` | `bully` | collision | takes a share of the other ball's `BALL_SPEED` and keeps all of it |
-| `bouncy_ball` | `bouncy` | passive | hops on the belt; the only power that never touches `BALL_SPEED` |
-| `ghost_ball` | `ghost` | world | collides with walls and the belt, but not with other balls |
-| `heavy_ball` | `heavy` | collision | drains more than it keeps, and loses half of what anyone else would |
-| `decoy_ball` | `decoy` | world | spawns an identical twin that cannot win the round |
-| `magnet_ball` | `magnet` | aura | balls near it decay faster |
-| `rocket_ball` | `rocket` | timed | once per round, at a random moment, its speed snaps to a fixed boost |
-| `recycle_ball` | `recycle` | pickup | takes a pickup's boost and **leaves the pickup in play** for the next taker |
-| `eclipse_ball` | `eclipse` | timed | for a window, every opponent's decay is multiplied |
-| `sprinter_ball` | `sprinter` | event | a pickup boosts it further than the standard value |
+| ball            | power      | kind      | what it does                                                                |
+| --------------- | ---------- | --------- | --------------------------------------------------------------------------- |
+| `bully_ball`    | `bully`    | collision | takes a share of the other ball's `BALL_SPEED` and keeps all of it          |
+| `bouncy_ball`   | `bouncy`   | passive   | hops on the belt; the only power that never touches `BALL_SPEED`            |
+| `ghost_ball`    | `ghost`    | world     | collides with walls and the belt, but not with other balls                  |
+| `heavy_ball`    | `heavy`    | collision | drains more than it keeps, and loses half of what anyone else would         |
+| `decoy_ball`    | `decoy`    | world     | spawns an identical twin that cannot win the round                          |
+| `magnet_ball`   | `magnet`   | aura      | balls near it decay faster                                                  |
+| `rocket_ball`   | `rocket`   | timed     | once per round, at a random moment, its speed snaps to a fixed boost        |
+| `recycle_ball`  | `recycle`  | pickup    | takes a pickup's boost and **leaves the pickup in play** for the next taker |
+| `eclipse_ball`  | `eclipse`  | timed     | for a window, every opponent's decay is multiplied                          |
+| `sprinter_ball` | `sprinter` | event     | a pickup boosts it further than the standard value                          |
 
 **Every ball destroys the pickup on first touch, except `recycle`, which is the one deliberate exception.** Consumption is
 the default because a pad that survives a collection re-fires `Touched` on the ball resting on it, the boost is re-applied
@@ -241,51 +243,51 @@ The table says what a power does; this says when to want it. Rarity is **not** a
 pick less often than a legendary one in the situations they are built for, and that is the point. Nothing below quotes a
 magnitude: those live in the config, and a designer tuning them should read the config.
 
-**`bully`** — *does* move speed from whatever it touches to itself, keeping all of it.
-*Right pick* when the belt will be crowded, because the power only fires on contact and a crowded field is many contacts.
-*Wrong pick* in a lane of its own, where nothing is ever touched and the ball is plain for the whole ride.
+**`bully`** — _does_ move speed from whatever it touches to itself, keeping all of it.
+_Right pick_ when the belt will be crowded, because the power only fires on contact and a crowded field is many contacts.
+_Wrong pick_ in a lane of its own, where nothing is ever touched and the ball is plain for the whole ride.
 
-**`bouncy`** — *does* hop off the belt surface. It is the only power that changes nothing about `BALL_SPEED`.
-*Right pick* — none today: being airborne costs nothing and gains nothing in this model, so the hop is character rather
+**`bouncy`** — _does_ hop off the belt surface. It is the only power that changes nothing about `BALL_SPEED`.
+_Right pick_ — none today: being airborne costs nothing and gains nothing in this model, so the hop is character rather
 than advantage. This is the mechanic as built, not a verdict on what the ball should be.
-*Wrong pick* when you are racing to win, for the same reason.
+_Wrong pick_ when you are racing to win, for the same reason.
 
-**`ghost`** — *does* make the body intangible to other balls; walls and the belt still stop it.
-*Right pick* in a field that can only hurt you, because it removes the one interaction that transfers speed away from you.
-*Wrong pick* when you are the one doing the taking, since a ghost cannot collide with anything it would want to drain.
+**`ghost`** — _does_ make the body intangible to other balls; walls and the belt still stop it.
+_Right pick_ in a field that can only hurt you, because it removes the one interaction that transfers speed away from you.
+_Wrong pick_ when you are the one doing the taking, since a ghost cannot collide with anything it would want to drain.
 
-**`heavy`** — *does* drain more than it keeps, and halves what anyone else drains off it.
-*Right pick* wherever contact happens, because it wins the exchange from both sides — it takes more and loses less.
-*Wrong pick* in an empty lane, where the power never fires and its only remaining property is that it rides like any ball.
+**`heavy`** — _does_ drain more than it keeps, and halves what anyone else drains off it.
+_Right pick_ wherever contact happens, because it wins the exchange from both sides — it takes more and loses less.
+_Wrong pick_ in an empty lane, where the power never fires and its only remaining property is that it rides like any ball.
 
-**`decoy`** — *does* put a second body on the belt that looks, moves and collides like the first but can never win.
-*Right pick* in a busy field, where an extra identical body is one more thing for everyone else to react to.
-*Wrong pick* in a small one, where the twin is obvious and the only effect is that a `MaxLiveBalls` slot is gone.
+**`decoy`** — _does_ put a second body on the belt that looks, moves and collides like the first but can never win.
+_Right pick_ in a busy field, where an extra identical body is one more thing for everyone else to react to.
+_Wrong pick_ in a small one, where the twin is obvious and the only effect is that a `MaxLiveBalls` slot is gone.
 
-**`magnet`** — *does* make every ball near it decay faster.
-*Right pick* alongside the field, because the aura is a radius and its whole value is having somebody inside it.
-*Wrong pick* out in front, where nothing is within reach and it races as a plain ball.
+**`magnet`** — _does_ make every ball near it decay faster.
+_Right pick_ alongside the field, because the aura is a radius and its whole value is having somebody inside it.
+_Wrong pick_ out in front, where nothing is within reach and it races as a plain ball.
 
-**`rocket`** — *does* snap its speed to a fixed boost once, at a moment drawn at random after the green light.
-*Right pick* in a round that lasts, because one large gift is worth more than a steady trickle and the moment has to arrive
+**`rocket`** — _does_ snap its speed to a fixed boost once, at a moment drawn at random after the green light.
+_Right pick_ in a round that lasts, because one large gift is worth more than a steady trickle and the moment has to arrive
 before the race is decided.
-*Wrong pick* in a short round, where the snap can land after the result is settled.
+_Wrong pick_ in a short round, where the snap can land after the result is settled.
 
-**`recycle`** — *does* take the standard pickup boost and leave the pad in the world, reusable by the next ball through it.
-*Right pick* in a field where pads are contested, because a pad that survives is worth more to the field than to you — and
+**`recycle`** — _does_ take the standard pickup boost and leave the pad in the world, reusable by the next ball through it.
+_Right pick_ in a field where pads are contested, because a pad that survives is worth more to the field than to you — and
 in a round that runs long, since one pad can be taken repeatedly instead of once.
-*Wrong pick* in a lane you expect to cross alone, where keeping the pad alive denies nobody and hands the same boost you
+_Wrong pick_ in a lane you expect to cross alone, where keeping the pad alive denies nobody and hands the same boost you
 just took to whoever follows.
 
-**`eclipse`** — *does* multiply every opponent's decay for a window that opens partway through the round.
-*Right pick* in a big field, because the effect applies to every opponent and its worth scales with how many there are.
-*Wrong pick* in a field of one, where the window costs the field almost nothing and the ball spends its round as a plain
+**`eclipse`** — _does_ multiply every opponent's decay for a window that opens partway through the round.
+_Right pick_ in a big field, because the effect applies to every opponent and its worth scales with how many there are.
+_Wrong pick_ in a field of one, where the window costs the field almost nothing and the ball spends its round as a plain
 one.
 
-**`sprinter`** — *does* take a larger boost from the same pickup.
-*Right pick* in a lane whose pads you expect to reach, since the power is only ever a bigger version of something you have
+**`sprinter`** — _does_ take a larger boost from the same pickup.
+_Right pick_ in a lane whose pads you expect to reach, since the power is only ever a bigger version of something you have
 to touch.
-*Wrong pick* in a lane whose pads you will not reach, where it never fires at all.
+_Wrong pick_ in a lane whose pads you will not reach, where it never fires at all.
 
 ### Collision groups — read this before debugging a collision
 
@@ -318,7 +320,7 @@ to the whole server. So the client invokes `ReplicatedStorage.Remotes.DecoyOutli
 tree — on entry to `Playing`, and the server answers **that caller only**, returning the twin's body or `nil`. A spectator
 receives `nil`, creates no `Highlight`, and keeps seeing two identical balls.
 
-The server answers from `BallSpawnerService.decoyFor(body)`, a server-side parent → twin map. An `Instance` attribute *can*
+The server answers from `BallSpawnerService.decoyFor(body)`, a server-side parent → twin map. An `Instance` attribute _can_
 hold a reference, but reading one back yields an `InstanceHandle` rather than a `BasePart`, the handle reads `nil` once the
 body it points at is destroyed, and the link would replicate to every client — so the map is the shape that answers the
 question without any of that. An `OwnerUserId` on the twin is forbidden outright: it is the field `getCompetitors()` filters
@@ -384,29 +386,41 @@ place with your own parts:
    bully, and the pair's total speed falls.
 10. Watch a `rocket_ball` — its badge reads `ROCKET` and its speed jumps once, at a different moment each
     round.
-11. Cross a pickup with **any** ball — the triangle disappears, the log says `consumed=yes`, and no second
+11. Cross a pickup with **any** ball — the pad disappears, the log says `consumed=yes`, and no second
     `collected` line appears for the same ball.
-12. Cross one with a `recycle_ball` instead — the triangle is **still there**, the log says `consumed=no`, and a
-    second ball through it gets the same boost.
+12. Cross one with a `recycle_ball` instead — the pad is **still there**, the log says `consumed=no`, and a
+    second ball through it gets the same boost. Its sprite spins once for each real collection and is still
+    again afterwards, which is the only thing that distinguishes "a recycle ball just took it" from "nothing
+    happened".
 
 ## Deliberately absent
 
 No mesh or model support — every `model` in [`src/shared/models.config.ts`](src/shared/models.config.ts)
 is `undefined`, and a test fails if a ball id has no entry, so the swap fails the suite rather than
 drawing the same sphere. No client prediction: the server owns the velocity and every client sees the
-result a round trip later. Audio is five UI sounds and nothing else — a button press, a granted purchase, a ball leaving
-the belt, a ball-ball hit, and a pickup that actually raised a ball's speed (`src/shared/sounds.config.ts`) — with no
-music, no ambience and nothing positional. The elimination sound is heard only by the player whose ball landed the last
-touch on the body that left (or by nobody, if nothing touched it), because the sound means *you* put that body out. The
+result a round trip later. Audio is **six one-shot UI sounds plus one round song** and nothing else — a button press, a
+granted purchase, a coin earn, a ball leaving the belt, a ball-ball hit, and a pickup that actually raised a ball's speed
+(`src/shared/sounds.config.ts`) — with no ambience and nothing positional. The song is the only sound with a lifecycle
+rather than an event: it starts when `Playing` is observed, fades in over two seconds, loops `0:00 → 1:27` once and then
+`0:05 → 1:27` for ever (the intro is **not** part of the loop, which is why it is `Looped = false` and a playhead wrap in
+`src/shared/ui/song.ts`), and fades out over two seconds when the phase ends — so its tail runs about two seconds into
+`PostGame` rather than stopping dead on the frame the round ends, which is the closest a fade can get when the round's end is
+not predictable. The elimination sound is heard only by the player whose ball landed the last
+touch on the body that left (or by nobody, if nothing touched it), because the sound means _you_ put that body out. The
 hit sound plays on every hit burst the client is told about. Three of them are throttled and with separate slots, so a
 hit right after an elimination is still heard: the elimination and the hit at one start per half second, and the pickup at
 one per 0.3 s — because a `recycle` ball resting on its surviving pad re-touches it every few milliseconds and re-raises
-its decayed speed each time, which without an interval is a buzz rather than a sound. A click and a grant play every time.
-Volume and pitch are per sound in `SOUND_TUNING` next to the ids — the hit is deliberately the quietest and the pickup sits
-just above it — and they are applied when each `Sound` is built, not per play. No camera work.
-**The only VFX are three:** the power badge, the decoy owner's outline, and
-a ball-ball hit burst — one clone of the Studio asset `ReplicatedStorage.hitEffect`, built on each client at the contact
-midpoint and destroyed by `Debris`. No trail or world aura for any power, because a `magnet` or `eclipse` aura is a
-radius in a server-side registry and draws nothing — and no periodic `ghost` toggle. No in-round coin
+its decayed speed each time, which without an interval is a buzz rather than a sound. A click, a grant and a coin earn play
+every time.
+Volume and pitch are per sound in `SOUND_TUNING` next to the ids — the hit is deliberately the quietest, the pickup sits
+just above it, and the song is quieter still because it is a bed — and they are applied when each `Sound` is built, not per
+play. The song's row is also the level its two-second fade ramps _to_. No camera work.
+**The VFX are five, and none of them is a world aura:** the power badge, the decoy owner's outline, a ball-ball hit burst —
+one clone of the Studio asset `ReplicatedStorage.hitEffect`, built on each client at the contact midpoint and destroyed by
+`Debris` — two per-ball trails (`windBoost` while a ball is at or above belt speed, `tailWind` while it is in regular
+motion), and one arena-wide `motionBlur` overlay: a single clone of `ReplicatedStorage.assets.vfx.motionBlur` placed at the
+`EliminationZone`, alive only during `Playing`, with every emitter's `Rate` ramped from 0 to its authored value over half a
+second and back down again when the phase leaves. No per-power aura, because a `magnet` or `eclipse` aura is a radius in a
+server-side registry and draws nothing — and no periodic `ghost` toggle. No in-round coin
 earn path: coins start at 500, are spent by a chest or the picker's re-roll, and are granted only
 through `/dev`.

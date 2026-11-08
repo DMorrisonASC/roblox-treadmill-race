@@ -1061,7 +1061,7 @@ export class EconomyService implements OnStart {
 		print(
 			`[Economy] ${player.Name} reward ${label} amount=${amount} total=${profile.coins} stamp=${profile[field]}`,
 		);
-		this.toast(player, label, amount);
+		this.toast(player, label, amount, false);
 
 		return true;
 	}
@@ -1090,7 +1090,7 @@ export class EconomyService implements OnStart {
 		print(
 			`[Economy] ${player.Name} reward ${DAILY_LOGIN_LABEL} preview amount=${DAILY_LOGIN_REWARD_COINS} (studio, no grant)`,
 		);
-		this.toast(player, DAILY_LOGIN_LABEL, DAILY_LOGIN_REWARD_COINS);
+		this.toast(player, DAILY_LOGIN_LABEL, DAILY_LOGIN_REWARD_COINS, true);
 	}
 
 	/**
@@ -1098,14 +1098,19 @@ export class EconomyService implements OnStart {
 	 *
 	 * Split out of `award` so the preview path can reach the client without reaching the economy: the grant and the message
 	 * are two separate facts, and only one of them is what a Studio preview fakes.
+	 *
+	 * `preview` travels because **the client cannot work it out and the two paths differ by one effect**: the card draws
+	 * either way, but the coin sound must not play for money that did not move. A client reading `RunService.IsStudio()`
+	 * would silence the real daily login in a playtest; a client diffing the balance would be racing replication. See
+	 * `RewardToastMessage`.
 	 */
-	private toast(player: Player, label: string, amount: number): void {
+	private toast(player: Player, label: string, amount: number, preview: boolean): void {
 		const remote = this.rewardToastRemote;
 		if (remote === undefined) {
 			return;
 		}
 
-		remote.FireClient(player, { label, amount } as RewardToastMessage);
+		remote.FireClient(player, { label, amount, preview } as RewardToastMessage);
 	}
 
 	/**

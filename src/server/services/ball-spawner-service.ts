@@ -458,6 +458,10 @@ export class BallSpawnerService implements OnStart {
 	 * Cleared in both death paths — the parent's and the twin's — so its size tracks the live set like every other map in
 	 * this file. It is tiny (one entry per `decoy` competitor, so at most one per lane) and the reverse scan in
 	 * `forgetDecoy` costs nothing at that size.
+	 *
+	 * **A parent's death takes the twin with it (item 148)**, and that is the difference between this and `decoyIdentities`
+	 * below: the link is a record of a *pair*, so it has no meaning once either half is gone, while the identity is a fact
+	 * about a body that is still on the belt.
 	 */
 	private readonly decoysByParent = new Map<BasePart, BasePart>();
 
@@ -468,18 +472,20 @@ export class BallSpawnerService implements OnStart {
 	 *
 	 * The leaderboard asks "who does this body represent" once per body per second, and the honest answer for a twin is *its
 	 * parent's* identity — the twin carries no owner attributes at all, by design. Reading that out of `decoysByParent` needs a
-	 * reverse scan, and the scan has one failure that matters more than its cost: **the link is deleted the moment the parent
-	 * dies**, so from that instant the twin has no parent to name and would be published as `Decoy B7` — announcing to every
-	 * player that the leftover body was the fake. The parent is usually eliminated first (it is the one being raced), so this
-	 * is not an edge case; it is the normal end of a decoy's life.
+	 * reverse scan of the link on every read, and a scan is the thing item 129 already called the cheaper of two evils only
+	 * because it was the only option at the time.
 	 *
-	 * A copy taken at spawn cannot go stale in that way: the identity is a `{userId, name}` pair that nothing rewrites, and
-	 * it survives the parent by exactly as long as the twin does. It is also immune to the "second index disagrees with the
-	 * first" hazard `forgetDecoy` warns about, because it is not an index of the link at all — it is a snapshot of an
-	 * attribute pair.
+	 * **Item 129's argument for the copy has since expired, and the copy is kept for a different reason.** It was: the link is
+	 * deleted the moment the parent dies, so a reverse lookup would publish the leftover twin as `Decoy B7`. There is no
+	 * leftover twin any more — item 148 destroys it with its parent — so the case that motivated the copy cannot happen. What
+	 * remains is the plain one: the twin has no owner attributes, so *something* has to answer with its parent's pair for as
+	 * long as the twin is on the belt, and a `{userId, name}` snapshot taken at spawn answers in one map read instead of a
+	 * scan. It is also immune to the "second index disagrees with the first" hazard `forgetDecoy` warns about, because it is
+	 * not an index of the link at all — it is a snapshot of an attribute pair.
 	 *
-	 * Cleared when the **twin** dies (`forgetDecoy` with the twin as the argument), never when the parent does — keeping the
-	 * entry through the parent's death is the whole point.
+	 * Cleared when the **twin** dies (`forgetDecoy` with the twin as the argument). When a *parent* dies the entry is left
+	 * alone and cleared by the twin's own cleanup pass, because deleting it there would be a second writer for a map that has
+	 * one, and a dead body is not asked for the name of anything.
 	 */
 	private readonly decoyIdentities = new Map<BasePart, { userId: number; name: string }>();
 
@@ -1222,6 +1228,18 @@ export class BallSpawnerService implements OnStart {
 		// The link the `DecoyOutline` remote answers from — see `decoysByParent` for why it is a map and not an attribute.
 		this.decoysByParent.set(parent, decoy);
 
+		// **The twin leaves the world in the same frame as its parent (item 148).** `forgetDecoy` is the rule, and it destroys
+		// the twin whenever a parent's link is dropped — but its callers are not timely. `destroyBall` calls it directly, so a
+		// `KillY` cull is immediate; a `left-belt` elimination is not: `RoundService.settleEliminations` calls `Destroy()` on
+		// the body itself, and the spawner only notices on the next `cleanup` pass, which runs every
+		// `CLEANUP_INTERVAL_SECONDS`. Half a second of a fake ball still rolling is exactly the kind of leftover body this
+		// round exists to remove, so the parent's own death signal closes the gap: `Destroying` fires inside the `Destroy()`
+		// call, whichever path made it, and calls the same `forgetDecoy`.
+		//
+		// The connection needs no disconnect: it dies with the parent instance, and the second `forgetDecoy` that
+		// `pruneDestroyedBalls` will make a moment later finds no entry and does nothing.
+		parent.Destroying.Connect(() => this.forgetDecoy(parent));
+
 		// The identity this twin answers with, taken now because the answer has to outlive the parent — see
 		// `decoyIdentities`. Read before the twin is parented is irrelevant (it is the *parent's* attributes), but it is read
 		// here rather than later so the copy is made at the one moment the two bodies are known to be a pair.
@@ -1297,14 +1315,36 @@ export class BallSpawnerService implements OnStart {
 	}
 
 	/**
-	 * Drops any decoy link involving this body, whichever side of it the body is.
+	 * Drops any decoy link involving this body, **and destroys the twin when the body that died is the parent** (item 148).
 	 *
-	 * Called from both death paths with whichever body died. A parent's death leaves an orphaned twin on the belt — the twin
-	 * is not a child of the parent, deliberately, because `Destroy()` on the parent must not silently remove a body the
-	 * round may still be counting — so both directions have to be handled. The map is at most one entry per lane, which is
-	 * why the reverse scan is a loop rather than a second index that could disagree with the first.
+	 * Called from both death paths with whichever body died: `destroyBall` (`KillY` and the live-ball cap) and
+	 * `pruneDestroyedBalls` (a body something else destroyed — which includes every `left-belt` elimination, because
+	 * `RoundService.settleEliminations` destroys the body directly and only the cleanup pass notices afterwards).
+	 *
+	 * ## The map is cleared from both sides, and that is still what this method is primarily for
+	 *
+	 * A parent's death leaves an entry keyed by a body that no longer exists; a twin's death leaves an entry *valued* by one,
+	 * and `decoyFor` would then answer with a dead body — the reverse scan is what removes that side. The map is at most one
+	 * entry per lane, which is why the reverse pass is a loop rather than a second index that could disagree with the first.
+	 *
+	 * ## Why the twin is a separate body and is destroyed here rather than being a child of the parent
+	 *
+	 * Item 79 wrote the opposite rule and this round reverses it. The twin is deliberately **not** a child of the parent —
+	 * parenting a physics body to another sees it move with it, and the twin is an independent ball — so `Destroy()` on the
+	 * parent never removed it. That was right while the orphan was the intended end of a decoy's life (item 129's leaderboard
+	 * work kept the twin alive so its row would not publish as `Decoy B7`). It is wrong now: once the real body is out of the
+	 * round the twin is a second ball with nobody in it, and a player watching their own elimination sees a body that is not
+	 * theirs still racing. **The rule is one line — the twin dies with its parent** — and it lives here so that every caller
+	 * that drops a link drops the body too, including the ones that do not exist yet.
+	 *
+	 * The `Parent !== undefined` test is the "already gone" guard the prompt names: if the twin is the body being forgotten
+	 * (the other side of the link) there is no twin to find, and if it was destroyed a moment ago by its own `KillY` or by a
+	 * teardown, `Destroy()` on it would be a no-op that still looks like a second death in a stack trace.
 	 */
 	private forgetDecoy(ball: BasePart): void {
+		// **Read before the delete.** The value is the only reference to the twin on the parent's side of the link, and the
+		// delete below is what makes a second `forgetDecoy` on the same parent a silent no-op.
+		const twin = this.decoysByParent.get(ball);
 		this.decoysByParent.delete(ball);
 
 		const stale = new Array<BasePart>();
@@ -1318,10 +1358,19 @@ export class BallSpawnerService implements OnStart {
 			this.decoysByParent.delete(parent);
 		}
 
-		// **Only when the dead body is the twin.** `ball` is whichever body died, so this is a no-op when a *parent* dies - and
-		// that is deliberate: the twin keeps the identity it was given at spawn so its leaderboard row still carries the
-		// player's name after the parent is gone. Deleting it on the parent's death would publish the orphan as `Decoy B7`.
+		// **Only when the dead body is the twin.** `ball` is whichever body died, so this is a no-op when a *parent* dies —
+		// the twin is destroyed by this method rather than left holding a name it no longer needs. Deleting the *parent's*
+		// copy would be meaningless (it is keyed by the twin) and deleting the twin's copy here would be the only place that
+		// second index is written from the parent's side; the twin's own prune clears it, one cleanup pass later at worst.
 		this.decoyIdentities.delete(ball);
+
+		if (twin !== undefined && twin !== ball && twin.Parent !== undefined) {
+			// TEMPORARY INSTRUMENTATION (item 148). The twin's disappearance is otherwise unobservable in the log: the parent
+			// has a `[Round] eliminated` line and the twin has nothing, so a round that failed to take it would look exactly
+			// like a round that did. At most one line per lane per round. Retire it with the other temporary blocks.
+			print(`[Decoy] twin ${twin.GetFullName()} destroyed with parent ${ball.GetFullName()}`);
+			twin.Destroy();
+		}
 	}
 
 	private ballsFolder(): Folder {

@@ -1,6 +1,6 @@
 /**
- * The five UI sounds: their asset ids, their playback values, and the throttle rule that decides whether one may play
- * again.
+ * The six one-shot UI sounds and the round song: their asset ids, their playback values, and the throttle rule that decides
+ * whether one may play again.
  *
  * ## Why the ids are bare numbers and the prefix lives in a function
  *
@@ -20,9 +20,12 @@
  * set, so four eliminations are four signals in one frame, and four restarts of one clip in one frame is not four
  * eliminations to the ear — it is a stutter, or one clipped transient. Collapsing them is the whole job.
  *
- * **Three of the five sounds use this: the elimination and the hit at the shared half second, and the pickup at its own
- * 0.3 s.** A click is one press and a granted purchase is already gated twice, so throttling either would swallow a
- * deliberate event rather than prevent a repeat; `shared/ui/sounds` carries that argument in full. The hit sound joined
+ * **Three of the six one-shot sounds use this: the elimination and the hit at the shared half second, and the pickup at its
+ * own 0.3 s.** A click is one press and a granted purchase is already gated twice, so throttling either would swallow a
+ * deliberate event rather than prevent a repeat; `shared/ui/sounds` carries that argument in full. **The coin sound is the
+ * sixth and the third unthrottled one, for the purchase sound's reason rather than the elimination sound's**: an earn is a
+ * grant that happens once per round or once per schedule, never in a loop. **The song is not on this list and cannot be** —
+ * it is one long start, not a repeat, and its lifecycle is in `shared/ui/song`. The hit sound joined
  * the list in item 88, for the same reason the elimination sound is on it: two bodies in contact re-fire `Touched` on
  * essentially every physics step, and a crowded belt is many pairs at once, so a hit arrives in bursts by nature rather
  * than one deliberate press at a time. The predicate stays general because the *rule* is general: any future sound that
@@ -105,6 +108,81 @@ export const HIT_SOUND_ASSET_ID = "140025518477459";
 export const PICKUP_SOUND_ASSET_ID = "111254855668531";
 
 /**
+ * The clip for coins arriving in this player's balance.
+ *
+ * **Not a placeholder** — the user's upload, like the hit and pickup sounds.
+ *
+ * **Not throttled, and that is a decision rather than an omission.** The two events behind it are a round payout (once per
+ * round per player, fired from `endPlaying`) and a time-based reward (20 hours, or 15 minutes); neither arrives in a burst,
+ * so the interval that makes the elimination and hit sounds audible would here be a third gate behind schedules that are
+ * already the gate. The argument lives in full on `playCoinSound` in `shared/ui/sounds`; it is noted here so that the id and
+ * the rule are readable together, which is what item 89 asked of every id in this file.
+ */
+export const COIN_SOUND_ASSET_ID = "79302475372626";
+
+// #region the round song
+
+/**
+ * The music bed for `Playing`. **Not a placeholder** — the user's upload, and deliberately *not* the coin sound's id.
+ *
+ * ## Why this id is not in the six-sound list above, and why it is still in this file
+ *
+ * The six above are **events**: each fires once and is forgotten, and `shared/ui/sounds` plays them through
+ * `PlayLocalSound`, which copies a cached instance and returns. This one is an **object with a lifetime** — it is started,
+ * faded, looped by arithmetic and destroyed — and it is owned by exactly one controller. That difference is a difference in
+ * *kind*, not in storage: the id, the tuning row and the loop points are still properties of an asset, and item 89's rule is
+ * that an asset value with no way to preview it from code lives in the repo. So the id lives here beside the others; the
+ * lifecycle lives in `shared/ui/song.ts`.
+ *
+ * **`SOUND_TUNING` still gets a row for it** (item 89): an absent row is indistinguishable from one nobody remembered, and
+ * the fade's target is `sound.Volume` — the tuned value — so a missing row would quietly ramp to `1.0` instead of to a
+ * deliberate bed level.
+ */
+export const SONG_ASSET_ID = "130554552490423";
+
+/**
+ * **Placeholder.** Where the loop body begins, in seconds: the *end of the intro*.
+ *
+ * ## The one sentence that must not be lost: **the intro is not part of the loop**
+ *
+ * The playhead starts at `0`, the first pass runs to `SONG_END_SECONDS`, and **every pass after that starts here**. It never
+ * returns to `0` again. That is the whole reason this constant exists: `Sound.Looped = true` loops `0 → end`, which replays
+ * the intro on every pass — a musically wrong result that no build error and no log would ever report. See
+ * `shared/ui/song.ts` for the arithmetic that implements the correct loop and for why the engine's `LoopRegion` was not
+ * used instead.
+ */
+export const SONG_INTRO_END_SECONDS = 5;
+
+/**
+ * **Placeholder.** The end of the loop body, in seconds — asserted against the asset at 87 s (1:27).
+ *
+ * **The number is only correct if the asset is 87 s.** It was given in a prompt and could not be measured from here; a
+ * `TimeLength` differing by more than about a second means the loop point is in the wrong place, and the symptom is a seam
+ * at the wrap or a truncated tail rather than an error. `song.spec.ts` pins the ordering (`intro < end`) so a typo that
+ * inverted the two fails the suite, but nothing in this repository can check the asset itself.
+ *
+ * A wrap *at* this value competes with the clip's own end, which is why `song.ts` also re-seats from the `Ended` signal: a
+ * dropped frame can land past the end, and a stopped sound would otherwise sit silent until the phase changed.
+ */
+export const SONG_END_SECONDS = 87;
+
+/**
+ * **Placeholder.** The fade duration in seconds — and, in one number, three things:
+ *
+ * 1. how long the song takes to ramp **up** from silence when `Playing` begins,
+ * 2. how long it takes to ramp **down** when `Playing` ends, and
+ * 3. **how long the tail runs past the phase change**, because the fade-out cannot be scheduled before the end.
+ *
+ * The third is not a tuning preference, it is a consequence: `Playing` has had no time cap since item 37 and its end is
+ * decided at the instant "one competitor remains" becomes true, so neither the server nor the client can know the end in
+ * advance. "Fade out two seconds before the end" is therefore unimplementable at any layer; what is implemented is "fade out
+ * the moment the client observes the end". `round-song-controller` carries the full argument and what avoids it.
+ */
+export const SONG_FADE_SECONDS = 2;
+
+// #endregion
+
+/**
  * How one sound plays: the two `Sound` properties this repository decides.
  *
  * **`volume` is 0-1-ish and `playbackSpeed` is a pitch multiplier** — 1 is the clip as uploaded, 2 is an octave up and
@@ -128,16 +206,16 @@ export const DEFAULT_SOUND_TUNING: SoundTuning = { volume: 1, playbackSpeed: 1 }
 /**
  * **The playback values this repository decides, keyed by asset id.**
  *
- * Every id keyed here is one of the four above, and the spec asserts that: a key that does not match an id is a row
+ * Every id keyed here is one of the seven above, and the spec asserts that: a key that does not match an id is a row
  * nothing reads, and it would leave the sound it *meant* to configure at the default — a quiet failure that looks like an
  * asset problem. The keys are the id constants rather than literals so the two cannot drift.
  *
  * **Keyed by asset id and not by sound kind**, for the reason `lastPlayedAt` is (item 88): a kind key would put the hit
  * and the elimination sound in one slot, and the round that quietened one would silently quieten the other.
  *
- * **The other three are written out at `1`/`1` rather than omitted.** Both readings are the same numbers, but the written
- * row says the values were considered and are deliberately the engine's defaults; an absent row is indistinguishable from
- * one nobody remembered, which is how a *fifth* sound gets forgotten too.
+ * **The three default-valued sounds are written out at `1`/`1` rather than omitted.** Both readings are the same numbers,
+ * but the written row says the values were considered and are deliberately the engine's defaults; an absent row is
+ * indistinguishable from one nobody remembered, which is how a *sixth* sound gets forgotten too.
  */
 export const SOUND_TUNING: Record<string, SoundTuning> = {
 	[ELIMINATION_SOUND_ASSET_ID]: { volume: 1, playbackSpeed: 1 },
@@ -145,10 +223,19 @@ export const SOUND_TUNING: Record<string, SoundTuning> = {
 	[CLICK_SOUND_ASSET_ID]: { volume: 1, playbackSpeed: 1 },
 	// **Placeholder.** Quieter than the elimination sound, which is the loudest thing in the mix and the one a player most
 	// wants to hear over a scrum of hits. The numbers are a starting point to judge in Studio, not a mix.
-	[HIT_SOUND_ASSET_ID]: { volume: 0.6, playbackSpeed: 1 },
+	[HIT_SOUND_ASSET_ID]: { volume: 0.2, playbackSpeed: 1 },
 	// **Placeholder.** A reward, so louder than the hit and below the elimination sound. No pitch shift: a pickup is a
 	// boost, and a clip already pitched upward by its author does not want a second multiplier on top.
-	[PICKUP_SOUND_ASSET_ID]: { volume: 0.8, playbackSpeed: 1 },
+	[PICKUP_SOUND_ASSET_ID]: { volume: 0.2, playbackSpeed: 1 },
+	// **Placeholder.** The coin sound is a reward too, so it starts where the pickup does. Tune it against the payout panel
+	// rather than alone: the two fire together, and the panel's count-up is the thing the ear is being asked to match.
+	[COIN_SOUND_ASSET_ID]: { volume: 0.8, playbackSpeed: 1 },
+	// **Placeholder.** The round song's **target** volume: the level the two-second fade ramps *to*, not a value the sound is
+	// ever set to directly. Well under the effects — a music bed that sits at an effect's level competes with the coin sound
+	// and the elimination sound, and the mix that matters is the one where the player hears a body leave the belt over the
+	// music. No pitch shift: this is a bed, and a shared `playbackSpeed` would also change how long the loop points are in
+	// wall-clock seconds, which would silently invalidate both of them.
+	[SONG_ASSET_ID]: { volume: 0.15, playbackSpeed: 1 },
 };
 
 /**

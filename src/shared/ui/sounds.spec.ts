@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@rbxts/jest-globals";
 import {
 	CLICK_SOUND_ASSET_ID,
+	COIN_SOUND_ASSET_ID,
 	ELIMINATION_SOUND_ASSET_ID,
 	HIT_SOUND_ASSET_ID,
 	PICKUP_SOUND_ASSET_ID,
@@ -8,10 +9,17 @@ import {
 	PURCHASE_SOUND_ASSET_ID,
 	SOUND_MIN_INTERVAL_SECONDS,
 } from "../sounds.config";
-import { playClickSound, playEliminationSound, playHitSound, playPickupSound, playPurchaseSound } from "./sounds";
+import {
+	playClickSound,
+	playCoinSound,
+	playEliminationSound,
+	playHitSound,
+	playPickupSound,
+	playPurchaseSound,
+} from "./sounds";
 
 /**
- * Which of the five sounds is throttled, asserted rather than described.
+ * Which of the six sounds is throttled, asserted rather than described.
  *
  * ## Why the player is a parameter
  *
@@ -56,6 +64,54 @@ describe("ui sounds", () => {
 		expect(played.size()).toBe(2);
 		expect(played[0]).toBe(PURCHASE_SOUND_ASSET_ID);
 		expect(played[1]).toBe(PURCHASE_SOUND_ASSET_ID);
+	});
+
+	it("plays the coin sound on every earn, including two in a row", () => {
+		const played = new Array<string>();
+		const record = (assetId: string) => played.push(assetId);
+
+		// Criterion 7, and the property that separates this sound from the elimination, hit and pickup ones: an earn is a
+		// grant that happens once (a round payout, a daily login, a 15-minute stipend), never in a loop, so there is nothing
+		// to collapse. Two earns in quick succession — a payout landing in the same second as a stipend, which the schedules
+		// make rare rather than impossible — are two events and must be two sounds.
+		//
+		// Asserted through the same recorder the throttled sounds use, which is also what proves the call reaches the player
+		// with the *coin* id rather than a neighbour's: a copy-paste of `playPurchaseSound`'s body would fail here.
+		playCoinSound(record);
+		playCoinSound(record);
+
+		expect(played.size()).toBe(2);
+		expect(played[0]).toBe(COIN_SOUND_ASSET_ID);
+		expect(played[1]).toBe(COIN_SOUND_ASSET_ID);
+	});
+
+	it("does not put the coin sound in a throttled slot", () => {
+		const played = new Array<string>();
+		const record = (assetId: string) => played.push(assetId);
+
+		// **The regression this exists for is a "helpful" re-throttle.** The coin sound shares its volume row with the pickup
+		// and nothing else; giving it an interval later would be invisible in a build and inaudible in a log, and it would
+		// swallow the second of two genuine earns. Played eleven times at one fixed instant, an unthrottled player plays
+		// eleven times — a throttled one would play once.
+		for (let index = 0; index < 11; index++) {
+			playCoinSound(record);
+		}
+
+		expect(played.size()).toBe(11);
+		for (const assetId of played) {
+			expect(assetId).toBe(COIN_SOUND_ASSET_ID);
+		}
+
+		// And the coin sound never writes `lastPlayedAt`, so it cannot occupy a throttled sound's slot: an elimination
+		// immediately afterwards plays on its own schedule.
+		//
+		// **`999`, deliberately below the elimination block's `1000`.** This spec runs in file order against module state, so a
+		// probe at a *later* time would stamp the elimination slot ahead of the block below and make its first call refuse —
+		// a test that breaks a neighbour rather than testing anything. Starting under that block's base keeps the two
+		// independent, which is the property the file docblock promises.
+		playEliminationSound(999, record);
+		expect(played.size()).toBe(12);
+		expect(played[11]).toBe(ELIMINATION_SOUND_ASSET_ID);
 	});
 
 	it("plays the pickup sound once per interval, and again at the boundary", () => {

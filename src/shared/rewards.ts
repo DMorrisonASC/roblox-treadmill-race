@@ -25,6 +25,19 @@ export interface RewardToastMessage {
 	readonly label: string;
 	/** Coins granted. Always the amount actually added, never the schedule's nominal value. */
 	readonly amount: number;
+	/**
+	 * Whether this card describes a grant that actually happened, or a Studio rehearsal of one.
+	 *
+	 * **The server is the only side that can answer this, so it travels.** `previewDailyLogin` fires the same card on every
+	 * playtest and deliberately moves no coins (item 135), which is what makes the panel testable at all; a client that
+	 * inferred it from `RunService.IsStudio()` would also silence the *real* daily login in Studio, and a client that
+	 * compared the balance before and after would be racing a replication it cannot order.
+	 *
+	 * **The card ignores this field and the ear does not.** A preview still draws — looking at the toast is the point of the
+	 * preview — but it must not play the coin sound, because a sound for money that did not move is a lie the reward toast
+	 * exists to avoid.
+	 */
+	readonly preview: boolean;
 }
 
 /** The label for the once-a-day grant. One string, so the toast and the log cannot describe the same event differently. */
