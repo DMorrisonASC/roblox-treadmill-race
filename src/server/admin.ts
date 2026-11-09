@@ -1,5 +1,6 @@
 /**
- * The pure half of the `/dev` command: who may run it, what a coin amount may be, and how one chat line is read.
+ * The pure half of the `/dev` command: who may run it, what a coin amount may be, how one chat line is read, and whether
+ * the dangerous verbs are armed at all (item 150).
  *
  * ## Why this file is under `src/server` and not `src/shared`
  *
@@ -21,7 +22,13 @@
  *
  * Everything here is a pure function over plain values, which is what makes criteria about "refuses without writing"
  * testable in Jest Lua — no `Player`, no `DataStore`, no engine service is constructed by any of it.
+ *
+ * The one exception is the arming gate at the bottom of this file (item 150): it holds a `let` per server session and
+ * seeds it from `isStudioSession()`. The **rule** is still pure (`armDev`/`disarmDev` take a state and return one); the
+ * three wrappers around it are the only code here that touches a module variable.
  */
+
+import { isStudioSession } from "./services/player-data-store";
 
 /**
  * The UserIds allowed to run `/dev`. **The only authorisation check in the tree.**
@@ -135,6 +142,8 @@ const DEV_COMMAND_WORD = "dev";
 export type DevCommand =
 	| { ok: true; kind: "setCoins"; target: string; amount: string }
 	| { ok: true; kind: "wipeData"; target: string }
+	| { ok: true; kind: "arm"; token: string }
+	| { ok: true; kind: "disarm" }
 	| { ok: false; reason: string };
 
 /**
@@ -220,6 +229,30 @@ export function parseDevCommand(text: string): DevCommand {
 		return { ok: true, kind: "wipeData", target: tokens[index] };
 	}
 
+	// **The two arming subcommands (item 150).** They are parsed here rather than recognised in the handler because the
+	// handler only ever sees a `DevCommand`: `arm` used to fall into the `unknown subcommand` branch, so there was no route
+	// from the chat line to an arming call at all. Parsing is also what gives `arm` its arity refusal and keeps the
+	// handler's dispatch exhaustive.
+	//
+	// `arm` accepts **zero or one** token: `/dev arm` with nothing is a legitimate keystroke, and it must fail on the token
+	// comparison (a `bad-token` refusal) rather than on a parse error, so the answer to "did I arm it" is the same shape
+	// whichever way the typist was wrong.
+	if (subcommand === "arm") {
+		if (tokens.size() > index + 1) {
+			return { ok: false, reason: "arm takes at most one argument" };
+		}
+
+		return { ok: true, kind: "arm", token: tokens[index] ?? "" };
+	}
+
+	if (subcommand === "disarm") {
+		if (tokens.size() > index) {
+			return { ok: false, reason: "disarm takes no arguments" };
+		}
+
+		return { ok: true, kind: "disarm" };
+	}
+
 	return { ok: false, reason: `unknown subcommand "${tokens[index - 1]}"` };
 }
 
@@ -264,3 +297,183 @@ export function findPlayerByName<T extends NamedPlayer>(candidates: ReadonlyArra
 
 	return undefined;
 }
+
+// #region the arming gate (item 150)
+
+/**
+ * **Placeholder.** The word `/dev arm <token>` has to be given before `setCoins` or `wipeData` will run.
+ *
+ * ## This is not a secret, and the docblock says so on purpose
+ *
+ * A leaked token is **not** a breach: `ADMIN_USER_IDS` is the access control, and it is the only thing standing between a
+ * stranger and the economy. The token's whole job is to stop an admin's own slip of the hand — an admin who meant
+ * `/dev setCoins` in a playtest and types the same thing on Live — from changing a real player's balance in one
+ * keystroke. Two words of friction, not two factors of authentication.
+ *
+ * Writing that down matters because the opposite belief is the dangerous one: if this looked like a secret, somebody would
+ * eventually move it into a `Secret`, replicate it, or gate a client on it. It lives in `src/server`, which
+ * `default.project.json` mounts at `ServerScriptService` — an instance that does not replicate to a client — and it is
+ * never logged (`grep DEV_ARM_TOKEN src` finds it here and nowhere else).
+ */
+export const DEV_ARM_TOKEN = "arm-dev";
+
+/**
+ * The environment, **read once for this entire file** (item 150).
+ *
+ * Both the seed below and the boot line's `reason=` want the same answer, and two `RunService.IsStudio()` calls are two
+ * chances to disagree about which environment this server is in. One read, one constant, one file — the same habit
+ * `PlayerDataStore.profileKey` and `EconomyService`'s Studio preview already follow with `isStudioSession()`.
+ */
+const IS_STUDIO = isStudioSession();
+
+/**
+ * Whether the dangerous `/dev` verbs are allowed right now.
+ *
+ * **Seeded from the environment, which is the whole point:** Studio auto-arms (a playtest is where these verbs are used)
+ * and Live auto-disarms (a live server is where a slip of the hand is expensive). `let` rather than `const` because an
+ * admin can arm a Live session, and because an arming admin leaving disarms it again.
+ *
+ * **Session state, not player state.** It does not survive a server shutdown, is not written to any store, and is not
+ * visible to a client — there is no remote, no attribute and no value for it, on purpose: a client that could read it
+ * would learn that the door is open.
+ */
+let devArmed = IS_STUDIO;
+
+/** Who armed it, for the disarm log. `undefined` when it was seeded by the environment rather than by a person. */
+let armedByUserId: number | undefined;
+let armedByDisplayName: string | undefined;
+
+/** The arming state, as a plain value. The pure functions below take one and return one; nothing else is injectable. */
+export interface DevArmState {
+	readonly armed: boolean;
+	readonly byUserId: number | undefined;
+	readonly byDisplayName: string | undefined;
+}
+
+/** The player a wrapper needs: an identity to compare and two names to log. `Player` satisfies this structurally. */
+export interface DevArmPlayer extends NamedPlayer {
+	readonly UserId: number;
+}
+
+/**
+ * What one arm or disarm attempt did. `result` is a log token, not a sentence, so a refusal can be counted by cause.
+ *
+ * `bad-token` and the handler's non-admin refusal are deliberately indistinguishable **in the log** — see
+ * `onDevCommand`'s refusal helper — so the shared token is not a way to discover whether a stranger is looking at an
+ * armed door.
+ */
+export type DevArmResult = "armed" | "already-armed" | "bad-token" | "disarmed" | "already-disarmed";
+
+/**
+ * Arms the session if the token matches. **Pure:** it takes the state and returns the next one, which is what makes the
+ * four branches assertable in Jest Lua without a `Player`, a server, or an arming side effect.
+ *
+ * ## Why the token is compared before the armed test
+ *
+ * Order is the rule here, not a preference. Checking `already-armed` first would tell a caller with the wrong token that
+ * the session is armed — a small leak, but a free one to close: a wrong token always reports `bad-token`, whatever the
+ * state, so the answer to "is the door open" never comes out of a failed attempt.
+ *
+ * `already-armed` therefore only means "armed, and you had the right token", which is the reading that makes the handler's
+ * no-op branch safe to write.
+ */
+export function armDev(state: DevArmState, token: string): { result: DevArmResult; state: DevArmState } {
+	if (token !== DEV_ARM_TOKEN) {
+		return { result: "bad-token", state };
+	}
+
+	if (state.armed) {
+		return { result: "already-armed", state };
+	}
+
+	return { result: "armed", state: { armed: true, byUserId: state.byUserId, byDisplayName: state.byDisplayName } };
+}
+
+/**
+ * Disarms the session. Pure, for the same reason `armDev` is.
+ *
+ * The `by*` fields are cleared rather than kept: "armed by nobody" is the honest description of a disarmed session, and a
+ * surviving name would make the next arming's log read as if it had never been disarmed. A disarmed session is a no-op
+ * rather than an error — `/dev disarm` on an already-safe server is a person checking, not a mistake.
+ */
+export function disarmDev(state: DevArmState): { result: DevArmResult; state: DevArmState } {
+	if (!state.armed) {
+		return { result: "already-disarmed", state };
+	}
+
+	return { result: "disarmed", state: { armed: false, byUserId: undefined, byDisplayName: undefined } };
+}
+
+/**
+ * Whether the dangerous verbs may run. **The only reader of the arming state outside this file.**
+ *
+ * The handler calls this once per `/dev` invocation; nothing else in the tree may. A second reader would be a second
+ * opinion about whether the door is open, and the failure would be silent in whichever reader was wrong.
+ */
+export function isDevArmed(): boolean {
+	return devArmed;
+}
+
+/**
+ * Arms this server's session, and records who did it. **One of the two functions allowed to touch the module state.**
+ *
+ * The pure rule is `armDev`; this is the imperative shell around it — read the state, apply the rule, write the result.
+ * Keeping the write here means `/dev`'s handler never names a module variable, which is what lets the rule be tested with
+ * literals.
+ */
+export function armSessionDev(player: DevArmPlayer, token: string): { result: DevArmResult; state: DevArmState } {
+	const outcome = armDev({ armed: devArmed, byUserId: armedByUserId, byDisplayName: armedByDisplayName }, token);
+
+	devArmed = outcome.state.armed;
+	armedByUserId = outcome.result === "armed" ? player.UserId : outcome.state.byUserId;
+	armedByDisplayName =
+		outcome.result === "armed" ? `${player.Name}/${player.DisplayName}` : outcome.state.byDisplayName;
+
+	return outcome;
+}
+
+/**
+ * Disarms this server's session. The other function allowed to touch the module state.
+ *
+ * Deliberately **not** restricted to the admin who armed it: any admin may close a door they found open. Restricting that
+ * would mean a session could be left armed for the rest of its life by an admin who disconnected, except that the leave
+ * handler closes that case anyway — see `disarmSessionDevFor`.
+ */
+export function disarmSessionDev(): DevArmResult {
+	const outcome = disarmDev({ armed: devArmed, byUserId: armedByUserId, byDisplayName: armedByDisplayName });
+
+	devArmed = outcome.state.armed;
+	armedByUserId = outcome.state.byUserId;
+	armedByDisplayName = outcome.state.byDisplayName;
+
+	return outcome.result;
+}
+
+/**
+ * Disarms on behalf of a *departing* player, but only if they are the one who armed it.
+ *
+ * Returns `"disarmed"` when they were the armer, `"already-disarmed"` when the session was not armed, and
+ * `"not-the-armer"` when somebody else opened the door — in which case it stays open, because one admin leaving is not
+ * permission for another admin's session to close.
+ *
+ * The comparison lives here rather than in the handler for the reason the whole region exists: `armedByUserId` is module
+ * state, and only the three wrappers above and below this comment may read or write it.
+ */
+export function disarmSessionDevFor(userId: number): DevArmResult | "not-the-armer" {
+	if (!devArmed) {
+		return "already-disarmed";
+	}
+
+	if (armedByUserId !== userId) {
+		return "not-the-armer";
+	}
+
+	return disarmSessionDev();
+}
+
+/** Whether this server is a Studio session, for the boot line's `reason=`. Cached — see `IS_STUDIO`. */
+export function isStudioEnvironment(): boolean {
+	return IS_STUDIO;
+}
+
+// #endregion

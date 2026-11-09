@@ -46,6 +46,33 @@ export const ROUND_STATE_VALUE_NAME = "RoundState";
 export const WINNER_NAME_VALUE_NAME = "WinnerName";
 
 /**
+ * A `NumberValue` in `ReplicatedStorage` carrying the server time at which `Waiting` ends, written at `Waiting` entry and
+ * cleared to `0` on the way out (item 149).
+ *
+ * **A third value on the `RoundState`/`WinnerName` mechanism, for the same reason as the first two.** The countdown that
+ * fills the last seconds of `Waiting` needs a *deadline*, and a deadline is state: a client that starts mid-`Waiting` must
+ * be able to work out which caption to show without having witnessed a transition. A remote fired at `Waiting` entry
+ * would be missed by exactly that client and by nobody else, which is the shape of bug that looks like "the countdown
+ * sometimes does not appear".
+ *
+ * ## Why the client is not asked to derive this from `WAITING_SECONDS`
+ *
+ * The phase does not last `WAITING_SECONDS`: a round that began behind a transition wipe adds the wipe's hold, so the
+ * real end is `WAITING_SECONDS + hold` and only the server knows the hold. `openOffers` makes the same argument about the
+ * pick window, and the two numbers are published rather than recomputed for exactly that reason.
+ *
+ * ## Why not reuse the picker's deadline
+ *
+ * The picker's deadline arrives **inside an offer message**, so it exists only for players who had an offer rolled and
+ * only if the picker remote worked. Tying the countdown to it would give a player whose offer failed no countdown at all,
+ * and would make `PickerOfferMessage` the definition of when a *phase* ends. The phase machine owns its own clock.
+ *
+ * `0` means "no deadline" - never `nil`, matching `WINNER_NAME_VALUE_NAME`'s rule. A stale past deadline is harmless (the
+ * countdown skips it), but `0` keeps "there is no countdown" distinguishable from "one ended a while ago".
+ */
+export const PLAYING_DEADLINE_VALUE_NAME = "PlayingDeadline";
+
+/**
  * Debug key remotes. Three keys, three remotes, following the per-action pattern the spawn and phase
  * remotes already use — no arguments on the wire, so no client can name a phase or a count.
  *

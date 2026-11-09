@@ -1,5 +1,16 @@
 import { describe, expect, it } from "@rbxts/jest-globals";
-import { ADMIN_COIN_CAP, ADMIN_USER_IDS, checkCoinAmount, findPlayerByName, isAdmin, parseDevCommand } from "../admin";
+import {
+	ADMIN_COIN_CAP,
+	ADMIN_USER_IDS,
+	armDev,
+	checkCoinAmount,
+	DEV_ARM_TOKEN,
+	DevArmState,
+	disarmDev,
+	findPlayerByName,
+	isAdmin,
+	parseDevCommand,
+} from "../admin";
 import { applyCoinSet, applyProfileReset } from "../services/economy-service";
 import { Profile } from "../services/player-data-store";
 import { STARTING_COINS } from "shared/economy.config";
@@ -336,5 +347,116 @@ describe("applyProfileReset", () => {
 			expect(candidate.ownedBalls.size()).toBe(0);
 			return true;
 		});
+	});
+});
+
+/**
+ * The arming gate (item 150).
+ *
+ * ## What is asserted here, and what is not
+ *
+ * `armDev` and `disarmDev` take a state and return one, so every branch is reachable with a literal. What is **not**
+ * asserted: the module-level seed (`devArmed = isStudioSession()`), `isDevArmed()`, and the three wrappers that read and
+ * write it. Those depend on the environment the suite happens to run in — Studio, where `IsStudio()` is true — and on a
+ * module singleton that the rest of the file would then see mutated. They are verified by reading `admin.ts` and by a
+ * playtest, and the round report says so rather than implying a green suite covers them.
+ */
+function armState(armed: boolean, byUserId: number | undefined = undefined): DevArmState {
+	return { armed, byUserId, byDisplayName: byUserId === undefined ? undefined : "Tester/Tester" };
+}
+
+describe("armDev", () => {
+	it("arms an unarmed state with the right token", () => {
+		const outcome = armDev(armState(false), DEV_ARM_TOKEN);
+
+		expect(outcome.result).toBe("armed");
+		expect(outcome.state.armed).toBe(true);
+	});
+
+	it("refuses a wrong token and leaves the state alone", () => {
+		const before = armState(false);
+		const outcome = armDev(before, "wrong");
+
+		expect(outcome.result).toBe("bad-token");
+		expect(outcome.state.armed).toBe(false);
+		// Identity, not equality: a refusal must not hand back a rewritten table, because the caller writes it back.
+		expect(outcome.state === before).toBe(true);
+	});
+
+	it("refuses a wrong token even when the session is already armed", () => {
+		// The leak this closes: answering `already-armed` to a wrong token would tell a failed attempt whether the door is
+		// open. A wrong token always reports the same thing, whatever the state.
+		const outcome = armDev(armState(true, 7), "wrong");
+
+		expect(outcome.result).toBe("bad-token");
+		expect(outcome.state.armed).toBe(true);
+	});
+
+	it("reports already-armed for a right token at an open door", () => {
+		const outcome = armDev(armState(true, 7), DEV_ARM_TOKEN);
+
+		expect(outcome.result).toBe("already-armed");
+		expect(outcome.state.armed).toBe(true);
+	});
+
+	it("refuses the empty token a bare `/dev arm` produces", () => {
+		// `parseDevCommand` turns `/dev arm` into `token = ""`, so this is the keystroke a distracted admin actually sends.
+		expect(armDev(armState(false), "").result).toBe("bad-token");
+	});
+});
+
+describe("disarmDev", () => {
+	it("disarms and clears who armed it", () => {
+		const outcome = disarmDev(armState(true, 7));
+
+		expect(outcome.result).toBe("disarmed");
+		expect(outcome.state.armed).toBe(false);
+		// Cleared, not kept: "armed by nobody" is the honest description of a disarmed session, and a surviving name would
+		// make the next arming's log read as if it had never been disarmed.
+		expect(outcome.state.byUserId).toBe(undefined);
+		expect(outcome.state.byDisplayName).toBe(undefined);
+	});
+
+	it("is a no-op on an already-disarmed state", () => {
+		const before = armState(false);
+		const outcome = disarmDev(before);
+
+		expect(outcome.result).toBe("already-disarmed");
+		expect(outcome.state === before).toBe(true);
+	});
+});
+
+describe("parseDevCommand's arming subcommands", () => {
+	it("parses arm with a token", () => {
+		const command = parseDevCommand("/dev arm arm-dev");
+
+		expect(command.ok).toBe(true);
+		expect(command.ok ? command.kind : "none").toBe("arm");
+		expect(command.ok && command.kind === "arm" ? command.token : "").toBe("arm-dev");
+	});
+
+	it("parses a bare arm as an empty token rather than a parse error", () => {
+		// The refusal must come from the token comparison, not from the parser, so every wrong arm attempt reads the same.
+		const command = parseDevCommand("/dev arm");
+
+		expect(command.ok).toBe(true);
+		expect(command.ok && command.kind === "arm" ? command.token : "missing").toBe("");
+	});
+
+	it("refuses arm with two arguments", () => {
+		const command = parseDevCommand("/dev arm one two");
+
+		expect(command.ok).toBe(false);
+	});
+
+	it("parses disarm", () => {
+		const command = parseDevCommand("/dev disarm");
+
+		expect(command.ok).toBe(true);
+		expect(command.ok ? command.kind : "none").toBe("disarm");
+	});
+
+	it("refuses disarm with an argument", () => {
+		expect(parseDevCommand("/dev disarm now").ok).toBe(false);
 	});
 });

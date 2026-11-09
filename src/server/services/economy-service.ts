@@ -29,7 +29,17 @@
 
 import { MarketplaceService, Players, ReplicatedStorage, TextChatService } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
-import { checkCoinAmount, findPlayerByName, isAdmin, parseDevCommand } from "../admin";
+import {
+	armSessionDev,
+	checkCoinAmount,
+	disarmSessionDev,
+	disarmSessionDevFor,
+	findPlayerByName,
+	isAdmin,
+	isDevArmed,
+	isStudioEnvironment,
+	parseDevCommand,
+} from "../admin";
 import {
 	PLAYER_COINS_ATTRIBUTE,
 	PLAYER_ECONOMY_STATE_ATTRIBUTE,
@@ -161,6 +171,15 @@ export class EconomyService implements OnStart {
 
 		Players.PlayerAdded.Connect((player) => this.spawnLoad(player));
 		Players.PlayerRemoving.Connect((player) => this.unload(player));
+
+		// **An armed session closes when the admin who opened it leaves (item 150).** The arming flag is *server* state, so it
+		// would otherwise outlive the person who made the decision for as long as the server ran — and the person who made it
+		// is the one who knew they were on Live. A *different* admin disconnecting does not disarm: see
+		// `disarmSessionDevFor`, which is where that comparison lives so the module state stays private to `admin.ts`.
+		//
+		// `PlayerRemoving` rather than `PlayerRemoved` because the name is still readable in the handler, and the call must be
+		// made before the reference is destroyed. Both events fire on the server for a real departure.
+		Players.PlayerRemoving.Connect((player) => this.disarmIfArmerLeft(player));
 
 		// Players who arrived before this service started (the local player in Studio's Play, for one) never
 		// fire `PlayerAdded` again.
@@ -903,11 +922,48 @@ export class EconomyService implements OnStart {
 
 		command.Triggered.Connect((source, unfilteredText) => this.onDevCommand(source, unfilteredText));
 
-		print(`[Admin] ${ADMIN_COMMAND_ALIAS} registered; autocomplete hidden, authorised UserIds are server-only`);
+		// **One environment read, reported once.** On a live server this line is the first evidence that a playtest's arming
+		// did not carry over — `armed=false` before anybody has typed anything — and in Studio it says the door is already
+		// open. `reason=` is the environment, `armed=` is the state it produced, and they are printed together because a later
+		// `/dev arm` changes the second without changing the first.
+		print(
+			`[Admin] ${ADMIN_COMMAND_ALIAS} registered; authed=server-only armed=${isDevArmed()} reason=${isStudioEnvironment() ? "studio" : "live"}`,
+		);
 	}
 
 	/**
-	 * The `/dev` command's whole surface: authorise, then parse, then resolve, then dispatch.
+	 * Closes an armed session when the admin who armed it leaves.
+	 *
+	 * Logged as its own sentence rather than folded into `unload`, because "the door closed by itself" is a fact worth being
+	 * able to grep for. A rejoining admin finds the session exactly where they left it otherwise — the flag belongs to the
+	 * server, not to the player — so this is the only event that closes it without anybody typing `/dev disarm`.
+	 */
+	private disarmIfArmerLeft(player: Player): void {
+		const outcome = disarmSessionDevFor(player.UserId);
+		if (outcome === "disarmed") {
+			print(`[Admin] /dev DISARMED (armer left) ${player.Name}/${player.DisplayName}`);
+		}
+	}
+
+	/**
+	 * The **one** refusal a caller who may not proceed gets, whichever reason they may not (item 150).
+	 *
+	 * Two callers: a non-admin, and an admin on a session that is not armed. The string is identical — "is not an admin"
+	 * about a real admin included — so that a wrong token cannot be told apart from a wrong account by reading the log,
+	 * and so that the two branches cannot drift into two formats. The reason, when there is one worth recording, is a
+	 * second line written by the caller that knows it.
+	 *
+	 * It is also the only refusal that names no command: a stranger's text is never parsed, so there is nothing to name —
+	 * and telling them which subcommand they mistyped would confirm the command exists.
+	 */
+	private refuseUnrecognised(source: TextSource, admin: Player | undefined): void {
+		warn(
+			`[Admin] refused: userId=${source.UserId}${admin !== undefined ? ` name=${admin.Name}` : ""} is not an admin`,
+		);
+	}
+
+	/**
+	 * The `/dev` command's whole surface: authorise, then parse, then arm-check, then resolve, then dispatch.
 	 *
 	 * ## Why authorisation is the first statement and reads nothing but the UserId
 	 *
@@ -934,9 +990,7 @@ export class EconomyService implements OnStart {
 		// **The authorisation check, before anything else.** `isAdmin` reads a hard-coded server-only list; nothing a
 		// client can send, set or replicate takes part in it.
 		if (!isAdmin(source.UserId)) {
-			warn(
-				`[Admin] refused: userId=${source.UserId}${admin !== undefined ? ` name=${admin.Name}` : ""} is not an admin`,
-			);
+			this.refuseUnrecognised(source, admin);
 			return;
 		}
 
@@ -952,6 +1006,52 @@ export class EconomyService implements OnStart {
 			warn(`[Admin] ${who} refused: ${command.reason}`);
 			return;
 		}
+
+		// #region the arming gate (item 150)
+
+		// **`arm` and `disarm` are the two verbs that are reachable before the gate** — they are how it is opened and closed,
+		// so gating them would be a door that can only be unlocked from the inside.
+		if (command.kind === "arm") {
+			const outcome = armSessionDev(admin, command.token);
+
+			if (outcome.result === "armed") {
+				print(
+					`[Admin] /dev ARMED by ${who} — setCoins and wipeData are live until server shutdown or /dev disarm`,
+				);
+				return;
+			}
+
+			if (outcome.result === "bad-token") {
+				// **The same line a non-admin gets, byte for byte.** Sharing the helper is the only way that stays true after
+				// an edit: two formats "kept in sync" are two formats that will not be. The consequence is stated rather than
+				// hidden — this line says "is not an admin" about a real admin, so that a wrong token is indistinguishable
+				// from a wrong account in the log.
+				this.refuseUnrecognised(source, admin);
+				return;
+			}
+
+			// `already-armed` — the admin typed a valid token at an open door. Nothing happened, and nothing needs saying.
+			return;
+		}
+
+		if (command.kind === "disarm") {
+			if (disarmSessionDev() === "disarmed") {
+				print(`[Admin] /dev DISARMED by ${who}`);
+			}
+
+			// `already-disarmed` is a person checking a door that was already shut, not a mistake. Logged by nobody.
+			return;
+		}
+
+		if (!isDevArmed()) {
+			// The refusal is the non-admin string again, and the *reason* gets its own line so the log stays readable to the one
+			// person who can act on it.
+			this.refuseUnrecognised(source, admin);
+			warn(`[Admin] /dev ${command.kind} refused (not armed) by ${who}`);
+			return;
+		}
+
+		// #endregion
 
 		const target = findPlayerByName(Players.GetPlayers(), command.target);
 		if (target === undefined) {

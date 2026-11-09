@@ -20,6 +20,7 @@ import {
 	PICKER_OFFER_REMOTE_NAME,
 	PICKER_PICK_REMOTE_NAME,
 	PICKER_REROLL_REMOTE_NAME,
+	PLAYING_DEADLINE_VALUE_NAME,
 	REMOTES_FOLDER_NAME,
 	ROUND_PAYOUT_REMOTE_NAME,
 	ROUND_STATE_VALUE_NAME,
@@ -36,6 +37,7 @@ import { TRANSITION_CONFIG, coverSeconds, holdSeconds, openSeconds } from "share
 import {
 	BELT_RAMP_SECONDS,
 	INTERMISSION_SECONDS,
+	PICKER_WINDOW_SECONDS,
 	POST_GAME_SECONDS,
 	ROUND_IDLE_WARN_SECONDS,
 	TICK_INTERVAL_SECONDS,
@@ -43,6 +45,7 @@ import {
 } from "shared/tuning";
 import { BallOwner, BallSpawnerService } from "./ball-spawner-service";
 import { EconomyService } from "./economy-service";
+import { isStudioSession } from "./player-data-store";
 import { decideRoundOutcome } from "../round-outcome";
 import { decideDecoyOutline } from "../decoy-outline";
 import { EliminationCause, splashTargetUserId } from "../elimination-signal";
@@ -56,6 +59,19 @@ import { TreadmillService } from "./treadmill-service";
  * is what makes the machine a loop rather than a single round.
  */
 export type RoundPhase = "Intermission" | "Waiting" | "Playing" | "PostGame";
+
+/**
+ * **The environment, read once for this entire file (item 150).**
+ *
+ * Three call sites want it — the auto-bots at `Waiting` entry, the gate on key `2`'s bots, and the boot-time decision
+ * about whether a solo Studio session needs populating at all — and three `RunService.IsStudio()` calls are three chances
+ * to disagree about which environment this server is in. One read, one constant. `admin.ts` does the same for its arming
+ * seed, so a boot has two environment reads in total, one per file, and the round report says so.
+ *
+ * Module-level rather than a field on the class: it is a property of the process, not of the service, and a field would
+ * be one more thing a future `new RoundService()` in a spec would have to be told.
+ */
+const IS_STUDIO = isStudioSession();
 
 /**
  * Runs the game loop: four phases, the belt ramp, elimination, the end condition, and reset.
@@ -209,6 +225,17 @@ export class RoundService implements OnStart {
 	private winnerName?: StringValue;
 
 	/**
+	 * The replicated `NumberValue` carrying the server time `Waiting` ends, or `0` when no countdown is due. Created in
+	 * `onStart`.
+	 *
+	 * A third value beside the phase and the winner, written by the one function that arms the `Waiting → Playing` timer
+	 * because that is the only place the phase's real end is known (a round behind a transition wipe ends later than
+	 * `WAITING_SECONDS`). See `PLAYING_DEADLINE_VALUE_NAME` for why the countdown reads a published deadline rather than
+	 * recomputing one from the constants.
+	 */
+	private playingDeadlineValue?: NumberValue;
+
+	/**
 	 * The last synthetic owner number handed out, so the next debug competitor is `Debug#(n+1)`.
 	 *
 	 * Shared by `Waiting`-entry defaults and `3` presses rather than being two counters, because
@@ -343,20 +370,23 @@ export class RoundService implements OnStart {
 
 		const spawned = this.startWaitingRound(reason);
 
-		// **Auto-bots, and the placement is the whole point.**
+		// **Bots, but only where `startWaitingRound` did not already add them (item 150).**
 		//
 		// A Studio session usually has one player, so `Waiting` used to count down to a `Playing` phase with a single competitor
 		// - which the first tick ended as `last standing`. The workaround was to press `4` inside the countdown, which is a race
-		// against a timer rather than a test harness.
+		// against a timer rather than a test harness. Item 131 fixed that here, unconditionally.
 		//
-		// The call sits **after `startWaitingRound`** because that is what rolls the offers and spawns the players' bodies: a
-		// spawn before it would take a spawner slot first, and the player's own body would arrive second. It sits **before
-		// `enterWaiting`** because that call prints the transition and arms the countdown - bots spawned after it would be
-		// missing from `competitors=` and would appear, in the log, to arrive after the phase they belong to.
+		// **The unconditional call was the wrong home for it.** `startWaitingRound` is the one place `Waiting` begins, so the
+		// population belongs there: it covers this key *and* the `Intermission` timer, in every round rather than only the one
+		// this key starts. What is left here is the case that call cannot cover — a **live** server, where the automatic
+		// population is deliberately off. Key `2` is a debug verb somebody pressed on purpose, so on Live it keeps item 131's
+		// behaviour: bots now, because a human asked.
 		//
-		// The relaxed phase gate is what makes this legal: `debugSpawnCompetitors` accepts `Waiting` (see its docblock), so the
-		// bots are tracked bodies of the round that is about to begin rather than a second class of body.
-		const bots = this.debugSpawnCompetitors("auto-bots for debug key 2");
+		// The call still sits **after `startWaitingRound`** (a spawn before it would take a spawner slot first, and the
+		// players' own bodies would arrive second) and **before `enterWaiting`** (which prints the transition — bots spawned
+		// after it would be missing from `competitors=` and would appear, in the log, to arrive after the phase they belong
+		// to).
+		const bots = IS_STUDIO ? 0 : this.spawnBots("auto-bots for debug key 2");
 
 		this.enterWaiting(reason, spawned + bots);
 	}
@@ -401,6 +431,13 @@ export class RoundService implements OnStart {
 				return;
 			}
 
+			// **Bots on a restart too (item 150).** The user's ask is "press 2 or 3 and there is a round", and a restart that
+			// produced only the player's body would be the same premature winner item 72 declares — one competitor, alone. It
+			// sits after the empty-belt guard so that a key press with no player body still leaves the belt empty rather than
+			// leaving bots on it, which is the same rule the fresh path below follows. Unconditional rather than Studio-gated:
+			// key `3` is a debug verb somebody pressed on purpose, exactly like key `2` on Live.
+			this.spawnBots("debug key 3 restart");
+
 			// A fresh competitor set means a fresh "nothing has happened" window. Without this reset a restart
 			// pressed 50 s into a quiet round would inherit the old clock and print the idle warning 10 s later,
 			// blaming the new competitors for the old round's inactivity.
@@ -431,6 +468,10 @@ export class RoundService implements OnStart {
 			print(`[Round] debug key 3: no competitors spawned, staying in ${this.phase}`);
 			return;
 		}
+
+		// **Bots, for the same reason as the restart branch above (item 150).** After the empty-belt guard and before
+		// `enterPlaying`, so the bodies exist when `Playing` entry prints `competitors=` and when the first tick counts them.
+		this.spawnBots("debug key 3");
 
 		if (!this.enterPlaying(reason)) {
 			// ASSERTION FAILURE. See the note in `enterPlaying`: the caller spawned, and the guard still
@@ -576,6 +617,39 @@ export class RoundService implements OnStart {
 			return 0;
 		}
 
+		return this.spawnBots(reason);
+	}
+
+	/**
+	 * Spawns one bot per bound spawner, each with its own synthetic owner. **No phase gate** — the caller owns that
+	 * question (item 150).
+	 *
+	 * ## Why this is a separate function from `debugSpawnCompetitors`
+	 *
+	 * The gate used to sit inside the one function that could spawn bots, which meant every new caller had to be a debug
+	 * key. There are four now — key `4`, key `2` outside Studio, key `3`, and the automatic solo-Studio population of
+	 * `Waiting` — and only the first wants the "is this a phase bodies can exist in" check. The split is item 87's
+	 * `playEliminationSound` shape: the rule lives where it can be read once, and each caller states its own precondition
+	 * by having passed one.
+	 *
+	 * **The body is unchanged from item 131:** the count is `getBoundSpawnerCount()`, the owners are synthetic
+	 * `Debug#N`, every body is tracked, and the log line is the one key `4` has always printed.
+	 *
+	 * ## The log line
+	 *
+	 * `[Round] debug spawn (<reason>): <n> competitors (<first>..<last>) balls=<ids>, live=<n>`. The reason text is the
+	 * caller's, so the log says which path made the bodies rather than leaving a reader to infer it: `debug key 4`,
+	 * `debug key 2`, `debug key 3`, `debug key 3 restart`, `auto-bots for debug key 2`, `studio-auto`.
+	 *
+	 * ## Why the ids are named
+	 *
+	 * Ten is more than a reader can infer from a count. A press that produced four bodies tells a Studio session nothing
+	 * about *which* four powers it is watching; one line naming them makes the observation repeatable ("run it again
+	 * until `rocket` appears") instead of guesswork. They are read back off the **bodies** rather than out of `owners`, so
+	 * the line describes what exists: a spawn that failed leaves a body out of the returned array, and a log naming an id
+	 * with no body behind it would be worse than no log.
+	 */
+	private spawnBots(reason: string): number {
 		const owners = this.nextDebugOwners(this.spawner.getBoundSpawnerCount());
 		const spawned = this.spawner.spawnForRound(owners);
 		for (const ball of spawned) {
@@ -585,12 +659,6 @@ export class RoundService implements OnStart {
 		const first = owners[0];
 		const last = owners[owners.size() - 1];
 
-		// **The ids are named in the log because ten is more than a reader can infer from a count.** A press that produced
-		// four bodies tells a Studio session nothing about *which* four powers it is watching; one line naming them makes
-		// the observation repeatable ("run it again until `rocket` appears") instead of guesswork.
-		//
-		// Read back off the **bodies** rather than out of `owners`, so the line describes what exists: a spawn that failed
-		// leaves a body out of `spawned`, and a log naming an id with no body behind it would be worse than no log.
 		const ballIds = new Array<string>();
 		for (const ball of spawned) {
 			const ballId = ball.GetAttribute(CHOSEN_BALL_ID_ATTRIBUTE);
@@ -736,6 +804,20 @@ export class RoundService implements OnStart {
 	}
 
 	/**
+	 * Publishes the time `Waiting` ends, or `0` for "no countdown is due" (item 149).
+	 *
+	 * A third writer in the same family as `publishPhase` and `publishWinner`: one function per replicated value, called
+	 * only by the functions that know the fact. `0` rather than `nil` for "none", for the reason the winner uses `""` — a
+	 * client reading zero can tell "cleared" from "not yet written", and a client that joins during `Playing` must not
+	 * inherit a deadline from a `Waiting` that is over.
+	 */
+	private publishPlayingDeadline(deadline: number): void {
+		if (this.playingDeadlineValue !== undefined) {
+			this.playingDeadlineValue.Value = deadline;
+		}
+	}
+
+	/**
 	 * Enters the lobby. **Spawns nothing** — the caller has already established the competitor set.
 	 *
 	 * The spawn used to live here, which made "how many competitors a round starts with" a property of a
@@ -814,6 +896,13 @@ export class RoundService implements OnStart {
 		this.phase = "Waiting";
 		const generation = ++this.generation;
 
+		// **The wipe's hold, read once, at the entry to the phase (item 149).** It used to be read inside
+		// `scheduleWaitingTimeout`, which was correct while the timer was its only reader. There are three now - the phase
+		// timer, the countdown's published deadline and the pick window - and three readers of one number is how "waiting is
+		// fifteen seconds" and "waiting is fifteen seconds plus the wipe" become two different beliefs. One read, one
+		// arithmetic, everyone downstream reads the result.
+		const hold = this.consumeTimerHold();
+
 		// **Not `true` any more.** `Waiting` used to switch the spawner's simulation on, which meant the
 		// `BALL_SPEED` decay ran while a body sat on a stopped belt and the ball drifted before the round even
 		// began. The flag is now set in `enterPlaying` and nowhere else, so the model runs for exactly the phase
@@ -825,11 +914,31 @@ export class RoundService implements OnStart {
 		print(`[Round] ${from} → Waiting (${reason}, competitors=${competitors})`);
 		this.publishPhase();
 
-		this.scheduleWaitingTimeout(generation);
+		// **The one place the phase's end is computed.** `Waiting` lasts `WAITING_SECONDS` plus the wipe's hold, and the hold
+		// exists nowhere else. Publishing it is what lets the countdown be anchored to the phase rather than to whenever this
+		// client happened to notice it (item 149), and the pick window is derived from it rather than from its own reading of
+		// the clock - so the gap between the panel closing and the countdown starting is a constant
+		// `WAITING_SECONDS - PICKER_WINDOW_SECONDS`, on a wiped round exactly as on a debug-key one.
+		const endsAt = Workspace.GetServerTimeNow() + WAITING_SECONDS + hold;
+		this.publishPlayingDeadline(endsAt);
+
+		// **The offers are announced here, not where they were rolled.** `startWaitingRound` rolls them before the spawn,
+		// because the body must carry its pick from birth; the *message* carries the window's deadline, which is only known
+		// now. Sending it earlier is what made the panel count down from the moment the offers were rolled - i.e. behind the
+		// transition wipe - so a wiped round showed ~11 s of picker and then left a four-second hole before the countdown.
+		this.pickerDeadline = endsAt - (WAITING_SECONDS - PICKER_WINDOW_SECONDS);
+		this.announceOffers();
+		this.armPickWindowClose(this.pickerDeadline);
+
+		this.scheduleWaitingTimeout(generation, WAITING_SECONDS + hold);
 	}
 
 	/**
 	 * Arms the `Waiting → Playing` timer, re-arming itself once if the guard refuses.
+	 *
+	 * **The delay is the caller's.** `enterWaiting` is the one function that knows a wipe is holding the clock; this only
+	 * waits for the number it is handed. The re-arm below passes `WAITING_SECONDS` bare, because the hold must not be added
+	 * twice - the screen is clear by the time a re-armed lobby counts down.
 	 *
 	 * **A refusal is expected here and is not an error.** Nothing spawned at this transition — the bodies
 	 * were made when `Waiting` was entered — so by the time the timer fires they may all have been
@@ -837,13 +946,8 @@ export class RoundService implements OnStart {
 	 * `[Round] Waiting timer re-armed — no competitors (0)` rather than as a phase that silently never
 	 * advances, which is indistinguishable from a dead server.
 	 */
-	private scheduleWaitingTimeout(generation: number): void {
-		// **The wipe's hold, read here and added to the first delay only.** A round that began behind a wipe must
-		// not reach `Playing` with `WAITING_SECONDS` already part-spent, so the clock starts when the screen is
-		// clear. The re-arm below deliberately does *not* add it again.
-		const hold = this.consumeTimerHold();
-
-		task.delay(WAITING_SECONDS + hold, () => {
+	private scheduleWaitingTimeout(generation: number, delaySeconds: number): void {
+		task.delay(delaySeconds, () => {
 			if (generation !== this.generation || this.phase !== "Waiting") {
 				return;
 			}
@@ -853,7 +957,12 @@ export class RoundService implements OnStart {
 			}
 
 			print(`[Round] Waiting timer re-armed — no competitors (0)`);
-			this.scheduleWaitingTimeout(this.generation);
+
+			// **No countdown on a re-armed lobby.** Nothing is going to race, so a fresh deadline would put a 3-2-1 in front of
+			// a state that will fail this same guard again fifteen seconds later, forever. Clearing it says "there is nothing
+			// to count down to", which is exactly true.
+			this.publishPlayingDeadline(0);
+			this.scheduleWaitingTimeout(this.generation, WAITING_SECONDS);
 		});
 	}
 
@@ -893,6 +1002,11 @@ export class RoundService implements OnStart {
 		// The pick window closes with the phase, and only when the phase actually moved: every refusal above returns before
 		// this line, so a lobby that re-arms keeps its offers and its countdown rather than silently losing them.
 		this.closeOffers();
+
+		// **The countdown's deadline dies with the phase it belongs to (item 149).** Same rule as the offers: a client that
+		// joins during `Playing` reads one value to learn "no countdown is due", rather than a past deadline it has to
+		// reason about. `closeOffers` is the picker's half of "Waiting is over"; this is the countdown's.
+		this.publishPlayingDeadline(0);
 
 		// The idle clock starts with the round, and the warning flag with it: a round that begins and then
 		// sits still for `ROUND_IDLE_WARN_SECONDS` is exactly the case the warning is for, and a flag left
@@ -1044,6 +1158,11 @@ export class RoundService implements OnStart {
 		// that is over, and clearing at `Waiting` instead would leave the stale name visible for the whole
 		// gap.
 		this.publishWinner(undefined);
+
+		// The countdown's deadline belongs to the `Waiting` that was abandoned, not to the lobby that follows it (item 149).
+		// `Playing` clears it on the way out of a round that ran; a debug jump from `Waiting` to `Intermission` never reaches
+		// that line, so this is the second exit and not a duplicate.
+		this.publishPlayingDeadline(0);
 
 		print(`[Round] ${from} → Intermission (${reason})`);
 		this.publishPhase();
@@ -1822,11 +1941,53 @@ export class RoundService implements OnStart {
 	 */
 	private startWaitingRound(reason: string): number {
 		this.openOffers();
-		return this.spawnRoundCompetitors(reason);
+
+		const spawned = this.spawnRoundCompetitors(reason);
+
+		// **A solo Studio session gets company, automatically (item 150).** Without this, a Studio playtest is one player's
+		// body and item 72 declares it the winner on the first tick — which is not a round, and which made key `4` inside the
+		// countdown the only way to see one. `startWaitingRound` is the one place `Waiting` begins, so both keys and the
+		// `Intermission` timer are covered by one call, in every round rather than only the first.
+		//
+		// **`spawned > 0` first, and that guard is load-bearing.** `spawnRoundCompetitors` returning zero means no player
+		// body was made (nobody connected, or no spawner free), and the intermission timer reads that as "re-arm instead of
+		// entering `Waiting`". Spawning bots regardless would leave synthetic bodies on the belt in a lobby that is staying in
+		// `Intermission`, and — because bots carry an `OwnerUserId` of their own — they would satisfy `enterPlaying`'s
+		// competitor guard and start a race with nobody in it.
+		//
+		// The returned count includes the bots, because every caller passes it straight into `enterWaiting`'s `competitors=`
+		// field. A log that says four in a round with eight bodies is worse than no log.
+		if (spawned === 0) {
+			return 0;
+		}
+
+		return spawned + this.spawnStudioBots();
 	}
 
 	/**
-	 * Rolls one offer per connected player and tells each client.
+	 * Populates a solo Studio session with bots, and does nothing anywhere else.
+	 *
+	 * ## Why the solo gate
+	 *
+	 * A two-tester Studio session is two people looking at each other's balls, and adding four bots to it would bury the
+	 * thing being tested. One player is the case that has no round at all without help. `Players.GetPlayers()` is the whole
+	 * test: any second connected player — including one who has not spawned yet — turns the bots off, which is the safe
+	 * direction, because a session that is already populated does not need them.
+	 *
+	 * ## Why the environment gate is a module constant
+	 *
+	 * See `IS_STUDIO`. A live server never gets free competitors: a real round's field is the players who joined.
+	 */
+	private spawnStudioBots(): number {
+		if (!IS_STUDIO || Players.GetPlayers().size() !== 1) {
+			return 0;
+		}
+
+		return this.spawnBots("studio-auto");
+	}
+
+	/**
+	 * Rolls one offer per connected player. **Sends nothing** — `announceOffers` does that, once the window's deadline exists.
 	 *
 	 * ## The premium roll is evaluated here and nowhere else
 	 *
@@ -1838,12 +1999,17 @@ export class RoundService implements OnStart {
 	 * There is nothing to expand the offer *to*, so the roll is skipped rather than scaled, and the log says
 	 * `premium=false` rather than implying it fired and lost. `buildOffer` enforces the same rule; the check here is what
 	 * keeps the log honest.
+	 *
+	 * ## Why the roll and the send are two functions (item 149)
+	 *
+	 * Every offer message carries the window's deadline, and that deadline is only knowable from the phase's end, which
+	 * `enterWaiting` computes - after this method has already run, because the spawn between them needs the picks. Sending
+	 * from here meant sending whatever `pickerDeadline` happened to hold, which is how the panel's countdown came to be
+	 * measured from the roll (i.e. from behind the transition wipe) and left a hole before the countdown. The roll stays here
+	 * because the *body* needs it; the deadline travels with the announcement.
 	 */
 	private openOffers(): void {
 		this.offers.clear();
-		// Read once, at entry: a re-roll must not extend the phase, so the deadline is a property of the phase rather than
-		// of the offer that happens to be on screen.
-		this.pickerDeadline = Workspace.GetServerTimeNow() + WAITING_SECONDS + this.pendingTimerHold;
 
 		for (const player of Players.GetPlayers()) {
 			const offer = this.generateOfferFor(player);
@@ -1854,9 +2020,42 @@ export class RoundService implements OnStart {
 			print(
 				`[Picker] offer player=${player.Name} options=${offer.options.join(",")} premium=${offer.premium} fallback=${offer.fallback}`,
 			);
+		}
+	}
 
+	/**
+	 * Sends every stored offer to its player. Called from `enterWaiting`, once `pickerDeadline` is the phase's real arithmetic.
+	 *
+	 * The loop is over `offers` rather than over `Players.GetPlayers()`: a player who was refused an offer has no entry to
+	 * send, and re-deriving the recipient list here is a second opinion about who is owed one.
+	 */
+	private announceOffers(): void {
+		for (const [player, offer] of this.offers) {
 			this.sendOffer(player, offer);
 		}
+	}
+
+	/**
+	 * Arms the pick window's own close, `deadline` being the server time it ends at.
+	 *
+	 * **The window has to actually close, and the phase change is too late for that.** `closeOffers` used to run only from
+	 * `enterPlaying`, which is when the phase ends - so a window shorter than the phase would leave the panel up and the
+	 * server still accepting picks for the remaining seconds.
+	 *
+	 * The deadline doubles as the guard: a later `Waiting` rewrites `pickerDeadline`, so a timer from a previous round finds
+	 * a different token and stops. That is why the comparison is against the value rather than against a counter this method
+	 * would otherwise have to keep. `forcePlaying` and `forceIntermission` are covered by the phase test, and `enterPlaying`
+	 * keeps its own `closeOffers` call so a path that never opened offers still closes cleanly.
+	 */
+	private armPickWindowClose(deadline: number): void {
+		task.delay(math.max(0, deadline - Workspace.GetServerTimeNow()), () => {
+			if (this.phase !== "Waiting" || this.pickerDeadline !== deadline) {
+				return;
+			}
+
+			print(`[Picker] window closed after ${PICKER_WINDOW_SECONDS}s`);
+			this.closeOffers();
+		});
 	}
 
 	/**
@@ -2339,6 +2538,20 @@ export class RoundService implements OnStart {
 			winner.Value = "";
 			winner.Parent = ReplicatedStorage;
 			this.winnerName = winner;
+		}
+
+		// The countdown's deadline (item 149), the third of the family and the first `NumberValue`: seeded `0` so a client
+		// that reads it before any `Waiting` has an unambiguous "no countdown is due" rather than a missing instance, and
+		// created here rather than at `Waiting` entry so the read never races the creation.
+		const existingDeadline = ReplicatedStorage.FindFirstChild(PLAYING_DEADLINE_VALUE_NAME);
+		if (existingDeadline !== undefined && existingDeadline.IsA("NumberValue")) {
+			this.playingDeadlineValue = existingDeadline;
+		} else {
+			const deadline = new Instance("NumberValue");
+			deadline.Name = PLAYING_DEADLINE_VALUE_NAME;
+			deadline.Value = 0;
+			deadline.Parent = ReplicatedStorage;
+			this.playingDeadlineValue = deadline;
 		}
 	}
 

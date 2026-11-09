@@ -301,6 +301,34 @@ export const TICK_INTERVAL_SECONDS = 1;
 export const WAITING_SECONDS = 15;
 
 /**
+ * **Placeholder.** How long the ball picker stays open inside `Waiting`, in seconds.
+ *
+ * ## Why this is shorter than `WAITING_SECONDS` rather than equal to it
+ *
+ * The two numbers used to be one: the pick window closed when the phase did, so the panel and the phase ended together.
+ * They are separate facts now (item 149) because the last stretch of `Waiting` is given to a **3-2-1-Start! countdown**,
+ * and a countdown that plays under a picker still taking clicks is two things asking for the same attention.
+ *
+ * ## Why eleven and not twelve (item 152)
+ *
+ * **The countdown grew and the window had to pay for it.** The countdown ends exactly at `Playing` entry — `Start!` is a
+ * start cue, so it lands where the race does — which means the runway between the picker closing and the phase ending has
+ * to be at least the countdown's own length. That length is `3.05 s` at item 152's durations (`0.4` in, `0.2` out, held
+ * `0.6`, faded `0.25`), and a twelve-second window leaves only `15 - 12 = 3.0 s` — the first caption would have appeared
+ * three frames *before* the panel closed.
+ *
+ * Eleven leaves four, so the sequence fits with **0.95 s of "the balls are settled, have a look at the belt"** in front of
+ * it. That gap is the same breath the twelve-second window had against the shorter countdown, which is the point: the
+ * picker gave up a second so the countdown could have one, and the pause between them did not move.
+ *
+ * The constraint is `PICKER_WINDOW_SECONDS + countdownLength <= WAITING_SECONDS`, and the second term is derived in
+ * `shared/ui/countdown.ts` rather than written here — so raising a countdown duration is what forces this number down, not
+ * a second guess about it. Above that, a window longer than the phase would put picks after the round had started, and
+ * `closeOffers` at `Playing` entry would silently drop them.
+ */
+export const PICKER_WINDOW_SECONDS = 11;
+
+/**
  * **Placeholder.** Seconds for the belt to reach full speed once `Playing` begins.
  *
  * Linear, not eased. A linear ramp means the acceleration is constant and identical for every ball
@@ -880,6 +908,10 @@ export const BOOST_TARGET_BALL_SPEED = 12;
  * `1 / 0.1 = 10` seconds; change it alone and a ball sways more or less often and nothing else moves. Change
  * `SWAY_AMPLITUDE` alone and it covers more or less ground per sway at the same rhythm.
  *
+ * **This is the base rate, not every ball's rate (item 153).** Each ball draws its own multiplier from
+ * `SWAY_FREQUENCY_JITTER`, because a field sharing one period can only ever be a fixed arrangement of offsets — see that
+ * constant for why the phase jitter alone was not enough.
+ *
  * The model this replaced was a **bounce**: a ball drifted at `Z_DRIFT_SPEED` (0.05 studs/s) and reversed when it reached
  * a random bound between `LATERAL_BOUND_MIN` and `LATERAL_BOUND` (1..2 studs from the centreline), so one full cycle took
  * `4 * bound / speed` - **40 to 80 seconds** - and the only way to sway more often was to speed up the drift or shrink the
@@ -896,6 +928,29 @@ export const BOOST_TARGET_BALL_SPEED = 12;
  * viewer's right from the front looking toward the back (quad 1); negative is their left (quad 4).
  */
 export const SWAY_FREQUENCY_HZ = 0.1;
+
+/**
+ * **Placeholder.** How much each ball's sway frequency may differ from `SWAY_FREQUENCY_HZ`, as a fraction of it.
+ *
+ * ## Why a per-ball frequency, when there is already a per-ball phase (item 153)
+ *
+ * A phase offset alone gives a field of **identical periods**, and identical periods never drift apart: two balls stay
+ * exactly the offset they were drawn with for the whole round. That is why a field drawn from `0 .. pi` still reads as
+ * synchronised — a 10-second cycle means a `pi` spread is only five seconds of the cycle, so at any instant roughly half
+ * the belt is moving the same way and the whole pattern repeats on a 10-second loop. The user reported exactly that, twice,
+ * with the phases on the log to prove the draw was working.
+ *
+ * A **frequency** difference is the only thing that makes two balls drift in and out of step, so the field stops having a
+ * period at all. `0.3` gives each ball a period between `10 / 1.3 = 7.7 s` and `10 / 0.7 = 14.3 s`; two balls at opposite
+ * ends of that range pass through every relative phase inside half a minute, so the arrangement never repeats within a
+ * ride.
+ *
+ * `0` restores item 107's behaviour exactly — one period for the field, phase offsets only.
+ *
+ * **The base is still `SWAY_FREQUENCY_HZ`.** This number never sets an absolute rate; it multiplies, so a designer retuning
+ * the rhythm moves every ball together and the spread stays proportional.
+ */
+export const SWAY_FREQUENCY_JITTER = 0.3;
 
 /**
  * **Placeholder.** How far from the belt's centreline a swaying ball reaches, in studs of **code-frame Z**.

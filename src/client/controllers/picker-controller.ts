@@ -624,6 +624,16 @@ export class PickerController implements OnStart {
 		const remaining = math.max(0, offer.deadline - Workspace.GetServerTimeNow());
 		label.Text = tostring(math.ceil(remaining));
 		label.TextColor3 = remaining <= 3 ? this.theme.colors.error : this.theme.colors.textSecondary;
+
+		// **The window closes on its own deadline, not on the phase change (item 149).** The two used to be the same instant,
+		// so hiding the panel was `applyPhase`'s job alone. `PICKER_WINDOW_SECONDS` is shorter than `WAITING_SECONDS` now, and
+		// the last stretch belongs to the countdown - a panel still on screen through it would be a set of cards the server has
+		// already discarded, sitting in front of the 3-2-1. `Visible = false` also stops it taking clicks, which is the other
+		// half of what closing means. The next `Waiting` re-shows it from `applyPhase`.
+		if (remaining <= 0) {
+			this.mainFrame.Visible = false;
+			print(`[Picker] closed deadline=${offer.deadline}`);
+		}
 	}
 
 	// #endregion

@@ -50,6 +50,7 @@ import {
 	SPIN_DEADBAND_SPEED,
 	SWAY_AMPLITUDE,
 	SWAY_FREQUENCY_HZ,
+	SWAY_FREQUENCY_JITTER,
 	SWAY_PHASE_JITTER,
 	SWAY_TRACK_SECONDS,
 } from "shared/tuning";
@@ -490,13 +491,19 @@ export class BallSpawnerService implements OnStart {
 	private readonly decoyIdentities = new Map<BasePart, { userId: number; name: string }>();
 
 	/**
-	 * Each live ball's decorative sway state: the **phase** its sine wave starts at, and its **own clock**, in seconds
-	 * since it spawned.
+	 * Each live ball's decorative sway state: the **phase** its sine wave starts at, **its own angular rate**, and its
+	 * **own clock**, in seconds since it spawned.
 	 *
-	 * Both fields are needed and both are per ball. The phase is what stops a belt of balls swaying in lockstep - see
-	 * `SWAY_PHASE_JITTER` - and the clock is what makes the wave start on the ball's own first tick rather than on a
-	 * global time, so a ball spawning into a wave that is already running does not snap to an arbitrary point of it.
-	 * `elapsed` is advanced by the tick's own `dt` in `stepBallSpeeds`; nothing else writes it, and it is never < 0.
+	 * All three fields are per ball, and each one is load-bearing (item 153):
+	 *
+	 * - The **phase** stops a belt of balls starting on the same point of the wave - see `SWAY_PHASE_JITTER`.
+	 * - The **rate** stops them staying there. A field of identical periods is a fixed arrangement of offsets that repeats
+	 *   forever, which reads as synchronised however well the phases are drawn - see `SWAY_FREQUENCY_JITTER`. It is stored
+	 *   as radians per second rather than as a multiplier so the tick does not recompute `2 * pi * f * multiplier` per ball
+	 *   per frame.
+	 * - The **clock** is what makes the wave start on the ball's own first tick rather than on a global time, so a ball
+	 *   spawning into a wave that is already running does not snap to an arbitrary point of it. `elapsed` is advanced by the
+	 *   tick's own `dt` in `stepBallSpeeds`; nothing else writes it, and it is never < 0.
 	 *
 	 * ## Why a map and not two attributes on the body
 	 *
@@ -505,11 +512,19 @@ export class BallSpawnerService implements OnStart {
 	 * for nothing. The map is cleared in `forgetBall` and `pruneDestroyedBalls` alongside `ballKillY`, so its size
 	 * tracks the live set exactly like every other per-ball map in this file.
 	 *
-	 * **This is the same map the bounce model used** (item 107): it held `{ direction, bound }` and holds
-	 * `{ phase, elapsed }` now. Repurposed rather than replaced so the four call sites - two writes at spawn, two
-	 * deletes on the death paths - kept their shape and no stale map can be left behind.
+	 * **This is the same map the bounce model used** (item 107): it held `{ direction, bound }`, then `{ phase, elapsed }`,
+	 * and holds `{ phase, elapsed, omega }` now. Repurposed rather than replaced so the four call sites - two writes at
+	 * spawn, two deletes on the death paths - kept their shape and no stale map can be left behind.
 	 */
-	private readonly lateral = new Map<BasePart, { phase: number; elapsed: number }>();
+	private readonly lateral = new Map<BasePart, { phase: number; elapsed: number; omega: number }>();
+
+	/**
+	 * How many sway states this session has created. **The input to the phase stride** — see `newSway` — not a statistic.
+	 *
+	 * A session-scoped counter rather than a per-round one, because it must keep advancing across rounds: a per-round
+	 * counter would hand lane 0 the same phase every round, which turns the spread into a fixed pattern the eye can learn.
+	 */
+	private swaySpawns = 0;
 
 	/**
 	 * Each ball's own starting speed, in studs/second, drawn once at spawn and reused at every `Playing` entry.
@@ -698,6 +713,13 @@ export class BallSpawnerService implements OnStart {
 			// it drew at spawn, so a ball zeroed by `Waiting` resumes the curve it was born with rather than being
 			// re-rolled into a different one.
 			let seeded = 0;
+			// **Every live ball's sway phase *and* period, on the one line that already reports round start (items 151/153).**
+			// The user asked whether a field of balls swaying together was chance; the sampled ball in the log could never
+			// answer it, because only one ball is sampled per session. Phases drawn independently that happen to land close
+			// together are chance; **identical periods are not chance, they are the model** - a field sharing one period keeps
+			// its offsets forever, so it reads as synchronised no matter how the phases were drawn. The period is on the line
+			// so the next report can tell those two apart without a rebuild.
+			const swayPhases = new Array<string>();
 			for (const ball of this.liveBalls) {
 				if (ball.Parent !== undefined) {
 					ball.SetAttribute(BALL_SPEED_ATTRIBUTE, this.startSpeeds.get(ball) ?? BALL_SPEED_START);
@@ -706,11 +728,20 @@ export class BallSpawnerService implements OnStart {
 					// point gets its timers from `spawnBall`, which is the only other entry point.
 					onRoundActive(ball);
 					seeded++;
+
+					const sway = this.lateral.get(ball);
+					// Phase **and period**, because the pair is what decides whether two balls drift apart or stay the
+					// offset they were drawn with: equal periods never drift, however different the phases are (item 153).
+					swayPhases.push(
+						sway === undefined
+							? "none"
+							: `${formatNumber(sway.phase)}@${formatNumber((2 * math.pi) / sway.omega)}s`,
+					);
 				}
 			}
 
 			print(
-				`[Spawner] round start: ${seeded} ball(s) at BALL_SPEED=${formatNumber(BALL_SPEED_START)}+0..${formatNumber(2 * BALL_SPEED_START_JITTER)}`,
+				`[Spawner] round start: ${seeded} ball(s) at BALL_SPEED=${formatNumber(BALL_SPEED_START)}+0..${formatNumber(2 * BALL_SPEED_START_JITTER)} sway=${swayPhases.join(",")} (0..${formatNumber(SWAY_PHASE_JITTER)})`,
 			);
 			return;
 		}
@@ -1390,14 +1421,45 @@ export class BallSpawnerService implements OnStart {
 	// #region the reference-speed model
 
 	/**
-	 * A fresh sway state: a random starting phase and a clock at zero.
+	 * A fresh sway state: a spread starting phase, this ball's own angular rate, and a clock at zero.
 	 *
 	 * `elapsed` starts at `0` rather than at an absolute time because the wave is the ball's own - see the `lateral`
-	 * map. The phase is drawn from `0 .. SWAY_PHASE_JITTER`, so `math.pi` gives a fully desynchronised field and `0`
-	 * would make every ball sway together.
+	 * map.
+	 *
+	 * ## Why the rate is drawn (item 153)
+	 *
+	 * A phase drawn per ball only decides *where* on a shared wave each ball sits; with one period for the whole belt those
+	 * offsets never change, so the field is a still picture of offsets taken at a moving instant — which is why
+	 * `SWAY_PHASE_JITTER` alone kept reading as synchronised. The multiplier is uniform over
+	 * `1 - SWAY_FREQUENCY_JITTER .. 1 + SWAY_FREQUENCY_JITTER`, drawn once at spawn and never redrawn: a rate that wandered
+	 * would make the wave's velocity term wrong for the phase the ball is actually at.
+	 *
+	 * ## Why the phase is a stride and not a draw (item 153, second half)
+	 *
+	 * Because a uniform draw is only *spread on average*, and the log that prompted this shows what that costs: seven
+	 * balls landed between `1.02` and `2.91` of a possible `0 .. 3.14`, with two pairs within `0.06 rad` — the whole field
+	 * inside a **3 s window of a 10 s cycle**. Nothing was wrong with the draw; it was an ordinary sample. The eye does not
+	 * see the distribution, it sees the sample, and that sample is a field swaying together.
+	 *
+	 * Two terms fix it. The **rotation** is a fresh uniform draw per spawn, so the sequence is not the same picture every
+	 * boot. The **stride** is the golden-ratio conjugate, which places each new phase as far as possible from every phase
+	 * already used — the low-discrepancy sequence that spreads `n` points more evenly than any random draw of `n` points
+	 * will. Consecutive spawns in a round therefore land near `0`, `0.62`, `0.24`, `0.85` … of the range instead of
+	 * wherever the dice fell.
+	 *
+	 * The trade is stated rather than hidden: each ball's phase is *less* individually random, and the field is *more*
+	 * independent. That is the direction the complaint asks for.
 	 */
-	private newSway(): { phase: number; elapsed: number } {
-		return { phase: math.random() * SWAY_PHASE_JITTER, elapsed: 0 };
+	private newSway(): { phase: number; elapsed: number; omega: number } {
+		const multiplier = 1 + (math.random() * 2 - 1) * SWAY_FREQUENCY_JITTER;
+		const stride = this.swaySpawns * ((math.sqrt(5) - 1) / 2);
+		this.swaySpawns++;
+
+		return {
+			phase: ((math.random() + stride) % 1) * SWAY_PHASE_JITTER,
+			elapsed: 0,
+			omega: 2 * math.pi * SWAY_FREQUENCY_HZ * multiplier,
+		};
 	}
 
 	/**
@@ -1455,6 +1517,10 @@ export class BallSpawnerService implements OnStart {
 	 * carried: the sway is the only lateral intent this model has, and a collision is not allowed to leave a ball riding
 	 * off the wave.
 	 *
+	 * **"Overwritten" is a claim the write has to earn.** It wrote `add(lateral)` on top of the carried component until
+	 * item 151, which is an integrator rather than a setter and turned each ball into a driven oscillator; the comment at
+	 * that line carries the arithmetic and the symptom.
+	 *
 	 * **This loop is the only writer of the along-belt component, and it runs on `Heartbeat`.** Anything else that writes
 	 * `AssemblyLinearVelocity` along `±X` between two ticks is overwritten here before it can accumulate, which is why the
 	 * `BALL_SPEED` attribute is the only lever any other module has over a ball's motion.
@@ -1481,10 +1547,11 @@ export class BallSpawnerService implements OnStart {
 		const right = this.treadmill.getBeltRightVector();
 		// Read once for the whole loop: it is the frame every ball's `localZ` is measured in.
 		const beltFrame = this.treadmill.getBeltFrame();
-		// Angular rate of the sway, `2 * pi * SWAY_FREQUENCY_HZ`. Hoisted and named because both the position wave and
-		// its derivative use it: one expression for both means the velocity can never be the derivative of a *different*
-		// frequency than the position it is meant to track.
-		const swayOmega = 2 * math.pi * SWAY_FREQUENCY_HZ;
+		// Angular rate of the sway, **per ball** since item 153: `2 * pi * SWAY_FREQUENCY_HZ * that ball's multiplier`,
+		// drawn at spawn and carried in `lateral`. It used to be one constant hoisted out here, which is exactly the bug -
+		// one period for the field means the phase offsets never drift, so a well-drawn field still reads as synchronised.
+		// The wave's position and its derivative still come from one expression per ball, so the velocity cannot be the
+		// derivative of a *different* frequency than the position it tracks.
 
 		for (const ball of this.liveBalls) {
 			if (ball.Parent === undefined) {
@@ -1549,13 +1616,37 @@ export class BallSpawnerService implements OnStart {
 				lateralState.elapsed += dt;
 
 				const localZ = beltFrame.PointToObjectSpace(ball.Position).Z;
-				const angle = swayOmega * lateralState.elapsed + lateralState.phase;
+				const omega = lateralState.omega;
+				const angle = omega * lateralState.elapsed + lateralState.phase;
 				const targetZ = math.sin(angle) * SWAY_AMPLITUDE;
 				const across = beltFrame.RightVector.Cross(beltFrame.UpVector).Unit;
-				const lateralRate =
-					SWAY_AMPLITUDE * swayOmega * math.cos(angle) + (targetZ - localZ) / SWAY_TRACK_SECONDS;
+				const lateralRate = SWAY_AMPLITUDE * omega * math.cos(angle) + (targetZ - localZ) / SWAY_TRACK_SECONDS;
 				const lateral = across.mul(lateralRate);
-				ball.AssemblyLinearVelocity = velocity.sub(right.mul(along)).add(right.mul(-relative)).add(lateral);
+
+				// **The lateral component is removed before this tick's rate is added (item 151).**
+				//
+				// This line used to read `velocity.sub(right.mul(along)).add(right.mul(-relative)).add(lateral)`, which
+				// keeps whatever lateral velocity the ball already had and adds the new rate **on top of it**. That is not
+				// the same system, and the difference is measurable:
+				//
+				// - Setting the lateral velocity gives `e' = -e / T` for the position error, which decays in `T` seconds
+				//   and leaves the ball tracing `A * sin(omega * t + phase)` — the wave the docblock describes.
+				// - Adding to it gives `e'' = -e / T`, a **harmonic oscillator** with natural period `2 * pi * sqrt(T)` =
+				//   7.7 s at `SWAY_TRACK_SECONDS = 1.5`. The wave's own period is 10 s, so every ball was a driven
+				//   oscillator sitting near its resonance: overshooting `SWAY_AMPLITUDE` and — because the excess is excited
+				//   by collisions rather than by each ball's own phase — reading on screen as a field of balls swinging
+				//   further than the constant says and swinging *together*.
+				//
+				// Subtracting `across * velocity.Dot(across)` first is the whole fix, and it is the same statement the
+				// docblock above already made ("knocked sideways ... overwritten on the next tick rather than carried").
+				// `across` is horizontal, so the vertical component still belongs to gravity and a ball in the air still
+				// falls. The along-belt component is removed separately, as before.
+				const carriedLateral = velocity.Dot(across);
+				ball.AssemblyLinearVelocity = velocity
+					.sub(right.mul(along))
+					.sub(across.mul(carriedLateral))
+					.add(right.mul(-relative))
+					.add(lateral);
 				continue;
 			}
 

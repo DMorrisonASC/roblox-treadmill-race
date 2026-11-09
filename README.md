@@ -20,7 +20,7 @@ repo describes it as one, that document is describing a previous version of the 
 | Path                                                                                      | What it is                                                                                                                                                                                   |
 | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/server/services/`                                                                    | Six services: `treadmill`, `ball-spawner`, `pickup`, `round`, `economy`, `player-data-store`                                                                                                 |
-| `src/client/controllers/`                                                                 | Twenty-one controllers: belt scroll, marker spin, ball render, wind boost, tail wind, motion blur, pickup sprite, pickup sound, hit effect, elimination splash, decoy outline, round state, phase banner, transition wipe, picker, shop, leaderboard, payout, reward toast, round song, debug keys |
+| `src/client/controllers/`                                                                 | Twenty-two controllers: belt scroll, marker spin, ball render, wind boost, tail wind, motion blur, pickup sprite, pickup sound, hit effect, elimination splash, decoy outline, round state, phase banner, transition wipe, picker, countdown, shop, leaderboard, payout, reward toast, round song, debug keys |
 | `src/server/powers/`                                                                      | The ten powers — pure rules plus one instance-level wrapper, deliberately a module rather than a service                                                                                     |
 | `src/server/{round-outcome,debug-balls,decoy-outline,elimination-signal,picker,admin}.ts` | Plain modules with specs beside the code; no Flamework, so a spec can import them                                                                                                            |
 | `src/shared/`                                                                             | Tag names, attribute names + defaults, remote names, gameplay constants, the economy / powers / models configs and the UI theme                                                              |
@@ -156,7 +156,8 @@ also enforced synchronously on each spawn.
 
 ## The game loop and the debug keys
 
-Four phases in order: `Intermission` (30 s) → `Waiting` (15 s, the ball picker) → `Playing` →
+Four phases in order: `Intermission` (30 s) → `Waiting` (15 s: the ball picker for 11 s, then a 3-2-1-Start!
+countdown) → `Playing` →
 `PostGame` (5 s) → `Intermission`. `Playing` has **no time limit**: it ends when one competitor is
 left, and that competitor is the winner. A solo session therefore finishes about a second in, with
 that player named — the rule as stated, not a fault. A competitor is eliminated by its centre leaving
@@ -168,8 +169,8 @@ Four debug keys drive it, one per phase, in phase order:
 | Key | Effect                                                                                                                                                                |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `1` | Force `Intermission` from any phase: belt ramp stops, simulation stops, every body is cleared, the timer re-arms                                                      |
-| `2` | Force `Waiting`: clears, then spawns one owned competitor per player and opens the picker                                                                             |
-| `3` | Force `Playing`. From `Playing` it restarts the competitors in place without restarting the round clock; from `PostGame` it refuses while the result is being cleared |
+| `2` | Force `Waiting`: clears, then spawns one owned competitor per player and opens the picker; outside Studio it also spawns bots (in Studio they arrive automatically) |
+| `3` | Force `Playing`, with bots alongside the players' bodies. From `Playing` it restarts the competitors in place without restarting the round clock; from `PostGame` it refuses while the result is being cleared |
 | `4` | Spawn one competitor per bound spawner, each with a **different** ball, refused outside `Playing`                                                                     |
 
 The client never decides a phase: every refusal is the server's, logged with the phase that caused
@@ -187,10 +188,13 @@ The UI is hand-built `Instance`s across five screen layers with fixed draw order
 the round-transition wipe and the phase banner — and big-ui supplies the banner's `Text` component
 plus the theme tokens; there is no component library underneath the rest.
 
-- **Picker** (`Waiting`): three offered balls, rolled on the server and stored there so the timeout
+- **Picker** (`Waiting`, first 11 s): three offered balls, rolled on the server and stored there so the timeout
   pick refers to cards that really existed. A 10% chance upgrades the offer to the player's whole
   collection; a re-roll costs 3 coins, and a premium offer refuses one because a fresh premium roll is
   the same set.
+- **Countdown** (`Waiting`, last ~3 s): the panel closes, and 3-2-1-Start! sweeps in over the frozen balls. It is
+  anchored to the server's published `Playing` deadline, so a client that joins late shows the caption the clock
+  says rather than starting its own timer.
 - **Store and inventory** (rail tabs, visible only during `Intermission`): a coin chest at 100 coins,
   openable up to ten at a time in one save; one Robux chest whose pool is rare and above, behind a
   `PolicyService` gate; and an inventory with `Balls` and `Fusion` tabs. Fusion takes two balls and
@@ -200,7 +204,12 @@ plus the theme tokens; there is no component library underneath the rest.
   reports, a failed save spends nothing, and a profile that cannot be loaded — or is locked by
   another session — goes read-only rather than retrying into it.
 - **`/dev` admin** is a server-side chat command, `/dev setCoins <player> <amount>` or
-  `/dev wipeData <player>`, and it is the only way to grant coins today.
+  `/dev wipeData <player>`, and it is the only way to grant coins today. **It is disarmed on a live
+  server until an admin types `/dev arm <token>`** — Studio arrives armed. Disarming is `/dev disarm`,
+  and the session disarms itself when the admin who armed it leaves.
+- **Bots** fill out a Studio round. A solo Studio session gets one per bound spawner at every `Waiting`
+  entry (so `2`, the `Intermission` timer and `3` all produce a field), and `4` still spawns them on
+  demand in any phase bodies can exist.
 
 ## Ball powers
 
@@ -371,7 +380,8 @@ place with your own parts:
 2. Rotate the belt 90° in Studio — the drift direction rotates with it. Set `BeltSpeed = 0` and every
    ball rides forward instead, because nothing is subtracted from its `BALL_SPEED`.
 3. Press `2` — one competitor per player appears in a lane and the picker opens with a countdown.
-   Let the countdown expire and every player races their timeout pick.
+   Let the countdown expire and every player races their timeout pick; the panel then closes and 3-2-1-Start!
+   plays over the frozen belt before `Playing` begins.
 4. Press `3` with one player — `PostGame` names that player a second later. One competitor left is
    the winner, whether the round started with one or with five.
 5. Press `4` — one body per bound spawner appears, each with a different power badge, and a single

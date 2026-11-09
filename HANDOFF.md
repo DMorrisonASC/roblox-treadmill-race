@@ -3839,3 +3839,160 @@ A decoy is created by the `decoy` power through `spawnDecoy`, never by `spawnRou
 **Placeholders:** none invented this round.
 
 **Studio-only:** whether the twin now goes with the parent on both paths (the one temporary line says whether the code took it; only a playtest says whether a player ever sees the orphan), whether anything still names a twin on the leaderboard after its parent is out (it should not be listed at all now), and whether destroying the twin mid-tick ever races a `settleEliminations` pass into touching a body it had already seen — the cleanup pass and the round tick are independent loops, and only a live round exercises that overlap.
+
+## 149. The picker gives up twelve seconds and a 3-2-1-Start! countdown takes the last two
+
+**Extends items 34/37/38 (the phase machine and its four values), 36/131 (bodies spawn at `Waiting` entry, so `Waiting` is already a frozen scene), 69/70 (the picker and its server-clock countdown), 73 (the splash idiom this animation follows) and 116 (`outlineText`).** Does **not** add a phase, a `RoundState` value, or a single line of `Playing` freeze code; does not touch `motionBlur`, `RoundSong`, pickups, the winner rule, the phase banner, `spawnRoundCompetitors`, `enterPlaying`'s transition logic, or the picker's appearance.
+
+**The countdown lives in `Waiting` because `Waiting` is already frozen.** `enterWaiting` sets the belt to 0 and `setRoundActive(false)`, and the bodies arrived at `Waiting` entry (`startWaitingRound` → `spawnRoundCompetitors`, called before `enterWaiting` from both entry paths). So there is nothing to hold back: **no freeze code was added, and none is needed**. `RoundState` stays `Waiting` throughout, which is what the banner shows.
+
+**`PICKER_WINDOW_SECONDS = 12`, and the window now closes on its own timer.** This is the part of the brief that was incomplete: the pick window used to close at `enterPlaying`, i.e. *because* the phase ended, so shortening its deadline alone would have left the panel up and the server accepting picks for the last three seconds. The window now ends at `pickerDeadline`, server-side via `armPickWindowClose` (guarded on the deadline token and the phase) and client-side by `picker-controller.tickCountdown` hiding the panel when the countdown reaches zero. `enterPlaying` keeps its own `closeOffers` call as the backstop for a path that never opened offers.
+
+**`ReplicatedStorage.PlayingDeadline`** — a `NumberValue`, the third of the `RoundState`/`WinnerName` family, seeded `0` at startup, written in `enterWaiting`, cleared at `Playing` entry and at `Intermission` entry, and **set to `0` by a re-armed `Waiting`** so a lobby with no competitors does not put a 3-2-1 in front of a state that will fail the same guard again fifteen seconds later. One writer (`publishPlayingDeadline`), as with the other two.
+
+**The bug the round found on the way, and the reason the pick window's arithmetic moved.** `openOffers` read `pendingTimerHold` — but it runs from `startWaitingRound`, *before* `transitionAround` sets that hold for the wipe. So the picker's deadline was measured from the moment the offers were **rolled**, which on an automatic round is behind the transition cover, while the phase ends `cover + hold + open` later. Today that showed as the panel sitting at `0` for ~3.5 s; with a 12 s window it would have been ~4 s of nothing between the panel closing and the countdown starting, on real rounds only, with debug rounds looking correct. **The fix is one arithmetic, moved to the one place that knows it:** `enterWaiting` consumes the hold, computes `endsAt = now + WAITING_SECONDS + hold`, publishes it, and derives `pickerDeadline = endsAt - (WAITING_SECONDS - PICKER_WINDOW_SECONDS)`. The *roll* stays in `openOffers` (the body needs its pick before it is spawned, item 36); the *send* moved to `announceOffers`, called from `enterWaiting`, because every offer message carries that deadline. `scheduleWaitingTimeout` no longer reads the hold — it is handed the delay. Net effect: the panel closes 0.9 s before the `3` appears, on a wiped round exactly as on a `2`-press round.
+
+**`shared/ui/countdown.ts` — the timeline as data.** `countdownSteps(timing)` builds a contiguous partition of the sequence (`in`/`out` per caption, then `hold`/`fade` for `Start!`), `countdownDuration(steps)` folds the total, and `countdownStepIndex(steps, elapsed)` answers "which step is it now". The controller is then a per-frame lookup against `deadline - COUNTDOWN_SECONDS`, never a chain of `task.delay`s — a chain would start from the client's arrival, drift by every hitch, and give a late joiner nothing. **The arithmetic was executed, not asserted:** the module was compiled standalone with `tsc` and run under `node` (a scratch shim for roblox-ts's `Array.size`, deleted afterwards), which printed a 2.1000 s total, nine steps contiguous to the last digit, and the exact boundary behaviour at 0.19/0.2, 0.35, 0.55, 0.70, 0.90, 1.05, 1.25, 1.849/1.85 and 2.09/2.10.
+
+**The animation, verbatim from the brief:** outgoing scale `1 → 1.85` with transparency `0 → 1` over 0.15 s, incoming `6 → 1` with `1 → 0` over 0.2 s, `Quad`/`Out` throughout, no overlap (the steps are contiguous), `Start!` held 0.6 s then faded over 0.25 s with **no** zoom. Five `Placeholder.` timings in `countdown-controller.ts`, and the tweens of a step are cancelled when the next one starts, because a client that hitched can arrive mid-tween and two tweens on one property fight.
+
+**Typography and geometry.** `GothamBlack` (the poster weight `payout-controller`, `reward-toast-controller` and the leaderboard title use) rather than the game's `GothamMedium`; a **fixed** 720×220 box with `TextSize = 144` rather than `AutomaticSize` or `TextScaled`, because both of those interact with the `UIScale` that is doing the zoom — `TextScaled` re-typesets at every step and `AutomaticSize` recomputes from content that the scale is also multiplying. Centred alignment keeps `3`, `2` and `Start!` on one centre line. The `UIScale` sits on the label and the label is anchored at the screen centre, so the sweep grows symmetrically: `UIScale.Scale` is documented as "the multiplier to apply to the parent UI element's **size**", which is why the anchor point rather than the text position does the centring.
+
+**`outlineText` now returns its `UIStroke`.** A stroke's transparency is its own property (the finding `payout-controller` records for text outlines), so anything that fades a label has to fade the outline separately — and it cannot do that through a function that returns nothing without building a second stroke, which is the one thing `outlineText` exists to prevent. Callers that only want the outline ignore the return. The countdown then tunes two of its numbers for a poster (`shadow` colour, 4 px) and leaves the creation in one place.
+
+**Logs.** `[Countdown] mounted layer=splash font=GothamBlack duration=2.1s captions=9` · `start playingDeadline=<t> duration=2.1s startsIn=<n>s` (`startsIn` is negative for a client that joined mid-sequence, which is the fact the deadline alone cannot show) · `caption=<3|2|1|Start!> remaining=<n>s` · `done` · `skipped (deadline past by <n>s)`. Plus `[Picker] window closed after 12s` (server) and `[Picker] closed deadline=<t>` (client).
+
+**Audit.** New: `src/client/controllers/countdown-controller.ts`, `src/shared/ui/countdown.ts`. Changed: `src/shared/remotes.ts` (`PLAYING_DEADLINE_VALUE_NAME`), `src/shared/tuning.ts` (`PICKER_WINDOW_SECONDS`), `src/shared/ui/text.ts` (`outlineText` returns the stroke), `src/server/services/round-service.ts` (the deadline value and its writer, `enterWaiting` as the one place the phase end is computed, `scheduleWaitingTimeout(generation, delay)`, `openOffers`/`announceOffers`/`armPickWindowClose`, the two clears), `src/client/controllers/picker-controller.ts` (hide at the deadline), `README.md` (phase line, picker bullet, countdown bullet, walkthrough step 3, controller count). Build exit 0, lint 0 problems, prettier clean, `\uXXXX` zero, `flamework.build` **regenerated to 29 identifiers** with `CountdownController` present. **`npm test` not run.** One build error worth recording: `let end` is a reserved Luau identifier and `roblox-ts` rejects it, so the fold in `countdownDuration` uses `latest`.
+
+**Placeholders:** `PICKER_WINDOW_SECONDS` (12), `CAPTION_OUT_SECONDS` (0.15), `CAPTION_IN_SECONDS` (0.2), `START_HOLD_SECONDS` (0.6), `START_FADE_SECONDS` (0.25), `SCALE_SWEPT` (1.85), `SCALE_INCOMING` (6), `TEXT_SIZE` (144), `BOX_WIDTH`/`BOX_HEIGHT` (720/220), `OUTLINE_THICKNESS` (4), `REPLICATED_WAIT_SECONDS` (10). `COUNTDOWN_FONT` is a choice, not a tuned number.
+
+**Studio-only:** whether `GothamBlack` at 144 px reads over the belt through the outline; whether 0.15/0.2 s `Quad`/`Out` reads as "rushing toward the camera" rather than as a slideshow; whether the 0.9 s gap feels like a breath or like a stall (and whether it should absorb a longer `Start!` hold instead); whether the `UIScale` at 6× on first frame overdraws anything visible; whether a late joiner sees a coherent mid-sequence caption; and whether the countdown and the phase banner collide visually in the top third of the screen (the banner is the HUD layer, the countdown the splash layer, so the countdown draws over it).
+
+## 150. Bots for a solo Studio round, and `/dev` that will not change a real player's balance by reflex
+
+**Extends items 36/38 (spawn-then-enter and the `Playing → Playing` restart), 65/67 (`/dev`, its parser and its spec), 72 (one competitor is the winner — the bug both halves are about), 73 (the key map), 131 (the bots this round relocates), 135 (`isStudioSession`) and 149 (the `Waiting` countdown, which now plays over bots that were already there).** Does not touch the winner rule, the countdown, `motionBlur`, `RoundSong`, `ADMIN_USER_IDS`, any admin subcommand's body, `isStudioSession()` itself, or the non-admin refusal string.
+
+**Two safety defaults, both seeded from one environment read.** Studio is where the conveniences belong and Live is where a slip is expensive: a Studio round gets bots automatically so a solo playtest is a race, and a live server arrives with the dangerous `/dev` verbs **disarmed**. Neither is a security control — `ADMIN_USER_IDS` is the access control and the token is one keystroke of friction — and both docblocks say so.
+
+**`spawnBots(reason)` is `debugSpawnCompetitors` minus the gate.** Item 87's `playEliminationSound` split, reused: the rule (`Playing` or `Waiting`) stays in `debugSpawnCompetitors`, and the four callers that already know their phase call `spawnBots` directly. **The body is byte-identical** — same `getBoundSpawnerCount()`, same synthetic `Debug#N` owners, same tracking, same log line as key `4` has always printed: `[Round] debug spawn (<reason>): <n> competitors (<first>..<last>) balls=<ids>, live=<n>`. The reason text now names the path (`studio-auto`, `debug key 3`, `debug key 3 restart`, `auto-bots for debug key 2`), which is the one change and it is a log field item 131 already had.
+
+**The automatic population lives in `startWaitingRound`, not in `forceWaiting`.** That is the one place `Waiting` begins, so both keys and the `Intermission` timer are covered by one call, in every round rather than only the one key `2` starts — item 131's call sat only on the key. `spawnStudioBots()` returns `0` unless the session is Studio **and** `Players.GetPlayers().size() === 1`, and `startWaitingRound` only calls it when `spawnRoundCompetitors` produced at least one player body: bots in a lobby that is about to re-arm `Intermission` would be synthetic bodies on an idle belt, and because a bot carries an `OwnerUserId` it would satisfy `enterPlaying`'s guard and start a race with nobody in it. The returned count includes the bots so `enterWaiting`'s `competitors=` still matches the world.
+
+**Key `2` keeps item 131's behaviour where it is not already covered.** `forceWaiting` now calls `IS_STUDIO ? 0 : spawnBots("auto-bots for debug key 2")` — in Studio the automatic call has already done it, and on Live a human pressed a debug verb on purpose, so it still populates. Item 131's docblock argued for an unconditional call and is rewritten in place rather than deleted: the reasoning that was right (a Studio session needs company) is now served one function up.
+
+**Key `3` spawns bots in both of its bodies.** `forcePlaying` has two: the `Playing → Playing` restart branch and the fresh-entry tail. Both call `spawnBots` **after** their `spawned === 0` guard and **before** `enterPlaying`, so an empty belt still stays empty and `Playing` entry's `competitors=` counts them. Unconditional rather than Studio-gated, on the same argument as key `2` on Live.
+
+**`/dev` grew an arming gate, and the parser had to grow with it.** `parseDevCommand` had **no** `arm` case: `/dev arm …` fell into `unknown subcommand`, so there was no route from the chat line to an arming call at all. `DevCommand` therefore gained `{kind: "arm"; token}` and `{kind: "disarm"}` and the parser two branches — `arm` accepts zero or one token (a bare `/dev arm` yields `token = ""`, which fails the *token comparison* rather than the parse, so every wrong attempt reads the same), `disarm` accepts none. This is the one place the brief was self-contradictory: it required `arm` to reach the handler *and* forbade changing the parser's shape. The shape changed by two variants; no existing variant, field or refusal moved.
+
+**`admin.ts` holds the state, the rule, and three wrappers.** `DEV_ARM_TOKEN = "arm-dev"` (**Placeholder.**, not a secret — a leaked token is not a breach because the admin list is the access control). `armDev(state, token)` and `disarmDev(state)` are **pure**: state in, state out, which is what makes all five branches assertable in Jest Lua. `armSessionDev(player, token)`, `disarmSessionDev()` and `disarmSessionDevFor(userId)` are the only code that reads or writes `devArmed` / `armedByUserId` / `armedByDisplayName`; the handler names none of them. The token is compared **before** the armed test, so a wrong token always reports `bad-token` and never leaks whether the door is open.
+
+**The handler is `authorise → parse → arm | disarm | gate → resolve → dispatch`,** and the gate sits exactly there. `/dev arm <bad>` and every unarmed subcommand both refuse through **one helper**, `refuseUnrecognised`, which is also the non-admin refusal — so the two strings cannot drift, and the line an unarmed admin sees says "is not an admin" about them. That is deliberate and stated: a wrong token must be indistinguishable from a wrong account in the log. The unarmed path adds a second line, `[Admin] /dev <sub> refused (not armed) by <name>`, so the reason is still readable to the one person who can act on it.
+
+**Disarm on armer-leave**, connected in `EconomyService.onStart` to `Players.PlayerRemoving` → `disarmSessionDevFor(player.UserId)`, which returns `not-the-armer` (and does nothing) unless the departing player is the one who armed it, and logs `[Admin] /dev DISARMED (armer left) <name>/<displayName>`. A *rejoining* admin needs no re-arm: the flag is server-session state, so it closed when they left and only `/dev arm` opens it again. Another admin leaving does not close somebody else's session.
+
+**One environment read per file.** `round-service.ts` holds `const IS_STUDIO = isStudioSession()` at module scope and three call sites read it; `admin.ts` holds `const IS_STUDIO = isStudioSession()` and both its seed (`let devArmed = IS_STUDIO`) and the boot line's `reason=` read that one constant. Two reads per boot, one per file. A `RunService.IsStudio()` per call site would be five reads that are each individually correct and collectively able to disagree.
+
+**Boot line:** `[Admin] /dev registered; authed=server-only armed=<true|false> reason=<studio|live>` — on a live server the first evidence that a playtest's arming did not carry over.
+
+**Spec.** `admin.spec.ts` gains eleven cases across three blocks, all against the pure functions with literal state: `armDev` (arms; wrong token leaves state *identical by reference*; wrong token on an armed session still says `bad-token`; `already-armed`; the empty token a bare `/dev arm` produces) and `disarmDev` (clears `by*`; no-ops on a disarmed state), plus the parser's two new subcommands and their arities. **`isDevArmed`, the module seed and the three wrappers are Studio-only** and are not asserted: they depend on the environment the suite runs in and on a module singleton the rest of the file would then see mutated.
+
+**Audit.** Changed: `src/server/admin.ts` (import, token, state, two pure rules, three wrappers, two parser branches, one accessor), `src/server/services/economy-service.ts` (import, boot line, `refuseUnrecognised`, the gate and the two bypasses, `disarmIfArmerLeft`, one `PlayerRemoving` connection), `src/server/services/round-service.ts` (`IS_STUDIO`, `spawnBots` extracted, `spawnStudioBots`, three call sites, item 131's docblock rewritten), `src/server/test/admin.spec.ts` (eleven cases), `README.md` (keys `2`/`3`, the `/dev` bullet, a bots bullet). Build exit 0, lint 0 problems, prettier clean, `\uXXXX` zero, `DEV_ARM_TOKEN` grep finds it only in `admin.ts`, `flamework.build` unchanged at **29 identifiers**. **`npm test` not run.**
+
+**Placeholders:** `DEV_ARM_TOKEN` (`"arm-dev"`). `ADMIN_COIN_CAP` and `ADMIN_USER_IDS` remain non-placeholders, per item 65.
+
+**Studio-only:** whether bots are visible during the 3-2-1 countdown (they spawn at `Waiting` entry, so they should be standing on the belt in the frozen scene); whether a solo Studio round reliably has ≥2 competitors at `Playing` entry when the scene has a single bound spawner; whether `/dev arm` reaches `Triggered` at all under the engine's chat filtering (the same unknown item 65 carried, now on the path that opens a door); whether `PlayerRemoving` fires early enough that the `Player` reference is still readable in the handler; and whether `MaxLiveBalls` survives auto-Studio plus key `3` plus key `4` stacked in one session.
+
+## 151. The sway added its rate to the ball's existing sideways velocity instead of setting it — so the field was one undamped oscillator, not a crowd
+
+**Reported: "why these balls all swaying the same direction, at the same time? or is it freak chance?"** Not chance. The phases *are* drawn independently (`math.random() * SWAY_PHASE_JITTER`, `SWAY_PHASE_JITTER = math.pi`), so the design was already the crowd. **The ball's drawn phase was not what the motion was following.**
+
+**The defect is one term, and the docblock had already stated the rule it broke.** The sway branch wrote
+
+```ts
+ball.AssemblyLinearVelocity = velocity.sub(right.mul(along)).add(right.mul(-relative)).add(lateral);
+```
+
+`velocity` is the **current** assembly velocity, which already contains last tick's lateral component. `sub(right.mul(along))` removes only the along-belt part, so the lateral part was **kept** and this tick's `lateralRate` was **added to it**. Item 107's own comment above that branch says the sway "rewrites" the lateral component and that "a ball knocked sideways has its sideways motion overwritten on the next tick rather than carried" — the code carried it.
+
+**Why that makes the field move together, in arithmetic.** Writing the lateral velocity *sets* the position error's law to `e' = -e / T`, which decays in `T` and leaves `z(t) = A · sin(omega·t + phase)`. *Adding* to it makes the error obey `e'' = -e / T` — a harmonic oscillator whose poles sit **on** the unit circle, so it has no damping at all. Its period is the oscillator's (`2·pi·sqrt(T)` = 7.7 s analytically) rather than the wave's (10 s), and because nothing decays, the **startup transient never dies**: the amplitude and phase of each ball's motion are set by the transient, not by its drawn phase. Collisions then pump the same oscillator, which is one shared excitation across the whole field. `[Powers] hit` fires every few seconds in the log that prompted this, so the pump is constant.
+
+**Verified by simulating the loop, not by reasoning about it.** Both variants were run in `node` at the real constants (`A = 2`, `omega = 2·pi·0.1`, `T = 1.5`, `dt = 1/60`) from rest, for three drawn phases:
+
+| variant | amplitude | period | dependence on phase |
+|---|---|---|---|
+| `add` (the bug) | 3.8–5.5 studs | 1.1–3.1 s | amplitude and period both change with the drawn phase |
+| `set` (the fix) | 2.00–2.01 studs | 10.00 s | none — only the *offset* changes, as a sine should |
+
+The simulated amplitude for `add` also explains the log: the sampled ball's `localZ` runs to ±2.9 against `SWAY_AMPLITUDE = 2`, which the buggy model predicts and the correct one cannot produce. (In game the belt walls and the other balls clip that, so the numbers on screen are the clipped version of the same overshoot.)
+
+**The fix:** subtract the carried lateral component before adding the new rate —
+
+```ts
+const carriedLateral = velocity.Dot(across);
+ball.AssemblyLinearVelocity = velocity
+    .sub(right.mul(along))
+    .sub(across.mul(carriedLateral))
+    .add(right.mul(-relative))
+    .add(lateral);
+```
+
+`across` is horizontal, so the vertical component still belongs to gravity; the along-belt component is removed separately, as before. Item 107's paragraph that claimed the overwrite now also records that the claim is one the write has to earn.
+
+**A diagnostic, because the log could not answer the question it was asked.** Only one ball is ever sampled (`sampleBall`), so no amount of `[Ball:1] sample` lines can say whether the *field* is in phase. The existing `[Spawner] round start:` line now carries every live ball's drawn phase:
+
+`[Spawner] round start: 4 ball(s) at BALL_SPEED=… sway=2.975,0.412,1.884,3.07 (0..3.141592653589793)`
+
+Once per round, four numbers. Independent draws that happen to cluster **are** chance and the knob is `SWAY_PHASE_JITTER`; identical values would be a defect in the draw.
+
+**Audit.** Changed: `src/server/services/ball-spawner-service.ts` only (the lateral write, two docblock paragraphs, the round-start line). Build exit 0, lint 0 problems, prettier clean, `\uXXXX` zero, `flamework.build` unchanged at **29 identifiers**. **`npm test` not run.**
+
+**Placeholders:** none invented; `SWAY_AMPLITUDE`, `SWAY_FREQUENCY_HZ`, `SWAY_PHASE_JITTER` and `SWAY_TRACK_SECONDS` are unchanged and still the four knobs.
+
+**Studio-only:** whether the field now reads as a crowd (phases up to `pi` apart, each ball tracing its own 10 s sine at ±2 studs); whether the corrected sway is too gentle at `SWAY_AMPLITUDE = 2` now that it is no longer amplified by resonance — the constant was last tuned **against** the buggy motion, so it is the first thing to raise if the sway now looks timid; and whether wiping the carried lateral velocity each tick makes ball-to-ball collisions feel less deflecting (the docblock argues that is the intended model, but it is a feel, not a proof).
+
+## 152. The countdown was fast because a caption had no readable frame — not because it started late
+
+**Reported: "the countdown feels too fast."** Three candidates were offered in order. **Only the second and third were real; the first cannot be a cause of speed at all.**
+
+**1. The alignment — declined, and it could not have worked.** The controller *can* reach the picker's close time: it is `playingDeadline - (WAITING_SECONDS - PICKER_WINDOW_SECONDS)`, and both constants are in `shared/tuning.ts`, so anchoring the sequence to the panel instead of to the phase was available. Two reasons it was not taken. First, **moving a fixed-length sequence changes when it happens, not how fast it is** — the tweens are identical wherever they sit, so the 0.9 s would simply relocate to the other end. Second, ending on `playingDeadline` is what makes `Start!` land *on* the start; ending at the picker's close replaces the cue with three quarters of a second of silent frozen belt, which reads as the countdown finishing before the race does. The sequence keeps the phase as its end and the *room* for it comes out of the pick window instead — see 3.
+
+**2. The incoming scale — this was the actual defect, and it was worse than "off-screen".** `SCALE_INCOMING = 6` on a `BOX_HEIGHT = 220` label means the drawn box is **1320 px tall on a 1080 px viewport**. It is centred, so the caption is not *gone* — it is the middle of a letter filling more than the screen. A whole glyph only appears in the tail of the inbound tween, so the 0.2 s was mostly spent showing something unreadable and the number arrived as a flash. `2.7` keeps the "arriving from closer to camera" read (nearly three times resting size) while leaving a whole, legible number for the entire tween.
+
+**3. The durations — raised, because 2.1 s was not the reference either.** `CAPTION_IN_SECONDS` 0.2 → **0.4**, `CAPTION_OUT_SECONDS` 0.15 → **0.2**, same 2:1 ratio so only the tempo moves, not the proportions. `START_HOLD_SECONDS` (0.6) and `START_FADE_SECONDS` (0.25) are untouched, as instructed.
+
+**New total: 2.1 s → 3.05 s** — `3 × (0.4 + 0.2)` for the three digits, plus `0.4 + 0.6 + 0.25` for `Start!`. Computed from the same table the controller uses (`countdownDuration`), and checked by running the formula outside the engine before touching a constant.
+
+**A caption now has a dwell it did not have.** At 0.2/0.15 the inbound tween ended exactly where the outbound began, so each digit was fully legible for **one frame**. The pair also now leaves roughly a tenth of a second on screen where the number is at rest; the honest reading of the complaint is that the sequence had no moment to read, and that is what both numbers fix.
+
+**The forced consequence: `PICKER_WINDOW_SECONDS` 12 → 11.** The countdown ends at `Playing` entry, so the runway between the picker closing and the phase ending must be at least the sequence's length: `3.05 s` needed against the `15 - 12 = 3.0 s` a twelve-second window leaves — the first caption would have appeared **three frames before the panel closed**. Eleven leaves four, so the sequence fits with **0.95 s** of frozen belt in front of it, which is the same breath the twelve-second window had against the shorter countdown. The picker gave up a second so the countdown could have one; the pause between them did not move. `tuning.ts`'s docblock that argued for twelve is rewritten in place, including the arithmetic and the fact that the constraint is now `PICKER_WINDOW_SECONDS + countdownLength <= WAITING_SECONDS`.
+
+**Audit.** Changed: `src/client/controllers/countdown-controller.ts` (three constants and their docblocks, plus a class-docblock section recording why the alignment was declined), `src/shared/tuning.ts` (`PICKER_WINDOW_SECONDS` and its docblock), `README.md` (two "12 s" citations). Build exit 0, lint 0 problems, prettier clean, `\uXXXX` zero, `flamework.build` unchanged at **29 identifiers**. **`npm test` not run.**
+
+**Placeholders:** `CAPTION_IN_SECONDS` (0.4), `CAPTION_OUT_SECONDS` (0.2), `SCALE_INCOMING` (2.7), `PICKER_WINDOW_SECONDS` (11). `SCALE_SWEPT` (1.85), `START_HOLD_SECONDS` (0.6), `START_FADE_SECONDS` (0.25), `TEXT_SIZE` (144) and the box are unchanged.
+
+**Studio-only:** whether 3.05 s reads as a count rather than a rush (the number to move next is `CAPTION_IN_SECONDS`, then `START_HOLD_SECONDS`); whether `Start!` now feels clipped at the end, since it is the one caption that did not get longer and it now follows three slower ones — the brief said to leave it unless the end reads clipped, and that judgement needs a screen; whether a `2.7` incoming still reads as motion at all rather than as a pop; and whether eleven seconds is long enough to read three cards and click (nothing measures that yet — the timeout pick is the only evidence).
+
+## 153. The sway had one period for the whole belt, and a phase draw is only spread *on average*
+
+**Reported, second time: "the sways look very syncized. Not enough randomness in the timing."** The phases were drawn correctly — item 151's line proves it — so the complaint was about the model, not the draw. Two separate reasons, and the field needed both fixed.
+
+**1. Every ball shared one period, so the field could never change arrangement.** `swayOmega` was hoisted once per tick from `SWAY_FREQUENCY_HZ` and every ball used it. A phase offset between two equal-period sines is *constant forever*: whatever spread the draw produced on the spawn tick is the spread the field has for the whole round. That is a still picture of offsets viewed at a moving instant, and it reads as one mechanism however well the phases are spread. **`SWAY_FREQUENCY_JITTER = 0.3`** now gives each ball its own rate, drawn once at spawn (`omega` on the `lateral` state, stored in rad/s so the tick does no per-ball arithmetic), so periods run `7.7 s` to `14.3 s`. Two balls at opposite ends of that range drift through a **complete relative cycle in ~17 s**, so the arrangement never repeats within a ride. `0` restores item 107 exactly.
+
+**2. The phase draw was not the problem, but the sample was.** The log that prompted this is worth reading as data. Round one: `2.907, 1.023, 2.854, 1.982, 1.081, 2.654, 2.529` — seven balls inside `1.02 .. 2.91` of a possible `0 .. 3.14`, with two pairs within `0.06 rad`. Normalised, the field spanned **0.60 of π ≈ 3 s of a 10 s cycle**, i.e. every ball doing the same thing inside a three-second window. Nothing was wrong with `math.random`; that is an ordinary sample. The eye never sees the distribution, it sees the sample.
+
+So the phase is now a **golden-ratio stride with a random rotation per spawn** rather than an independent draw: `phase = ((random() + n · (sqrt(5)-1)/2) mod 1) · SWAY_PHASE_JITTER`, where `n` is a session counter (`swaySpawns`, advanced across rounds so a lane does not get a fixed phase). Measured over 40,000 trials of seven balls:
+
+| spread, as a fraction of `π` | min | p1 | p5 | median |
+|---|---|---|---|---|
+| uniform draw | 0.10 | 0.35 | 0.48 | 0.77 |
+| golden stride | **0.76** | 0.76 | 0.76 | 0.85 |
+
+The stride's *worst case* beats the draw's *first percentile*, and the round that was reported scored 0.60 — below the stride's floor. The trade is named in the docblock: each ball's phase is individually less random, and the field is more independent, which is the direction the complaint asks for.
+
+**The log now carries the period beside the phase** — `sway=2.907@9.87s,1.023@12.4s,…` — because the pair is what decides whether two balls drift apart or stay the offset they were drawn with. Identical periods beside different phases would name this defect directly.
+
+**Audit.** Changed: `src/shared/tuning.ts` (`SWAY_FREQUENCY_JITTER` added; `SWAY_FREQUENCY_HZ`'s docblock now says it is the base rate), `src/server/services/ball-spawner-service.ts` (the `lateral` state gains `omega`, `swaySpawns`, `newSway` rewritten, `stepBallSpeeds` uses the per-ball rate, round-start line prints phase@period). Build exit 0, lint 0 problems, prettier clean, `\uXXXX` zero, `flamework.build` unchanged at **29 identifiers**. **`npm test` not run.**
+
+**Placeholders:** `SWAY_FREQUENCY_JITTER` (0.3). Unchanged: `SWAY_FREQUENCY_HZ` (0.1), `SWAY_AMPLITUDE` (2), `SWAY_PHASE_JITTER` (`pi`), `SWAY_TRACK_SECONDS` (1.5). The golden-ratio stride is derived (`(sqrt(5)-1)/2`), not tuned.
+
+**Studio-only:** whether a field of drifting periods reads as independent rather than as "out of time with each other" — a very wide jitter can look like a bug rather than as life, and `0.3` is a guess; whether the corrected sway still reads at all after item 151 removed the resonance amplification (the amplitude question left open there is untouched); and whether the phase stride's guaranteed spread looks *too* even — a low-discrepancy sequence is, by construction, more regular than dice, and if the field reads as evenly spaced rather than as random the answer is a little noise added to the stride, not a return to the draw.

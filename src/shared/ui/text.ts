@@ -29,10 +29,19 @@ const TEXT_OUTLINE_COLOR = Color3.fromRGB(0, 0, 0);
  *
  * Idempotent by construction rather than by a check: a second call adds a second stroke, which is a bug at the call site
  * rather than a case worth guarding. Nothing in the tree calls it twice.
+ *
+ * ## Why it returns the stroke (item 149)
+ *
+ * Because a stroke's transparency is **its own property** and does not ride along with the label's - the finding
+ * `payout-controller` records for text outlines ("lowering a label's `TextTransparency` leaves the outline solid"). Anything
+ * that fades a label out has to fade the outline separately, and it cannot do that through a function that hands back
+ * nothing: the countdown would have to build its own stroke, which is the one thing this function exists to stop. Callers
+ * that only want the outline ignore the return; `CountdownController` is the first that does not.
  */
-export function outlineText(text: TextLabel | TextButton): void {
+export function outlineText(text: TextLabel | TextButton): UIStroke {
 	const stroke = new Instance("UIStroke");
 	stroke.Color = TEXT_OUTLINE_COLOR;
 	stroke.Thickness = TEXT_OUTLINE_THICKNESS;
 	stroke.Parent = text;
+	return stroke;
 }
