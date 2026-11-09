@@ -1,0 +1,837 @@
+import { Controller, OnStart } from "@flamework/core";
+import { Players, TweenService, Workspace } from "@rbxts/services";
+import { PLAYER_COINS_ATTRIBUTE } from "shared/attributes";
+import { ballName, rarityLabel } from "shared/ball-name";
+import { canAffordChests, chestBatchCost, Rarity, rarityOfBall } from "shared/economy.config";
+import { getScreenGui } from "shared/ui/layers";
+import { addChunkyRing, applyChunkyChrome, dimChunkyChrome, shadowOf } from "shared/ui/chunky-chrome";
+import { FONT, SPACING, typographyOneStepUp } from "shared/ui/scale";
+import { outlineText } from "shared/ui/text";
+import { chunkyDarkTheme, Theme } from "shared/ui/theme";
+import { panelScaleFor } from "shared/ui/ui-scale";
+import { lockControls } from "client/controls-lock";
+import { attachClickSound } from "shared/ui/sounds";
+import { attachPressFeedback } from "shared/ui/press";
+
+/**
+ * The chest's card-flip reveal: what the player sees when an `Open N` lands.
+ *
+ * ## What the animation is
+ *
+ * **A celebration of a fact, not a gamble.** The balls on the cards are the balls the server granted, in the order it granted
+ * them — nothing here rolls, shuffles, prices or weights anything. The reply is the truth and this overlay is a presentation of
+ * it, which is why the module reads `ballIds` and never touches `RARITY_WEIGHTS`, `BALL_POOL` or `chestOdds()`: a second
+ * probability table computed at reveal time would be a second opinion about a number the server already decided (item 51's
+ * rule — derive, do not duplicate).
+ *
+ * That constraint is what makes the sequence honest. When a card is still facedown it is **not** still undecided; it is a fact
+ * being unwrapped. Every id is known before the first card moves, and `[Reveal] open … ids=…` prints all of them up front so a
+ * report about "the reveal showed the wrong item" can be answered by comparing two lines of the same session.
+ *
+ * ## The three beats
+ *
+ * ```
+ * Drop   every card starts at the screen centre, scale 0, and flies out to its grid cell
+ * Tease  the grid holds, facedown, each card wearing its rarity ring — the colour-coded aura
+ * Flip   each card turns over, in order, and shows its name and tier
+ * ```
+ *
+ * ## Why the flip is `Size.X` and not `Rotation`
+ *
+ * **`GuiObject`'s `Rotation` property is a 2D spin, not a 3D axis.** Setting it turns the card like a page on a table: the text
+ * goes sideways and the far edge shows the *same face*, mirrored — it never shows the back of anything. A `Frame` also has no
+ * `CFrame` (that is a `BasePart` property), so there is no third thing to reach for.
+ *
+ * What actually reads as a card turning over is the width collapsing to nothing and coming back, with the face swapped at the
+ * instant it is zero pixels wide — the moment nobody can see which face is which. That is what this controller does: `Size.X`
+ * tweens to `0` over `FLIP_HALF_SECONDS`, the back face is hidden and the front shown, then `Size.X` tweens back to full. The
+ * whole animation is 2D and always was; the brain supplies the third axis.
+ *
+ * **A `UIScale` cannot do this**, which is the other half of the argument: `UIScale` scales both axes together, so shrinking it
+ * to zero shrinks the *height* as well and reads as a collapse, not a turn. The flip needs one axis, and `Size` is the only
+ * property that offers one.
+ *
+ * ## Why the drop is a `UIScale` and the flip is `Size`
+ *
+ * They are different mechanisms because they must not fight over the same property. The drop is a pop from nothing — uniform,
+ * both axes, and the splash already does exactly that (item 73), so it is a `UIScale` on the card's container. The flip needs
+ * `Size.X` alone. If the drop also moved `Size`, the two would have to be sequenced through one property and the flip would
+ * start from whatever the drop left behind; with a `UIScale` for one and `Size` for the other, the card's `Size` is *always*
+ * its resting size and the flip is always the same tween.
+ *
+ * ## One card or ten is the same sequence
+ *
+ * The coin chest's `Open 1` and `Open 10` both answer with an array of ids, so there is no separate one-card path: a one-ball
+ * reply is a one-cell grid whose only cell is the centre, and the sequence runs identically. Ten cards add stagger, not steps.
+ */
+
+/** The sheet's type scale, one step larger than the game scale, matching the store's own `PANEL_TYPE`. */
+const PANEL_TYPE = typographyOneStepUp();
+
+/** **Placeholder.** A card's width in pixels, matching the store's prize cards. */
+const CARD_WIDTH = 200;
+
+/** **Placeholder.** A card's height in pixels — art block, name line, tier line, inner padding and the chrome's depth. */
+const CARD_HEIGHT = 260;
+
+/** **Placeholder.** Height of the tinted art block inside a card. */
+const CARD_ART = 150;
+
+/** **Placeholder.** Diameter of the solid ball silhouette inside the art block. */
+const BALL_SWATCH = 88;
+
+/** **Placeholder.** Thickness of the rarity ring, in pixels. Item 118: this is a stroke on its own frame, not a second `UIStroke`. */
+const RING_THICKNESS = 3;
+
+/** **Placeholder.** The gap between two cards, both axes. */
+const CARD_GAP = SPACING.sm;
+
+/** **Placeholder.** How long one card takes to fly from the centre to its cell. */
+const DROP_SECONDS = 0.35;
+
+/** **Placeholder.** The delay between two cards starting their drop. */
+const DROP_STAGGER_SECONDS = 0.06;
+
+/** **Placeholder.** How long the finished grid holds facedown before the first flip. */
+const TEASE_SECONDS = 0.45;
+
+/** **Placeholder.** Half a flip: one `Size.X` tween, so a whole flip is twice this. */
+const FLIP_HALF_SECONDS = 0.12;
+
+/** **Placeholder.** The delay between two cards starting their flip. */
+const FLIP_STAGGER_SECONDS = 0.08;
+
+/** **Placeholder.** The overlay's dim, as the user asked for it. */
+const DIM_TRANSPARENCY = 0.5;
+
+/** **Placeholder.** Footer button width, matching the store's chest buttons. */
+const BUTTON_WIDTH = 170;
+
+/** **Placeholder.** Footer button height: two lines of type plus the chrome's depth. */
+const BUTTON_HEIGHT = 56;
+
+/**
+ * **Placeholder.** The strip at the bottom of the overlay the cards may not use — the footer's height plus a gap above it.
+ *
+ * One number rather than two, because the grid's box and the footer's position have to agree: the grid shrinks by this much and the
+ * footer centres in what it gave up.
+ */
+const FOOTER_BAND = BUTTON_HEIGHT + SPACING.lg;
+
+/**
+ * **Placeholder.** How much `Intermission` must remain for an `Open N` to be allowed to start a reveal.
+ *
+ * Derived rather than guessed: the ten-card sequence is `revealSeconds(10)` — about 2.3 s with the values above — and the rest of
+ * the six is the player reading the last card and pressing `OK`. A reveal that begins inside this window would be cut by the
+ * transition wipe at `TRANSITION_DISPLAY_ORDER`, which is exactly the case this check exists to avoid — so it is a refusal at the
+ * button, with a status line, rather than a silent no-op.
+ */
+export const REVEAL_MIN_REMAINING_SECONDS = 6;
+
+/** The overlay's whole lifetime, for a reply carrying `count` cards. Used for the log line and for tuning the gate above. */
+export function revealSeconds(count: number): number {
+	const cards = math.max(1, count);
+	return (
+		(cards - 1) * DROP_STAGGER_SECONDS +
+		DROP_SECONDS +
+		TEASE_SECONDS +
+		(cards - 1) * FLIP_STAGGER_SECONDS +
+		FLIP_HALF_SECONDS * 2
+	);
+}
+
+const DROP_TWEEN = new TweenInfo(DROP_SECONDS, Enum.EasingStyle.Back, Enum.EasingDirection.Out);
+const FLIP_CLOSE_TWEEN = new TweenInfo(FLIP_HALF_SECONDS, Enum.EasingStyle.Quad, Enum.EasingDirection.In);
+const FLIP_OPEN_TWEEN = new TweenInfo(FLIP_HALF_SECONDS, Enum.EasingStyle.Quad, Enum.EasingDirection.Out);
+
+/**
+ * Why a reveal ended. Every close path names itself, because "the cards vanished" is answered by this word and nothing else
+ * in the log.
+ */
+type RevealCloseReason = "ok" | "open-again" | "phase" | "teardown";
+
+/** What a caller must supply. The ids come from the server's reply and are never recomputed here. */
+export interface RevealOptions {
+	/** The ball ids the reply carried, in the order it carried them. */
+	readonly ballIds: Array<string>;
+	/** How many the player asked for, for the log line and the `Open Again` price. */
+	readonly count: number;
+	/**
+	 * Re-fires the same `Open N`. **The shop owns the remote and its guard**, so this is a callback rather than a remote here:
+	 * a second firing path would be a second place for the `busy` guard and the policy gate to be got wrong.
+	 *
+	 * A refused re-fire calls nothing back, and the reveal stays open exactly as it was — the footer re-dims itself from the
+	 * coin attribute, so "you cannot afford another" is visible on the button the player is pressing.
+	 */
+	readonly onOpenAgain: () => void;
+}
+
+/** One card, as the sequence needs to hold it. */
+interface RevealCard {
+	/** The container that moves, scales and gets its width tweened. */
+	readonly root: Frame;
+	/** The drop's `UIScale` — a different object from the card's `Size`, see the module docblock. */
+	readonly dropScale: UIScale;
+	/** Always facedown at first, then always faceup. */
+	readonly back: Frame;
+	readonly front: Frame;
+	readonly ballId: string;
+	readonly rarity: Rarity;
+	/** The target `Position` in the grid, so the drop has somewhere to go. */
+	readonly target: UDim2;
+}
+
+/**
+ * The live controller, for the one caller that needs it.
+ *
+ * ## Why a module local and not `@Dependency`
+ *
+ * No controller in this tree injects another — the client talks to the server through remotes and reads shared values, and the
+ * one cross-controller fact it needs (the phase) is read from `ReplicatedStorage` by whoever wants it. Introducing Flamework's
+ * DI for a single edge would make this the only controller with a constructor, and `flamework.build` would have to carry the
+ * singleton flip for it. A module local set in `onStart` is the smaller lie, and it is read lazily at press time so the boot
+ * order between this controller and the shop cannot matter.
+ */
+let active: RevealController | undefined;
+
+/**
+ * Records the live controller. Called from `onStart` and from nowhere else.
+ *
+ * A named setter rather than `active = this` inside the class: `@typescript-eslint/no-this-alias` refuses the direct assignment,
+ * and the rule is right — an alias and a registration are different intentions, and only one of them is what this is.
+ */
+function registerReveal(controller: RevealController): void {
+	active = controller;
+}
+
+/** The reveal, if it has started. `undefined` before `onStart` and in a test harness that never ignited. */
+export function getRevealController(): RevealController | undefined {
+	return active;
+}
+
+@Controller()
+export class RevealController implements OnStart {
+	private readonly theme: Theme = chunkyDarkTheme();
+
+	/** The dim, while a reveal is up. Its existence *is* the "one overlay at a time" state. */
+	private dim?: Frame;
+
+	private readonly cards = new Array<RevealCard>();
+
+	/**
+	 * Bumped on every open and every close, and every deferred step checks it before acting.
+	 *
+	 * `task.delay` cannot be cancelled, and the sequence has up to twenty of them queued (ten drops, ten flips) plus a `Completed`
+	 * on every flip tween. Without a token, a reveal closed at `OK` would still be having its cards tweened a second later by the
+	 * callbacks of a frame that no longer exists — the failure that makes a `Destroy()`d instance throw inside a `TweenService`
+	 * callback rather than at the point of the bug.
+	 */
+	private generation = 0;
+
+	/** The footer's `Open Again`, so the affordability refresh can restyle it without a second lookup. */
+	private againButton?: TextButton;
+
+	/** The footer's price line: the price, or `have/price` when it is unaffordable (item 66's pattern). */
+	private againPriceLabel?: TextLabel;
+
+	/** The ball count the current reveal represents, so `Open Again` re-fires the same one. */
+	private count = 1;
+
+	/** Re-fires the opener. Replaced on every `show`, because `Open Again` is always "the same `Open N`". */
+	private reopen: (() => void) | undefined;
+
+	/** The movement lock's release, while a reveal is up. Counted with the store's own hold — see `controls-lock.ts`. */
+	private controlsRelease?: () => void;
+
+	public onStart(): void {
+		registerReveal(this);
+		Players.LocalPlayer.GetAttributeChangedSignal(PLAYER_COINS_ATTRIBUTE).Connect(() => {
+			this.refreshAgainButton();
+		});
+	}
+
+	/** Whether a reveal is up. The shop asks this before firing a remote, so one overlay really is one remote. */
+	public isOpen(): boolean {
+		return this.dim !== undefined;
+	}
+
+	/**
+	 * Shows the reveal for a reply.
+	 *
+	 * **Called while one is already up**, it closes the old one first and opens the new one from the new ids. That is not a
+	 * second overlay — it is `Open Again` succeeding, which the shop can only reach through this overlay's own footer, so the
+	 * close reason is always `open-again`. A second *button press* cannot get here: the shop refuses to fire while `isOpen()`.
+	 */
+	public show(options: RevealOptions): void {
+		const ids = options.ballIds;
+		if (ids.size() === 0) {
+			print("[Reveal] refused reason=empty-reply");
+			return;
+		}
+
+		if (this.dim !== undefined) {
+			// **The hold is kept across a replace.** This is `Open Again` landing: the old overlay is torn down and the new one built in
+			// the same call, so releasing the movement lock and immediately taking it again would hand the thumbstick back for one
+			// frame — visible as a flash of the touch controls in the middle of the celebration.
+			this.close("open-again", true);
+		}
+
+		this.count = options.count;
+		this.reopen = options.onOpenAgain;
+
+		const gui = getScreenGui("reveal");
+		const viewport = this.viewport();
+
+		const dim = new Instance("Frame");
+		dim.Name = "RevealOverlay";
+		dim.Size = UDim2.fromScale(1, 1);
+		dim.BackgroundColor3 = new Color3(0, 0, 0);
+		dim.BackgroundTransparency = DIM_TRANSPARENCY;
+		dim.BorderSizePixel = 0;
+		// Non-interactive itself: the cards are the only things in here a touch can land on, and the `OK` button is above them.
+		// (There is no `ScreenGui.Modal` in this tree's typings — item 161 found it on `GuiButton`, where it means a cursor-lock
+		// rule, so movement is taken away by `lockControls`, not by this frame.)
+		dim.Active = false;
+		dim.ZIndex = 1;
+		dim.Parent = gui;
+		this.dim = dim;
+
+		this.controlsRelease = lockControls();
+		this.generation += 1;
+		const generation = this.generation;
+
+		this.buildGrid(dim, ids, viewport);
+		this.buildFooter(dim);
+
+		print(`[Reveal] open chest=coin count=${options.count} ids=${ids.join(",")}`);
+		this.runSequence(generation);
+	}
+
+	/** Closes on the `OK` button. */
+	public closeOnOk(): void {
+		this.close("ok");
+	}
+
+	/**
+	 * Closes because the phase left `Intermission`.
+	 *
+	 * The reveal cannot block that change — the phase is server-side and the wipe is already on its way — so this is the clean
+	 * exit for the case the `Intermission` gate could not prevent: the frame is destroyed, the movement lock released, and the
+	 * player sees the wipe do its job.
+	 */
+	public closeForPhase(): void {
+		if (this.dim === undefined) {
+			return;
+		}
+
+		this.close("phase");
+	}
+
+	/**
+	 * Tears the overlay down. **The only place any of it is undone**, so `OK`, `Open Again`, a phase change and a teardown cannot
+	 * drift apart.
+	 *
+	 * `keepLock` exists for exactly one caller: `show` replacing an open reveal in the same call, which is about to take the same
+	 * hold again and must not blink the movement lock in between.
+	 */
+	private close(reason: RevealCloseReason, keepLock = false): void {
+		const dim = this.dim;
+		if (dim === undefined) {
+			return;
+		}
+
+		this.dim = undefined;
+		this.generation += 1;
+		this.cards.clear();
+		this.againButton = undefined;
+		this.againPriceLabel = undefined;
+		this.reopen = undefined;
+
+		dim.Destroy();
+
+		if (!keepLock) {
+			const release = this.controlsRelease;
+			this.controlsRelease = undefined;
+			if (release !== undefined) {
+				release();
+			}
+		}
+
+		print(`[Reveal] close reason=${reason}`);
+	}
+
+	// #region the grid
+
+	/**
+	 * Builds every card inside the overlay.
+	 *
+	 * The grid is decided **now**, from the viewport, and not at boot: a rotate during a reveal is a real case, and reading the
+	 * orientation once at startup would put a portrait grid on a landscape screen for the rest of the session. The reveal is short
+	 * enough that a mid-reveal rotate is a shrug — the cards stay where they were laid out — which is why this reads the viewport
+	 * here and not through a `ViewportSize` subscription.
+	 */
+	private buildGrid(dim: Frame, ids: Array<string>, viewport: Vector2): void {
+		const host = new Instance("Frame");
+		host.Name = "Grid";
+		// **The footer's band is taken out of the grid's box, not out of its z-order.** The cards centre themselves in this frame, so
+		// a full-height host would centre them on the screen and put the last row of a portrait ten-card grid underneath the buttons.
+		// Shrinking the host by the band moves the whole composition up by half of it, and the fit scale below is measured against the
+		// same reduced height, so "the cards plus the footer" is what has to fit and not "the cards alone".
+		host.Size = new UDim2(1, 0, 1, -FOOTER_BAND);
+		host.Position = UDim2.fromScale(0, 0);
+		host.BackgroundTransparency = 1;
+		host.BorderSizePixel = 0;
+		host.ZIndex = 2;
+		host.Parent = dim;
+
+		const columns = gridColumns(ids.size(), viewport);
+		const rows = gridRows(ids.size(), viewport);
+		const extent = gridExtent(columns, rows);
+
+		// One `UIScale` for the whole grid, and it is a different object from the per-card drop `UIScale` — the same argument as the
+		// module docblock: one property, one owner. This one is the accepted mobile answer (`panelScaleFor`, item 160), reused rather
+		// than reinvented, so ten 200-pixel cards on a phone shrink instead of running off the screen.
+		const fit = new Instance("UIScale");
+		fit.Scale = panelScaleFor(new Vector2(viewport.X, math.max(1, viewport.Y - FOOTER_BAND)), extent);
+		fit.Parent = host;
+
+		const stepX = CARD_WIDTH + CARD_GAP;
+		const stepY = CARD_HEIGHT + CARD_GAP;
+		const originX = -((columns - 1) / 2) * stepX;
+		const originY = -((rows - 1) / 2) * stepY;
+
+		for (let index = 0; index < ids.size(); index++) {
+			const column = index % columns;
+			const row = math.floor(index / columns);
+			const target = new UDim2(0.5, originX + column * stepX, 0.5, originY + row * stepY);
+			this.cards.push(this.buildCard(host, ids[index], target));
+		}
+	}
+
+	/** One card: a container that moves and turns, a chunky face, and the two faces the flip swaps. */
+	private buildCard(host: Frame, ballId: string, target: UDim2): RevealCard {
+		const rarity = rarityOfBall(ballId) ?? "common";
+		const tint = this.theme.colors.rarity[rarity];
+
+		// The container is the thing the sequence animates. It carries the drop's `UIScale` and its own `Size` — the flip owns the
+		// second and nothing else may write it.
+		const root = new Instance("Frame");
+		root.Name = `Card_${ballId}`;
+		root.AnchorPoint = new Vector2(0.5, 0.5);
+		root.Position = UDim2.fromScale(0.5, 0.5);
+		root.Size = UDim2.fromOffset(CARD_WIDTH, CARD_HEIGHT);
+		root.BackgroundTransparency = 1;
+		root.BorderSizePixel = 0;
+		root.ZIndex = 3;
+		root.Parent = host;
+
+		const dropScale = new Instance("UIScale");
+		dropScale.Scale = 0;
+		dropScale.Parent = root;
+
+		// A `TextButton` because `applyChunkyChrome` decorates a `GuiButton`, and inactive because a card has nothing to press in this
+		// round — the flip is automatic. `Active = false` means no `Activated` and no hover cursor, while the chrome still draws.
+		const button = new Instance("TextButton");
+		button.Name = "Face";
+		button.Size = UDim2.fromScale(1, 1);
+		button.BackgroundTransparency = 1;
+		button.BorderSizePixel = 0;
+		button.AutoButtonColor = false;
+		button.Active = false;
+		button.Text = "";
+		button.ZIndex = 3;
+		button.Parent = root;
+
+		const chrome = applyChunkyChrome(button, {
+			color: this.theme.paint.card.color,
+			shadowColor: shadowOf(this.theme.paint.card.color),
+			zIndex: 3,
+			corner: SPACING.xs,
+		});
+
+		// Item 118: the ring is its own transparent frame with its own stroke. A second `UIStroke` on the chromed face would be
+		// silently outranked by the chunky outline already on it.
+		addChunkyRing(chrome.face, tint, RING_THICKNESS);
+
+		const back = this.buildFace(chrome.face, ballId, rarity, false);
+		const front = this.buildFace(chrome.face, ballId, rarity, true);
+
+		return { root, dropScale, back, front, ballId, rarity, target };
+	}
+
+	/**
+	 * One side of a card. Both sides carry the same tinted art block, because the tint is the rarity and the rarity is the point of
+	 * the hold; only the front adds the name and the tier.
+	 *
+	 * **No probability anywhere.** The reply does not carry one, and deriving it here would be a second probability table
+	 * disagreeing with the server's roll (item 51).
+	 */
+	private buildFace(parent: Frame, ballId: string, rarity: Rarity, revealed: boolean): Frame {
+		const tint = this.theme.colors.rarity[rarity];
+		const z = parent.ZIndex;
+
+		const face = new Instance("Frame");
+		face.Name = revealed ? "Front" : "Back";
+		face.Size = UDim2.fromScale(1, 1);
+		face.BackgroundTransparency = 1;
+		face.BorderSizePixel = 0;
+		face.ZIndex = z;
+		face.Visible = !revealed;
+		face.Parent = parent;
+
+		const art = new Instance("Frame");
+		art.Name = "Art";
+		art.AnchorPoint = new Vector2(0.5, 0);
+		art.Position = new UDim2(0.5, 0, 0, SPACING.sm);
+		art.Size = new UDim2(1, -SPACING.sm * 2, 0, CARD_ART);
+		art.BackgroundColor3 = tint;
+		// The revealed side is denser: the dim behind the overlay washes everything 50%, so the face a player is meant to read needs
+		// more tint than the one they are only meant to notice.
+		art.BackgroundTransparency = revealed ? 0.72 : 0.84;
+		art.BorderSizePixel = 0;
+		art.ZIndex = z + 1;
+		art.Parent = face;
+
+		const artCorner = new Instance("UICorner");
+		artCorner.CornerRadius = new UDim(0, SPACING.sm);
+		artCorner.Parent = art;
+
+		const ball = new Instance("Frame");
+		ball.Name = "Ball";
+		ball.AnchorPoint = new Vector2(0.5, 0.5);
+		ball.Position = UDim2.fromScale(0.5, 0.5);
+		ball.Size = UDim2.fromOffset(BALL_SWATCH, BALL_SWATCH);
+		ball.BackgroundColor3 = tint;
+		ball.BorderSizePixel = 0;
+		ball.ZIndex = z + 2;
+		ball.Parent = art;
+
+		const ballCorner = new Instance("UICorner");
+		ballCorner.CornerRadius = new UDim(1, 0);
+		ballCorner.Parent = ball;
+
+		if (!revealed) {
+			// The facedown card says nothing. Its rarity is the ring around the whole card, which is the aura the user described — the
+			// colour is a tease, not a label, because ten cards each carrying their own name would give the whole set away at once.
+			return face;
+		}
+
+		const name = new Instance("TextLabel");
+		name.Name = "Name";
+		name.AnchorPoint = new Vector2(0, 1);
+		name.Position = new UDim2(0, 0, 1, -PANEL_TYPE.caption.lineHeight * 2 - SPACING.xs);
+		name.Size = new UDim2(1, 0, 0, PANEL_TYPE.h6.lineHeight);
+		name.BackgroundTransparency = 1;
+		name.Font = FONT;
+		name.TextSize = PANEL_TYPE.h6.size;
+		name.TextColor3 = this.theme.colors.textPrimary;
+		name.TextXAlignment = Enum.TextXAlignment.Center;
+		name.TextYAlignment = Enum.TextYAlignment.Center;
+		name.TextTruncate = Enum.TextTruncate.AtEnd;
+		name.Text = ballName(ballId);
+		name.ZIndex = z + 3;
+		name.Parent = face;
+
+		const sizeConstraint = new Instance("UITextSizeConstraint");
+		sizeConstraint.MaxTextSize = PANEL_TYPE.h6.size;
+		sizeConstraint.Parent = name;
+
+		outlineText(name);
+
+		const tier = new Instance("TextLabel");
+		tier.Name = "Tier";
+		tier.AnchorPoint = new Vector2(0, 1);
+		tier.Position = UDim2.fromScale(0, 1);
+		tier.Size = new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight);
+		tier.BackgroundTransparency = 1;
+		tier.Font = FONT;
+		tier.TextSize = PANEL_TYPE.caption.size;
+		// The rarity's own colour, so the label agrees with the ring around it rather than being a second opinion about the tier.
+		tier.TextColor3 = tint;
+		tier.TextXAlignment = Enum.TextXAlignment.Center;
+		tier.TextYAlignment = Enum.TextYAlignment.Center;
+		tier.Text = rarityLabel(rarity);
+		tier.ZIndex = z + 3;
+		tier.Parent = face;
+
+		const tierConstraint = new Instance("UITextSizeConstraint");
+		tierConstraint.MaxTextSize = PANEL_TYPE.caption.size;
+		tierConstraint.Parent = tier;
+
+		outlineText(tier);
+
+		return face;
+	}
+
+	// #endregion
+
+	// #region the sequence
+
+	/**
+	 * Drop, tease, flip — every step deferred, every step guarded by the generation token.
+	 *
+	 * **The tease is one beat for the whole grid, not one per card.** Each card holding for its own `TEASE_SECONDS` after landing
+	 * would start the first flip while the last card was still flying in, and the sequence would read as two overlapping animations
+	 * rather than three beats. So the hold is measured from the moment the *last* card lands.
+	 */
+	private runSequence(generation: number): void {
+		for (let index = 0; index < this.cards.size(); index++) {
+			const card = this.cards[index];
+			task.delay(index * DROP_STAGGER_SECONDS, () => {
+				if (generation !== this.generation) {
+					return;
+				}
+
+				TweenService.Create(card.root, DROP_TWEEN, { Position: card.target }).Play();
+				TweenService.Create(card.dropScale, DROP_TWEEN, { Scale: 1 }).Play();
+			});
+		}
+
+		const teaseStart = (this.cards.size() - 1) * DROP_STAGGER_SECONDS + DROP_SECONDS;
+
+		for (let index = 0; index < this.cards.size(); index++) {
+			const card = this.cards[index];
+			task.delay(teaseStart + TEASE_SECONDS + index * FLIP_STAGGER_SECONDS, () => {
+				if (generation !== this.generation) {
+					return;
+				}
+
+				this.flip(generation, card, index);
+			});
+		}
+	}
+
+	/** One card's turn: collapse, swap faces, expand. See the module docblock for why this is `Size.X` and not `Rotation`. */
+	private flip(generation: number, card: RevealCard, index: number): void {
+		const closing = TweenService.Create(card.root, FLIP_CLOSE_TWEEN, { Size: UDim2.fromOffset(0, CARD_HEIGHT) });
+
+		closing.Completed.Connect(() => {
+			if (generation !== this.generation) {
+				return;
+			}
+
+			// The instant the card is zero pixels wide: nobody can see which face is which, so this is the only correct moment to swap.
+			card.back.Visible = false;
+			card.front.Visible = true;
+
+			print(`[Reveal] flip card=${index + 1} id=${card.ballId} rarity=${card.rarity}`);
+
+			TweenService.Create(card.root, FLIP_OPEN_TWEEN, { Size: UDim2.fromOffset(CARD_WIDTH, CARD_HEIGHT) }).Play();
+		});
+
+		closing.Play();
+	}
+
+	// #endregion
+
+	// #region the footer
+
+	/**
+	 * `OK` and `Open Again`, side by side under the grid.
+	 *
+	 * `Open Again` is the same `Open N` the shot came from, so it re-fires through the shop's own path — the same remote, the same
+	 * `busy` guard, the same balance check. Anything else would be a second way to spend coins.
+	 */
+	private buildFooter(dim: Frame): void {
+		const footer = new Instance("Frame");
+		footer.Name = "Footer";
+		// Centred in the band the grid gave up — see `FOOTER_BAND`. Anchored at its own centre so the two buttons' `UIListLayout` does
+		// not need to know the band's height.
+		footer.AnchorPoint = new Vector2(0.5, 0.5);
+		footer.Position = new UDim2(0.5, 0, 1, -FOOTER_BAND / 2);
+		footer.Size = UDim2.fromOffset(BUTTON_WIDTH * 2 + SPACING.md, BUTTON_HEIGHT);
+		footer.BackgroundTransparency = 1;
+		footer.BorderSizePixel = 0;
+		footer.ZIndex = 20;
+		footer.Parent = dim;
+
+		const layout = new Instance("UIListLayout");
+		layout.FillDirection = Enum.FillDirection.Horizontal;
+		layout.HorizontalAlignment = Enum.HorizontalAlignment.Center;
+		layout.VerticalAlignment = Enum.VerticalAlignment.Center;
+		layout.SortOrder = Enum.SortOrder.LayoutOrder;
+		layout.Padding = new UDim(0, SPACING.md);
+		layout.Parent = footer;
+
+		const ok = this.buildFooterButton(footer, "Ok", "OK", 1, false);
+		ok.Activated.Connect(() => this.closeOnOk());
+
+		const again = this.buildFooterButton(footer, "Again", "Open Again", 2, true);
+		this.againButton = again;
+		again.Activated.Connect(() => this.pressAgain());
+
+		this.refreshAgainButton();
+	}
+
+	private buildFooterButton(
+		parent: Frame,
+		name: string,
+		action: string,
+		order: number,
+		wantsPrice: boolean,
+	): TextButton {
+		const button = new Instance("TextButton");
+		button.Name = name;
+		button.Size = UDim2.fromOffset(BUTTON_WIDTH, BUTTON_HEIGHT);
+		button.BackgroundTransparency = 1;
+		button.BorderSizePixel = 0;
+		button.AutoButtonColor = false;
+		button.Text = "";
+		button.LayoutOrder = order;
+		button.ZIndex = 20;
+		button.Parent = parent;
+
+		const chrome = applyChunkyChrome(button, {
+			color: this.theme.colors.accent,
+			shadowColor: shadowOf(this.theme.colors.accent),
+			zIndex: 20,
+		});
+
+		attachPressFeedback(button);
+		attachClickSound(button);
+
+		const stack = new Instance("UIListLayout");
+		stack.FillDirection = Enum.FillDirection.Vertical;
+		stack.HorizontalAlignment = Enum.HorizontalAlignment.Center;
+		stack.VerticalAlignment = Enum.VerticalAlignment.Center;
+		stack.SortOrder = Enum.SortOrder.LayoutOrder;
+		stack.Padding = new UDim(0, 0);
+		stack.Parent = chrome.face;
+
+		const top = new Instance("TextLabel");
+		top.Name = "Action";
+		top.Size = new UDim2(1, 0, 0, PANEL_TYPE.body1.lineHeight);
+		top.BackgroundTransparency = 1;
+		top.Font = FONT;
+		top.TextSize = PANEL_TYPE.body1.size;
+		top.TextColor3 = this.theme.colors.onAccent;
+		top.TextXAlignment = Enum.TextXAlignment.Center;
+		top.TextYAlignment = Enum.TextYAlignment.Center;
+		top.Text = action;
+		top.ZIndex = 22;
+		top.Parent = chrome.face;
+
+		outlineText(top);
+
+		if (wantsPrice) {
+			const price = new Instance("TextLabel");
+			price.Name = "Price";
+			price.Size = new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight);
+			price.BackgroundTransparency = 1;
+			price.Font = FONT;
+			price.TextSize = PANEL_TYPE.caption.size;
+			price.TextColor3 = this.theme.colors.onAccent;
+			price.TextXAlignment = Enum.TextXAlignment.Center;
+			price.TextYAlignment = Enum.TextYAlignment.Center;
+			price.Text = tostring(chestBatchCost(this.count));
+			price.ZIndex = 22;
+			price.Parent = chrome.face;
+
+			outlineText(price);
+
+			this.againPriceLabel = price;
+		}
+
+		return button;
+	}
+
+	/**
+	 * `Open Again`, or nothing at all.
+	 *
+	 * **A disabled press plays nothing and logs nothing** — the button is `Active = false` in that state, so `Activated` never fires
+	 * and there is no code path here that could fire a remote a player cannot pay for. That is item 66's rule, moved onto this
+	 * footer: the reason is on the control (`have/price`), and the control is not pressable.
+	 */
+	private pressAgain(): void {
+		const reopen = this.reopen;
+		if (reopen === undefined) {
+			return;
+		}
+
+		reopen();
+	}
+
+	/**
+	 * Restyles the footer from the balance attribute.
+	 *
+	 * Subscribed rather than polled, and re-run on every `show`, because the balance changes *under* an open reveal: the chest that
+	 * opened it just spent the coins, so the first frame of the footer must already show the reduced balance rather than the one
+	 * that was true a moment ago.
+	 */
+	private refreshAgainButton(): void {
+		const button = this.againButton;
+		if (button === undefined) {
+			return;
+		}
+
+		const price = chestBatchCost(this.count);
+		const coins = this.coins();
+		const known = coins !== undefined;
+		const affordable = known && canAffordChests(coins, this.count);
+		const enabled = affordable;
+
+		button.Active = enabled;
+		dimChunkyChrome(button, !enabled);
+
+		const label = this.againPriceLabel;
+		if (label !== undefined) {
+			// Item 66's `have/price`, so "why is this dim" is answered by the button itself: `480/1000`.
+			label.Text = affordable || !known ? tostring(price) : `${coins}/${price}`;
+		}
+	}
+
+	/** The local balance, or `undefined` while it is unknown — loading, read-only, or never published. */
+	private coins(): number | undefined {
+		const coins = Players.LocalPlayer.GetAttribute(PLAYER_COINS_ATTRIBUTE);
+		return typeIs(coins, "number") ? coins : undefined;
+	}
+
+	// #endregion
+
+	// #region geometry
+
+	/** The viewport the grid is laid out against, read at open time (not at boot), so a rotate is picked up by the next reveal. */
+	private viewport(): Vector2 {
+		const camera = Workspace.CurrentCamera;
+		if (camera !== undefined && camera.ViewportSize.X > 0 && camera.ViewportSize.Y > 0) {
+			return camera.ViewportSize;
+		}
+
+		const gui = getScreenGui("reveal");
+		return new Vector2(gui.AbsoluteSize.X, gui.AbsoluteSize.Y);
+	}
+
+	// #endregion
+}
+
+/**
+ * How many cards sit side by side.
+ *
+ * Landscape is the wide arrangement — **two rows of many columns** — and a portrait phone gets two columns and however many rows
+ * that needs. One card is one cell either way. Verified against `ViewportSize` at open time; see `RevealController.viewport`.
+ */
+function gridColumns(count: number, viewport: Vector2): number {
+	if (count <= 1) {
+		return 1;
+	}
+
+	const landscape = viewport.X >= viewport.Y;
+	return landscape ? math.ceil(count / 2) : math.min(2, count);
+}
+
+/** The rows implied by `gridColumns` — kept a separate function so the two cannot disagree. */
+function gridRows(count: number, viewport: Vector2): number {
+	if (count <= 1) {
+		return 1;
+	}
+
+	return math.ceil(count / gridColumns(count, viewport));
+}
+
+/** The grid's own pixel size, which is what `panelScaleFor` shrinks to fit. */
+function gridExtent(columns: number, rows: number): Vector2 {
+	return new Vector2(
+		columns * CARD_WIDTH + math.max(0, columns - 1) * CARD_GAP,
+		rows * CARD_HEIGHT + math.max(0, rows - 1) * CARD_GAP,
+	);
+}

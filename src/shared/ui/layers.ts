@@ -38,6 +38,8 @@ export const TRANSITION_GUI_NAME = "TransitionGui";
 export const SPLASH_GUI_NAME = "SplashGui";
 /** **Placeholder.** The `ScreenGui` name for the panel layer (the store and the inventory). */
 export const SHEET_GUI_NAME = "SheetGui";
+/** **Placeholder.** The `ScreenGui` name for the chest-reveal layer. */
+export const REVEAL_GUI_NAME = "RevealGui";
 /** **Placeholder.** The `ScreenGui` name for the reward-toast layer. */
 export const TOAST_GUI_NAME = "ToastGui";
 
@@ -99,11 +101,33 @@ export const SPLASH_DISPLAY_ORDER = 35;
  * - **Below `transition` (40)**, because the wipe's whole job is to hide the phase change. A store above the wipe would leave a
  *   sheet floating on a black screen, which reads as the store refusing to close rather than as a cut.
  *
- * **A gap, not an adjacent value.** `36`, `37`, `38` and `39` are all free here; this takes `38` so a later element can slot above
- * the store without renumbering anything — `39` is reserved in spirit for the toast, which must be able to appear over an open
- * sheet rather than under it (item 133's rule that a toast may never be silently dropped).
+ * **A gap, not an adjacent value, and no longer the middle of one.** `36`, `37`, `38` and `39` were all free when this took `38`,
+ * so a later element could slot above the store without renumbering anything. The later element arrived: the chest reveal (item
+ * 163) needs to draw over an open sheet and under the toast, and **`38` is the only integer strictly between them.** So the sheet
+ * steps down one to `37` and the reveal takes `38` — a one-number move that leaves `toast` (39) and `transition` (40) exactly as
+ * item 160 and item 49 set them, and that keeps both of this layer's own constraints intact and one value wider.
  */
-export const SHEET_DISPLAY_ORDER = 38;
+export const SHEET_DISPLAY_ORDER = 37;
+
+/**
+ * **Placeholder.** Draw order for the chest-reveal layer: **above the panels, below the toast, below the wipe.**
+ *
+ * The reveal (item 163) is a full-screen `0.5` black dim with chunky cards over it, opened from the store, so it has to outrank the
+ * sheet whose buttons started it — a dim drawn *under* the panel would leave the store undimmed in the middle of a celebration.
+ *
+ * ## Why `38` and not the `39` the round's brief asked for
+ *
+ * `39` is the toast (item 133's rule: a toast may never be silently dropped, so it may never be behind a panel either), and two
+ * `ScreenGui`s at the same `DisplayOrder` have no defined order between them — the tie is resolved by sibling order in `PlayerGui`,
+ * which is not something either controller should be trusting for a correctness property. Three constraints therefore pin the whole
+ * chain — reveal above the sheet, toast above the reveal, wipe above everything — and they need **four** integers, not three. The
+ * sheet came down one instead of the toast going up one, because pushing the toast up would have pushed it past the wipe, and a
+ * reward message floating on the black of a phase transition is a worse failure than a panel one rank lower than it was.
+ *
+ * `ScreenInsets.None`, because the reveal is a full-screen dim: its job is to reach the physical screen edges, and an inset would
+ * leave undimmed strips at the edges of a phone — the same argument the `fullScreen` layer makes for scenery.
+ */
+export const REVEAL_DISPLAY_ORDER = 38;
 
 /**
  * **Placeholder.** Draw order for the reward-toast layer: **above the panels, below the wipe.**
@@ -120,8 +144,8 @@ export const SHEET_DISPLAY_ORDER = 38;
  */
 export const TOAST_DISPLAY_ORDER = 39;
 
-/** Which layer an element wants. The seven names map one-to-one to the seven constructors below. */
-export type UiLayer = "hudTopbar" | "hudCore" | "fullScreen" | "transition" | "splash" | "sheet" | "toast";
+/** Which layer an element wants. The eight names map one-to-one to the eight constructors below. */
+export type UiLayer = "hudTopbar" | "hudCore" | "fullScreen" | "transition" | "splash" | "sheet" | "reveal" | "toast";
 
 /**
  * The only public entry point. Returns the layer's `ScreenGui`, creating it if this client does not have
@@ -146,6 +170,8 @@ export function getScreenGui(layer: UiLayer): ScreenGui {
 		return splashGui();
 	} else if (layer === "sheet") {
 		return sheetGui();
+	} else if (layer === "reveal") {
+		return revealGui();
 	} else if (layer === "toast") {
 		return toastGui();
 	}
@@ -177,6 +203,15 @@ function transitionGui(): ScreenGui {
  */
 function sheetGui(): ScreenGui {
 	return configureGui("sheet", SHEET_GUI_NAME, Enum.ScreenInsets.CoreUISafeInsets, SHEET_DISPLAY_ORDER);
+}
+
+/**
+ * `None`, unlike every other element layer: the reveal is a full-screen dim, and its whole job is to reach the physical screen
+ * edges. `CoreUISafeInsets` here would leave the top and bottom strips of a phone undimmed, which reads as a broken overlay rather
+ * than as a safe-area decision — the same reasoning the `fullScreen` layer carries.
+ */
+function revealGui(): ScreenGui {
+	return configureGui("reveal", REVEAL_GUI_NAME, Enum.ScreenInsets.None, REVEAL_DISPLAY_ORDER);
 }
 
 /**

@@ -361,7 +361,7 @@ In practice the floor only binds on a **portrait** phone. This game is played in
 
 ### 4.3 Layers and input (item 161)
 
-**Seven `ScreenGui`s, one function, one order.** `getScreenGui(layer)` is the only way to obtain one, and a layer names a rank,
+**Eight `ScreenGui`s, one function, one order.** `getScreenGui(layer)` is the only way to obtain one, and a layer names a rank,
 not a device:
 
 | layer | order | insets | tenants |
@@ -370,13 +370,21 @@ not a device:
 | `hudCore` | 20 | `CoreUISafeInsets` | the leaderboard, **the picker** |
 | `hudTopbar` | 30 | `TopbarSafeInsets` | the phase banner |
 | `splash` | 35 | `CoreUISafeInsets` | the elimination splash, the payout panel, the countdown |
-| `sheet` | 38 | `CoreUISafeInsets` | **the store, the inventory, the rail** |
+| `sheet` | 37 | `CoreUISafeInsets` | **the store, the inventory, the rail** |
+| `reveal` | 38 | `None` | **the chest reveal** |
 | `toast` | 39 | `CoreUISafeInsets` | the reward toast |
 | `transition` | 40 | `None` | the round wipe — covers everything, always |
 
 **A sheet is above the splashes and below the wipe**, because a splash drawn over an open sheet is legible only by accident, and a
 sheet drawn over the wipe reads as a store that refuses to close. **The toast is above the sheets**, because a reward that arrives
 while the player is shopping must not be hidden by the shop — the same rule as "a toast may never be silently dropped".
+
+**Three constraints need four integers, and two `ScreenGui`s may never share one.** The reveal must be above the sheet it was
+opened from, the toast must be above the reveal (item 133's rule), and the wipe must be above everything — so the chain is total
+and no two layers tie. A tie is not a near-miss: two guis at the same `DisplayOrder` are ordered by sibling position in
+`PlayerGui`, which is not a correctness property any controller should be leaning on. The reveal (item 163) took `38` and the
+sheet stepped down to `37`; pushing the toast up one instead would have put it above the wipe, where a reward message would float
+on the black of a phase transition.
 
 **Do not swallow panel input with a GUI blocker.** The obvious fix — a full-screen transparent `TextButton`, `Active = true` —
 **stops the click and not the character**: the dynamic thumbstick belongs to the `PlayerModule`'s touch controls, which read
@@ -388,6 +396,24 @@ doing so blocked the client for 2.6 s in the first run of this feature.
 **The lock follows the panel's visibility *and* the phase.** A panel left open across a phase change stays visible but gives
 movement back, so a player who forgot to close the store can still race under it. A frozen joystick with no log line explaining it
 is the failure this rule exists to prevent.
+
+**The lock is counted, so two overlays may both hold it.** `lockControls()` increments on every call and restores on the last
+release, so the store and a reveal open on top of it each take their own hold and neither can hand movement back while the other is
+still up. That is why the reveal's `Modal` question has a boring answer: there is no `ScreenGui.Modal`, nothing to release, and the
+store's own hold is simply left alone.
+
+### 4.4 A card flip is `Size.X`, never `Rotation` (item 163)
+
+**`Rotation` is a 2D spin and a `Frame` has no `CFrame`.** Rotating a card turns it like a page on a table — the text goes sideways
+and the far edge still shows the *same face*, mirrored. It never shows the back of anything, which is the one thing a flip has to do.
+
+**A flip is the width collapsing to nothing and coming back, with the face swapped at the zero-width instant** — the frame where
+nobody can tell which side is which. `Size.X` tweens to `0`, `back.Visible = false` and `front.Visible = true`, `Size.X` tweens back.
+The animation is entirely 2D; the third axis is supplied by the viewer.
+
+**`UIScale` cannot do it**, and that is why the drop and the flip use different mechanisms: `UIScale` scales both axes together, so
+taking it to zero is a collapse rather than a turn. The reveal therefore pops its cards in with a `UIScale` (the splash's idiom) and
+turns them with `Size`, so each property has exactly one owner and neither tween has to start from whatever the other left behind.
 
 ---
 

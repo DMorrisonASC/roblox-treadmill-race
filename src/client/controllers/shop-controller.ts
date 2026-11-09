@@ -57,6 +57,8 @@ import { attachClickSound, playPurchaseSound } from "shared/ui/sounds";
 import { applyPanelScale } from "shared/ui/ui-scale";
 import { coinIconUri, reportCoinIconLoad } from "shared/ui/coin";
 import { ballName as displayName, rarityLabel as tierName } from "shared/ball-name";
+import { getRevealController, REVEAL_MIN_REMAINING_SECONDS } from "client/controllers/reveal-controller";
+import { INTERMISSION_SECONDS } from "shared/tuning";
 
 /**
  * **The sheet's type scale: every variant one step larger than the game scale.**
@@ -452,6 +454,18 @@ export class ShopController implements OnStart {
 	private phase = "unknown";
 
 	/**
+	 * When this client last saw the phase *become* `Intermission`, on `os.clock()`.
+	 *
+	 * The server publishes no `Intermission` deadline — only `PlayingDeadline`, for the countdown (item 149) — so this is the only
+	 * way a client can estimate how much lobby is left, and it is an **estimate with one known hole**: a client that joins mid
+	 * `Intermission` reads the phase, records "now" as the start, and therefore over-estimates the remaining time by however long
+	 * the lobby had already been running. The cost of that is bounded rather than hidden: the reveal's own clean close on the phase
+	 * change (see `RevealController.closeForPhase`) is what actually guarantees the overlay never survives the wipe, and this gate
+	 * only has to stop the *common* case — a player who watched the lobby start.
+	 */
+	private intermissionStartedAt?: number;
+
+	/**
 	 * Releases the movement lock while a panel is open, or `undefined` when movement is the player's (item 161).
 	 *
 	 * The *presence* of this function is the lock state — there is no separate boolean to keep in step with it, which is what
@@ -837,9 +851,27 @@ export class ShopController implements OnStart {
 
 	/** Applies the (B) rule to a phase. Used for the mount read and for every change, so there is one rule. */
 	private applyPhase(phase: string): void {
+		const previous = this.phase;
 		this.phase = phase;
 
 		const inIntermission = phase === PHASE_INTERMISSION;
+
+		// The clock this controller can actually measure: the moment it *saw* the lobby begin. See `intermissionStartedAt` for the
+		// join-mid-lobby hole and for why the reveal's own close is the real guarantee rather than this.
+		if (inIntermission && previous !== PHASE_INTERMISSION) {
+			this.intermissionStartedAt = os.clock();
+		}
+
+		// **A reveal cannot survive the phase, and it must not try.** The wipe at `TRANSITION_DISPLAY_ORDER` draws over the reveal at
+		// `REVEAL_DISPLAY_ORDER`, and the phase change is the server's — so the overlay's job here is to leave cleanly, in the one
+		// place everything else about the phase is already decided, rather than to hold on to a frame that is about to be covered.
+		if (!inIntermission) {
+			const reveal = getRevealController();
+			if (reveal !== undefined) {
+				reveal.closeForPhase();
+			}
+		}
+
 		this.rail.Visible = inIntermission;
 
 		// **`Modal` follows the phase as well as the panel, so the phase change has to re-answer it (item 161).**
@@ -3657,8 +3689,38 @@ export class ShopController implements OnStart {
 	 * the first ? the exact interleaving whose stale revert produced the confusing balance in the 14:47 log. So the reply
 	 * releases it, and a watchdog releases it only if the reply never comes.
 	 */
-	private fireChest(count: number): void {
+	/**
+	 * Fires one chest call, `count` at a time.
+	 *
+	 * `fromReveal` is the reveal footer's `Open Again` — and it is a parameter rather than a flag on the controller because this is
+	 * the only decision it changes: the overlay that is asking is *still up*, so the "one overlay at a time" refusal below has to
+	 * let its own re-fire through. Nothing else about the call differs, which is the point: the same remote, the same `busy` guard,
+	 * the same balance check, the same server-side re-validation. A separate path from the reveal back to the economy would be a
+	 * second way to spend coins.
+	 */
+	private fireChest(count: number, fromReveal = false): void {
 		if (this.busy) {
+			return;
+		}
+
+		// **One overlay really is one remote.** A reveal in progress owns the screen — the store is behind its dim — so a press that
+		// got here anyway (a stray touch on a button that is visually covered, a `busy` guard that has already been released by the
+		// reply) is refused by the reveal's own existence rather than by guard timing. The one legitimate second open is the reveal's
+		// `Open Again`, which arrives with `fromReveal` set and replaces the overlay from the new reply.
+		const reveal = getRevealController();
+		if (!fromReveal && reveal !== undefined && reveal.isOpen()) {
+			print("[Reveal] refused reason=busy");
+			return;
+		}
+
+		// **The lobby's remaining time, before the coins are spent.** A reveal is about two and a half seconds long; one started in the
+		// last few seconds of `Intermission` would be covered by the transition wipe mid-flip, so the press is refused *at the button*
+		// with a line that says why, rather than accepted and then cut. `undefined` means "this client cannot tell" — a phase read, or a
+		// join mid-lobby — and allow, because the reveal closes itself cleanly on the phase change either way.
+		const remaining = this.intermissionRemainingSeconds();
+		if (remaining !== undefined && remaining < REVEAL_MIN_REMAINING_SECONDS) {
+			print(`[Reveal] refused reason=intermission-remaining left=${string.format("%.1f", remaining)}`);
+			this.setStatus(`Not enough time left in the lobby for a reveal - ${math.ceil(remaining)}s.`);
 			return;
 		}
 
@@ -3736,6 +3798,26 @@ export class ShopController implements OnStart {
 		return typeIs(coins, "number") ? coins : undefined;
 	}
 
+	/**
+	 * Seconds left in `Intermission`, or `undefined` when this client cannot say.
+	 *
+	 * `undefined` is deliberately the *permissive* answer at the call site: the reveal's clean close on the phase change is what
+	 * keeps the overlay out of the wipe, and a gate that refused every press it could not time would refuse a freshly-joined
+	 * player's first press — see `intermissionStartedAt` for why that case exists at all.
+	 */
+	private intermissionRemainingSeconds(): number | undefined {
+		if (this.phase !== PHASE_INTERMISSION) {
+			return undefined;
+		}
+
+		const startedAt = this.intermissionStartedAt;
+		if (startedAt === undefined) {
+			return undefined;
+		}
+
+		return INTERMISSION_SECONDS - (os.clock() - startedAt);
+	}
+
 	/** `Not enough coins ? 10 chests cost 1000. You have 500.` One line, both numbers, no arithmetic for the player. */
 	private shortfallText(count: number, coins: number): string {
 		if (count === 1) {
@@ -3789,16 +3871,34 @@ export class ShopController implements OnStart {
 		this.busy = false;
 
 		if (reply.ok) {
-			const names = new Array<string>();
-			for (const ballId of reply.balls) {
-				names.push(displayName(ballId));
-			}
+			// **The reveal is the whole success path now.** The "You got N ball" line this replaces was the receipt; the reveal is the
+			// same fact, presented. Nothing here re-reads, re-rolls or re-prices the reply: `reply.balls` is the server's roll, in its
+			// order, and the overlay is a celebration of it (item 163).
+			const reveal = getRevealController();
+			if (reveal === undefined) {
+				// No controller means no client UI at all — a test harness, or a boot that failed before `onStart`. The old sentence is
+				// the fallback so the fact is not lost, and it is the *only* place it still exists.
+				const names = new Array<string>();
+				for (const ballId of reply.balls) {
+					names.push(displayName(ballId));
+				}
 
-			// A bulk open names everything it granted, in roll order. There is no partial result to describe: a batch
-			// either lands whole or grants nothing, so the sentence never has to hedge.
-			this.setStatus(
-				names.size() === 1 ? `You got ${names[0]}.` : `You got ${names.join(", ")}. (${names.size()} balls)`,
-			);
+				this.setStatus(
+					names.size() === 1
+						? `You got ${names[0]}.`
+						: `You got ${names.join(", ")}. (${names.size()} balls)`,
+				);
+			} else {
+				reveal.show({
+					ballIds: reply.balls,
+					count: reply.balls.size(),
+					// The same call this press made, on the same guard, so `Open Again` cannot spend coins by a second route. `true` is
+					// `fromReveal` — the overlay asking for another shot has to get past the "one overlay at a time" refusal.
+					onOpenAgain: () => this.fireChest(reply.balls.size(), true),
+				});
+
+				this.setStatus("");
+			}
 		} else {
 			this.setStatus(this.reasonText(reply.reason));
 		}
