@@ -119,6 +119,16 @@ const BUTTON_HEIGHT = 56;
 const FOOTER_BAND = BUTTON_HEIGHT + SPACING.lg;
 
 /**
+ * **Placeholder.** The strip at the top of the overlay the cards may not use: the Roblox topbar plus a margin.
+ *
+ * The reveal layer is `ScreenInsets.None`, so its gui starts at the *physical* top of the screen and the topbar is drawn over it —
+ * the cards have to be told to start below it, which is what this is. `64` clears the desktop topbar (`36`) with a margin and the
+ * taller phone topbar as well; the grid is top-aligned against this value by its anchor, not centred against the leftover space, so
+ * this is the top edge of the first row of cards rather than an inset to be halved.
+ */
+const GRID_TOP_INSET = 72;
+
+/**
  * **Placeholder.** How much `Intermission` must remain for an `Open N` to be allowed to start a reveal.
  *
  * Derived rather than guessed: the ten-card sequence is `revealSeconds(10)` — about 2.3 s with the values above — and the rest of
@@ -371,28 +381,41 @@ export class RevealController implements OnStart {
 	 * here and not through a `ViewportSize` subscription.
 	 */
 	private buildGrid(dim: Frame, ids: Array<string>, viewport: Vector2): void {
+		const columns = gridColumns(ids.size(), viewport);
+		const rows = gridRows(ids.size(), viewport);
+		const extent = gridExtent(columns, rows);
+
+		// What the grid is allowed to occupy: the screen, less the strip the topbar sits in and the strip the footer sits in. The fit
+		// scale is measured against this rather than against the whole viewport, so "the cards, the topbar and the footer" is what has
+		// to fit — ten cards on a phone shrink because the buttons are below them, not in spite of it.
+		const available = new Vector2(viewport.X, math.max(1, viewport.Y - GRID_TOP_INSET - FOOTER_BAND));
+
 		const host = new Instance("Frame");
 		host.Name = "Grid";
-		// **The footer's band is taken out of the grid's box, not out of its z-order.** The cards centre themselves in this frame, so
-		// a full-height host would centre them on the screen and put the last row of a portrait ten-card grid underneath the buttons.
-		// Shrinking the host by the band moves the whole composition up by half of it, and the fit scale below is measured against the
-		// same reduced height, so "the cards plus the footer" is what has to fit and not "the cards alone".
-		host.Size = new UDim2(1, 0, 1, -FOOTER_BAND);
-		host.Position = UDim2.fromScale(0, 0);
+		// **The host is exactly the grid's own box, and it is anchored where it must not move.** Both halves of that matter:
+		//
+		// - **Its `Size` is the grid's extent, not the screen's.** The cards position themselves at a share of this frame, so a host
+		//   the size of the screen would put the first row in the middle of it. Sized to the grid, `0.5` *is* the grid's centre.
+		// - **`AnchorPoint` is `(0.5, 0)`, and that is the fix for the first Studio run.** `UIScale` shrinks a frame about its
+		//   `AnchorPoint`, not about its centre: a host anchored at `(0, 0)` keeps its top-left corner nailed to the overlay's
+		//   top-left and pulls every centred child up and to the left by `(1 - scale) / 2` of the box. That is exactly what the first
+		//   run showed — a correct `5 x 2` grid sitting off the top-left corner of the screen. Anchored horizontally at `0.5` the
+		//   centre is pinned instead, so the shrink happens inward from both sides; anchored at `0` vertically the top edge stays put,
+		//   which is what "top middle" means.
+		host.AnchorPoint = new Vector2(0.5, 0);
+		host.Position = new UDim2(0.5, 0, 0, GRID_TOP_INSET);
+		host.Size = UDim2.fromOffset(extent.X, extent.Y);
 		host.BackgroundTransparency = 1;
 		host.BorderSizePixel = 0;
 		host.ZIndex = 2;
 		host.Parent = dim;
 
-		const columns = gridColumns(ids.size(), viewport);
-		const rows = gridRows(ids.size(), viewport);
-		const extent = gridExtent(columns, rows);
-
 		// One `UIScale` for the whole grid, and it is a different object from the per-card drop `UIScale` — the same argument as the
 		// module docblock: one property, one owner. This one is the accepted mobile answer (`panelScaleFor`, item 160), reused rather
-		// than reinvented, so ten 200-pixel cards on a phone shrink instead of running off the screen.
+		// than reinvented, so ten 200-pixel cards on a phone shrink instead of running off the screen — and because a `UIScale`
+		// multiplies type and stroke as well as size, the labels shrink with the cards rather than clipping out of them.
 		const fit = new Instance("UIScale");
-		fit.Scale = panelScaleFor(new Vector2(viewport.X, math.max(1, viewport.Y - FOOTER_BAND)), extent);
+		fit.Scale = panelScaleFor(available, extent);
 		fit.Parent = host;
 
 		const stepX = CARD_WIDTH + CARD_GAP;

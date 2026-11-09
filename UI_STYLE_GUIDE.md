@@ -335,6 +335,26 @@ step.
 **A fixed pixel width does not overflow a small screen when nothing clamps it.** An 880-pixel sheet drawn at `0.75` is 660
 pixels; it overflows only when something *also* clamps its layout box.
 
+#### A scaled frame shrinks about its `AnchorPoint`, so anchor it where it must not move (item 164)
+
+`UIScale` multiplies the frame's **`AbsoluteSize`**, and `AbsolutePosition` is then derived from `AnchorPoint` against that scaled
+size. So the anchor is the point the composition holds still while it shrinks:
+
+| `AnchorPoint` | what happens as the scale drops |
+| --- | --- |
+| `(0, 0)` | the top-left corner is nailed down and the whole box pulls in toward it |
+| `(0.5, 0.5)` | the centre is nailed down; it shrinks evenly on all four sides |
+| `(0.5, 0)` | horizontally centred, top edge fixed — "top middle" |
+
+**A host anchored at the origin drags its centred children up and to the left by `(1 − scale) / 2` of its own box.** That is not a
+subtle drift: the first chest-reveal grid shipped as a correct `5 × 2` arrangement sitting off the screen's top-left corner, because
+its host was a full-screen frame at `(0, 0)` with the cards at `0.5` of it — the cards were centred in the *scaled* box, and the
+scaled box had collapsed toward the corner. The panels never had this bug because they are anchored at `(0.5, 0.5)`; any new
+scaled composition has to answer the same question before it is drawn.
+
+**Size the host to the composition, not to the screen.** A host whose `Size` is the screen makes `0.5` mean "middle of the screen"
+rather than "middle of the grid", which is only the same thing when the grid fills the screen.
+
 #### Why `capToViewport` is not used on these panels
 
 `capToViewport` installs a `UISizeConstraint`, which clamps **layout** size per axis. Given an 880-wide sheet and a 390-wide

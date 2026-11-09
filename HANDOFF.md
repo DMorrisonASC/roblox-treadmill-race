@@ -4309,3 +4309,26 @@ Until then the coin chest is the whole feature, and that is deliberate: a reveal
 **Placeholders:** `CARD_WIDTH = 200`, `CARD_HEIGHT = 260`, `CARD_ART = 150`, `BALL_SWATCH = 88`, `RING_THICKNESS = 3`, `CARD_GAP = 8`, `DROP_SECONDS = 0.35`, `DROP_STAGGER_SECONDS = 0.06`, `TEASE_SECONDS = 0.45`, `FLIP_HALF_SECONDS = 0.12`, `FLIP_STAGGER_SECONDS = 0.08`, `DIM_TRANSPARENCY = 0.5`, `BUTTON_WIDTH = 170`, `BUTTON_HEIGHT = 56`, `FOOTER_BAND = 72`, `REVEAL_MIN_REMAINING_SECONDS = 6`. Totals: one card 1.04 s, ten cards 2.30 s. Grid: ten cards are `5 x 2` in landscape and `2 x 5` in portrait, read from `Workspace.CurrentCamera.ViewportSize` at open time.
 
 **Studio-only:** whether width-to-zero reads as a turn or as a squash (the flip is a 2D convention; a real 3D flip is not possible on a `GuiObject`); whether `Back`/`Out` at 0.35 s scatters or pops; whether `0.08 s` of flip stagger is a ripple or a queue; whether the `OK` button really is reachable over the dim (it should be — the dim is `Active = false` and the footer is a sibling at `ZIndex` 20 against the cards' 3); whether the `have/price` footer re-dims in time after a purchase; and what a mid-reveal rotate does to a grid that was laid out for the other orientation.
+
+## 164. The reveal grid holds at its top centre — a `UIScale` shrinks about the anchor, not about the middle
+
+**The first Studio run showed a correct `5 x 2` grid in the top-left corner**, half off the screen. The arrangement was right and the position was wrong, which is the signature of a scaling bug rather than a layout bug.
+
+**`UIScale` multiplies `AbsoluteSize`, and `AbsolutePosition` is then derived from `AnchorPoint` against that scaled size.** The reveal's grid host was a full-screen frame at `Position (0, 0)` with `AnchorPoint (0, 0)`, and the cards positioned at `0.5` of it. At scale 1 that is the centre of the screen. At scale 0.82 the host's box collapses toward its nailed-down top-left corner, so `0.5` of the box is no longer `0.5` of the screen — every card moved up and left by `(1 - scale) / 2` of the overlay, about 90 px on the machine that reported it.
+
+**Two changes, and the second is the one that reads as "top middle":**
+
+- **The host's `Size` is now the grid's own extent**, not the screen's. A host the size of the screen makes `0.5` mean "floor of the arrangement in the middle of the screen"; sized to the grid, `0.5` *is* the grid's centre.
+- **`AnchorPoint` is `(0.5, 0)`** — horizontally centred, top edge fixed — so the shrink happens inward from both sides and the composition holds at the top of the screen. `Position` is `UDim2.new(0.5, 0, 0, GRID_TOP_INSET)`.
+
+**`GRID_TOP_INSET = 72`** is a new `Placeholder.`: the reveal layer is `ScreenInsets.None`, so its gui starts at the physical top and the Roblox topbar is drawn over it. `72` clears the desktop topbar (`36`) and the taller phone one, with a margin. The grid is top-aligned against that value rather than centred in the leftover space, so it is the top edge of the first row, not an inset to be halved.
+
+**The fit scale is now measured against the band between the two reserved strips** — `viewport.Y - GRID_TOP_INSET - FOOTER_BAND` — rather than against the whole viewport. "The cards, the topbar and the footer" is what has to fit, so ten cards on a phone shrink because the buttons are below them rather than in spite of it.
+
+**Why `UIScale` and not pre-scaled pixel sizes.** The tempting fix — compute `CARD_WIDTH * scale` and never use a `UIScale` — scales the card and leaves the type at 24 px, which on a 0.47 portrait scale is a 24-px label in a 94-px card. A `UIScale` multiplies type and stroke with the geometry, which is the entire reason item 160 chose it for the panels. The anchor, not the mechanism, was wrong.
+
+**The panels never had this bug** because every one of them is anchored at `(0.5, 0.5)`. It is the *new* scaled composition that had to answer the question, and the guide now asks it explicitly in §4.2.
+
+**Audit.** Changed: `src/client/controllers/reveal-controller.ts` (`buildGrid` — host size, anchor, position, the `available` band, and the docblock recording the failure; new `GRID_TOP_INSET`), `UI_STYLE_GUIDE.md` (§4.2 gains "a scaled frame shrinks about its `AnchorPoint`" with the anchor table and the two rules). Build exit 0, lint 0 errors, prettier clean, `\uXXXX` zero, `flamework.build` unchanged at **31 identifiers** — no new controller. **`npm test` not run.** Untouched: the card, the sequence, the footer, the layer numbers, the shop's wiring and every number item 163 recorded.
+
+**Studio-only:** whether `72` clears the topbar on the reporter's phone as well as their desktop; whether the ten-card grid now reads as "top middle" or as "too high", since a landscape screen with a width-limited grid leaves the lower third empty by design.
