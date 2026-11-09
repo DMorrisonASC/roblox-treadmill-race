@@ -359,6 +359,36 @@ composition.
 In practice the floor only binds on a **portrait** phone. This game is played in landscape, and a 844 × 390 viewport draws an
 880 × 466 store at `0.75` — full composition, legible type, comfortably inside the screen.
 
+### 4.3 Layers and input (item 161)
+
+**Seven `ScreenGui`s, one function, one order.** `getScreenGui(layer)` is the only way to obtain one, and a layer names a rank,
+not a device:
+
+| layer | order | insets | tenants |
+| --- | --- | --- | --- |
+| `fullScreen` | 10 | `None` | scenery that must reach the screen edge |
+| `hudCore` | 20 | `CoreUISafeInsets` | the leaderboard, **the picker** |
+| `hudTopbar` | 30 | `TopbarSafeInsets` | the phase banner |
+| `splash` | 35 | `CoreUISafeInsets` | the elimination splash, the payout panel, the countdown |
+| `sheet` | 38 | `CoreUISafeInsets` | **the store, the inventory, the rail** |
+| `toast` | 39 | `CoreUISafeInsets` | the reward toast |
+| `transition` | 40 | `None` | the round wipe — covers everything, always |
+
+**A sheet is above the splashes and below the wipe**, because a splash drawn over an open sheet is legible only by accident, and a
+sheet drawn over the wipe reads as a store that refuses to close. **The toast is above the sheets**, because a reward that arrives
+while the player is shopping must not be hidden by the shop — the same rule as "a toast may never be silently dropped".
+
+**Do not swallow panel input with a GUI blocker.** The obvious fix — a full-screen transparent `TextButton`, `Active = true` —
+**stops the click and not the character**: the dynamic thumbstick belongs to the `PlayerModule`'s touch controls, which read
+`UserInputService` rather than GUI hit-testing. Use `client/controls-lock.ts` (`lockControls()`, returning an idempotent release)
+instead. It sets `GuiService.TouchControlsEnabled = false` synchronously — the mechanism that cannot silently no-op — and asks
+`PlayerModule:GetControls():Disable()` on a background thread for gamepad and keyboard. **Never resolve `PlayerModule` inline**:
+doing so blocked the client for 2.6 s in the first run of this feature.
+
+**The lock follows the panel's visibility *and* the phase.** A panel left open across a phase change stays visible but gives
+movement back, so a player who forgot to close the store can still race under it. A frozen joystick with no log line explaining it
+is the failure this rule exists to prevent.
+
 ---
 
 ## 5. Common Pitfalls

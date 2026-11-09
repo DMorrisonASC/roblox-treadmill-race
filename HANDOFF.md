@@ -4210,3 +4210,62 @@ One number multiplies width, height, gaps, corners, strokes and type together, s
 **Placeholders:** `MIN_PANEL_SCALE = 0.45` and the `MAX_FRACTION` `(0.92, 0.9)` in `src/shared/ui/ui-scale.ts`. No designed size was retuned — `STORE_MAX_WIDTH` 880, `SHEET_WIDTH` 640, `PANEL_WIDTH` 210/360 and `TOAST_WIDTH` 240 are all as they were.
 
 **Studio-only:** whether `0.45` is the right floor on a real phone — it only binds in portrait, and the answer is a judgement about type at that size; whether a `UIScale` on an `AutomaticSize.Y` sheet interacts exactly as expected, since the automatic height resolves unscaled and the render is scaled (it should compose, and it is the sort of engine detail this tree has been wrong about before); whether the store's `Size` subscription sees the final auto-height on the very first frame or a frame later, which would show one frame at the wrong scale; and whether the leaderboard's `AnchorPoint = (1, 0)` stays pinned to the top-right under a `UIScale` — it should, because the anchor resolves against the parent before the transform, but it is worth one screenshot.
+
+## 161. The sheets draw above the splash layer, and an open panel takes the movement thumbstick away
+
+**Two reports, both about a panel being open rather than about how it is drawn.** First: *"the STORE and INVENTORY should be the 2nd highest GUI priority, only beaten by the transition GUI."* Second: *"force the panels to ignore the movement joystick — I keep moving while in the panels by mistake when I touch the left side."*
+
+**A sixth layer, at `38`.** The store and the inventory were tenants of `hudCore` (20), which put them **below** the splash layer (35) — so a reward toast, a payout panel or the countdown could paint over an open store. They now name a `sheet` layer:
+
+| layer | order | tenants | contract |
+| --- | --- | --- | --- |
+| `fullScreen` | 10 | scenery | `None` |
+| `hudCore` | 20 | leaderboard, **the picker** | `CoreUISafeInsets` |
+| `hudTopbar` | 30 | phase banner | `TopbarSafeInsets` |
+| `splash` | 35 | payout, countdown, elimination splash | `CoreUISafeInsets` |
+| **`sheet`** | **38** | **store, inventory, rail** | `CoreUISafeInsets` |
+| `toast` | **39** | **the reward toast** | `CoreUISafeInsets` |
+| `transition` | 40 | the round wipe | `None` |
+
+`38` is the only number that satisfies both halves: above `SPLASH_DISPLAY_ORDER` so nothing in the splash layer can cover a sheet, and below `TRANSITION_DISPLAY_ORDER` because the wipe's whole job is to be able to cover everything — a sheet that outlived a wipe would be a panel floating on a black screen. It keeps `CoreUISafeInsets` rather than `None`, because a sheet is centred in its gui and the insets decide where "the middle of the screen" is; `None` would put its top edge under the Roblox topbar on a phone, and it would also disagree with the picker's gui about the coordinate space.
+
+**Why a new layer rather than renumbering `hudCore`.** `hudCore` also holds the leaderboard and the picker, which are HUD — read *alongside* gameplay — and they must not climb over the splash layer's toasts. Raising the whole layer would have moved both for the sake of two panels.
+
+**The rail moved with the sheets.** A rail left at 20 with its panels at 38 is the classic "my tab is behind my panel" bug: the tabs draw under the sheet that covers them. `shop-controller`'s two `getScreenGui` calls are both `sheet` now, and `onStart` builds the rail there too.
+
+**The toast moved to its own layer at `39`, above the sheets, and that is a deliberate divergence from the layering minimum.** Leaving it on `splash` (35) would have put an open store *over* a reward that arrived while the player was shopping — and item 133's standing rule is that a toast may never be silently dropped. A toast behind a panel is the same as one that was never shown. Only the toast moved: `payout`, the countdown and the elimination splash stay on `splash`.
+
+**Movement: two mechanisms, and the first Studio run proved the second one cannot be trusted alone.** The prompt asked for `ScreenGui.Modal`. **That property does not exist on `ScreenGui` in this tree's typings**: `ScreenGui` declares `ClipToDeviceSafeArea`, `DisplayOrder`, `IgnoreGuiInset`, `SafeAreaCompatibility` and `ScreenInsets`, and nothing else. `Modal` *is* declared on **`GuiButton`** (`None.d.ts:21905`), where it means *"the mouse will not be locked unless the right mouse button is down"* — a cursor-lock rule, not an input capture.
+
+The obvious substitute — an invisible full-screen `TextButton` swallowing every touch — was implemented first and then rejected on the evidence, because it **stops the click and not the character**. The dynamic thumbstick is drawn and driven by the `PlayerModule`'s touch controls, which read touches from `UserInputService` rather than from GUI hit-testing, so a blocker under the finger eats the click and the stick still walks the character. That is exactly the reported symptom, and a blocker would have looked like a fix in the code while changing nothing on the device. **A no-op is the worst possible outcome for a fix whose entire job is input.**
+
+**The mechanism that shipped and works is `GuiService.TouchControlsEnabled = false`**, whose own documentation is the argument: *"Used to enable and disable touch controls and touch control display UI."* It is a plain `GuiService` property — no module lookup, no wait, no `pcall` — so the reported symptom is fixed by a line that cannot silently do nothing. `UserInputService.ModalEnabled` is *not* used: it is deprecated in these typings in favour of exactly this property.
+
+**`PlayerModule:GetControls():Disable()` is kept as a best-effort second**, because it is the documented way to take movement away across gamepad and keyboard as well as touch — and the first Studio run showed why it must not be the only one:
+
+```
+18:04:37.584  [Shop] modal=true open=shop phase=Intermission
+18:04:40.199  [Controls] no PlayerModule — panels will not lock movement
+```
+
+Two bugs in that one snapshot. **The module was not resolvable**, and a permanent `unavailable` flag turned "not yet" into "never" for the session. And **`WaitForChild` ran inline**, so opening the shop blocked the client for 2.6 seconds — visible in the log as `modal=true` printing *after* the wait it was supposed to precede. So the resolution moved to `task.spawn`, the "unavailable" latch became a retry-on-next-panel with a once-per-session warning, and the warning now prints **what `PlayerScripts` actually contained** so a nesting or naming difference is one log line away instead of a guess.
+
+**`src/client/controls-lock.ts`** wraps both in a counted, idempotent lock. **Counted** because two panels can want it at once (a phase change closes the shop as the picker opens) and whichever released last would otherwise re-enable movement underneath the other. **Idempotent** because a double release — a destroyed panel, a phase change firing twice — would drive the count negative and leave the character frozen for the session. `touchControlsWere` captures the previous value rather than assuming `true`, so a game that ships with touch controls off does not have them switched *on* the first time a panel closes. `disabled` records that this module actually called `Disable()`, so a deferred disable that lands after its release cannot leave the character stuck. Every platform call is `pcall`ed: **"the character still walks" is a far better failure than "the store will not open"**.
+
+**The shop holds one release for as long as either sheet is open.** `applyModal` is the only place in the controller that takes or gives it, and `setOpen` plus `applyPhase` are its two callers.
+
+**`applyModal` runs before `applyPhase`'s early return, and that ordering is the whole decision.** Item 50's rule is unchanged: a panel left open when the phase changes **stays open** and is only closed on *entry* to the next `Intermission`, never on exit from this one. If the lock followed visibility alone, a store left open into `Playing` would freeze the character for the whole race — the panel over the belt *and* the joystick dead, with nothing in any log to say why. So the lock follows **visibility and phase**: `open !== "none" && phase === "Intermission"`. The panel stays visible across the phase change (item 50 intact) but gives movement back. The cost, stated rather than hidden: **a panel covering the belt is something the player can still drive under.** Closing it with the `X` restores both.
+
+**The wipe was verified, not assumed.** `round-transition-controller` builds a `TransitionGrid` container per play and calls `Fusion.doCleanup(scope)` plus `container.Destroy()` when the play ends, so the `transition` layer has **no children between wipes** and captures nothing. The brief's worry — a visible wipe at 40 eating the joystick so a lock at 38 would not help — does not apply.
+
+**The picker is untouched**: still on `hudCore` (20), same gui, same behaviour. Adding it to the lock is a follow-up rather than this round, because the brief excludes it and its own `Visible` is driven from three places.
+
+**Log line.** `[Shop] modal=<true|false> open=<shop|inventory|none> phase=<...>`, one per *toggle* — "why is the joystick not working" answered in one read. The layer's own `[Ui] created kind=sheet … displayOrder=38` comes from item 39's existing line and is not duplicated.
+
+**Audit.** Added: `src/client/controls-lock.ts`. Changed: `src/shared/ui/layers.ts` (`SHEET_GUI_NAME`/`SHEET_DISPLAY_ORDER` 38, `TOAST_GUI_NAME`/`TOAST_DISPLAY_ORDER` 39, `sheetGui()`/`toastGui()`, `UiLayer` widened to seven, two `getScreenGui` branches), `src/client/controllers/shop-controller.ts` (both `getScreenGui` calls to `sheet`, `controlsRelease` field, `applyModal` called from `setOpen` and from `applyPhase`, the release also wired to each panel's `Destroying`), `src/client/controllers/reward-toast-controller.ts` (one `getScreenGui`), `UI_STYLE_GUIDE.md` (new §4.3: the layer table, the catcher rule and the phase rule). Build exit 0, lint 0 problems, prettier clean, `\uXXXX` zero, `flamework.build` unchanged at **30 identifiers** — no controller or service. **`npm test` not run.** Untouched: the picker, the phase banner, the elimination splash, the payout panel, the countdown, `splash` (35), `transition` (40), item 50's phase-rule docblock, the scale round (`ui-scale.ts`, `chunky-panel.ts`, `capToViewport`), and every non-UI system.
+
+One lint suppression was needed: `@typescript-eslint/no-require-imports` on the single `require(moduleScript)`, with the reason inline. `PlayerModule` is a runtime `ModuleScript` inside the player, not a build-time import, and requiring the instance is the only way to reach `GetControls()`.
+
+**Placeholders:** `SHEET_DISPLAY_ORDER = 38`, `TOAST_DISPLAY_ORDER = 39`, `SHEET_GUI_NAME`, `TOAST_GUI_NAME` in `layers.ts`. Nothing else invented.
+
+**Studio-only:** whether hiding the touch controls is enough on its own — the `GuiService.TouchControlsEnabled` line is synchronous and cannot silently fail, so the *stick disappearing* is the visible confirmation and the character not walking follows from it; whether `GetControls():Disable()` also stops the *mobile jump button* when the module does resolve (it should, since that is the same module); whether a character mid-stride when a panel opens stops cleanly or slides a little; whether the toast at 39 over an open sheet is where the player expects it, since it anchors at `TOP_SCALE` (12%) of a `CoreUISafeInsets` gui and the sheet is centred; and **what `PlayerScripts` actually contains on this machine** — the new failure line prints it, which is what the first run could not answer.

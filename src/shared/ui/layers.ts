@@ -36,6 +36,10 @@ export const FULL_SCREEN_GUI_NAME = "FullScreenGui";
 export const TRANSITION_GUI_NAME = "TransitionGui";
 /** **Placeholder.** The `ScreenGui` name for the action-splash layer. */
 export const SPLASH_GUI_NAME = "SplashGui";
+/** **Placeholder.** The `ScreenGui` name for the panel layer (the store and the inventory). */
+export const SHEET_GUI_NAME = "SheetGui";
+/** **Placeholder.** The `ScreenGui` name for the reward-toast layer. */
+export const TOAST_GUI_NAME = "ToastGui";
 
 /**
  * **Placeholder.** Draw order for the full-screen layer: **below both HUD layers**.
@@ -84,8 +88,40 @@ export const TRANSITION_DISPLAY_ORDER = 40;
  */
 export const SPLASH_DISPLAY_ORDER = 35;
 
-/** Which layer an element wants. The five names map one-to-one to the five constructors below. */
-export type UiLayer = "hudTopbar" | "hudCore" | "fullScreen" | "transition" | "splash";
+/**
+ * **Placeholder.** Draw order for the sheet layer (the store and the inventory): **above every splash, below the wipe.**
+ *
+ * The store and the inventory live here (item 161), and the constraint is two-sided for the same reason the splash layer's is:
+ *
+ * - **Above `splash` (35)**, because a splash-layer element draws over whatever is under it — a reward toast or a payout panel
+ *   appearing across the middle of an open store sheet was legible only if the player happened to be looking at the part of the
+ *   sheet that was not covered.
+ * - **Below `transition` (40)**, because the wipe's whole job is to hide the phase change. A store above the wipe would leave a
+ *   sheet floating on a black screen, which reads as the store refusing to close rather than as a cut.
+ *
+ * **A gap, not an adjacent value.** `36`, `37`, `38` and `39` are all free here; this takes `38` so a later element can slot above
+ * the store without renumbering anything — `39` is reserved in spirit for the toast, which must be able to appear over an open
+ * sheet rather than under it (item 133's rule that a toast may never be silently dropped).
+ */
+export const SHEET_DISPLAY_ORDER = 38;
+
+/**
+ * **Placeholder.** Draw order for the reward-toast layer: **above the panels, below the wipe.**
+ *
+ * The toast was on `splash` (35) until item 162 put the store at 38, which would have put an open sheet over a reward that
+ * arrived while the player was shopping. Item 133's rule is that a toast may never silently drop a message, and a toast behind a
+ * panel is the same as one that was never shown — so it gets its own layer above the panels rather than sharing theirs.
+ *
+ * **Above the panels and not inside them** for the reason the panels themselves are above `splash`: a toast is not part of the
+ * store, and a shop that could cover a "you were paid" line would be a shop that can hide a grant.
+ *
+ * `CoreUISafeInsets` to match `splash`, which the toast was positioned against — it anchors at a share of that gui's height, so
+ * changing the inset contract would move it.
+ */
+export const TOAST_DISPLAY_ORDER = 39;
+
+/** Which layer an element wants. The seven names map one-to-one to the seven constructors below. */
+export type UiLayer = "hudTopbar" | "hudCore" | "fullScreen" | "transition" | "splash" | "sheet" | "toast";
 
 /**
  * The only public entry point. Returns the layer's `ScreenGui`, creating it if this client does not have
@@ -108,6 +144,10 @@ export function getScreenGui(layer: UiLayer): ScreenGui {
 		return transitionGui();
 	} else if (layer === "splash") {
 		return splashGui();
+	} else if (layer === "sheet") {
+		return sheetGui();
+	} else if (layer === "toast") {
+		return toastGui();
 	}
 
 	return topbarHudGui();
@@ -127,6 +167,24 @@ function fullScreenGui(): ScreenGui {
 
 function transitionGui(): ScreenGui {
 	return configureGui("transition", TRANSITION_GUI_NAME, Enum.ScreenInsets.None, TRANSITION_DISPLAY_ORDER);
+}
+
+/**
+ * `CoreUISafeInsets`, matching `hudCore`, and the match is the point: the store, the inventory and the rail moved here from
+ * `hudCore`, and the picker stayed. Two guis with different inset contracts would put the sheet and the picker in slightly
+ * different coordinate spaces, so a sheet that fitted yesterday would sit a few pixels higher today — on a phone only, because
+ * that is where the core insets differ from the physical screen (item 39's rule: the element chooses, not the device).
+ */
+function sheetGui(): ScreenGui {
+	return configureGui("sheet", SHEET_GUI_NAME, Enum.ScreenInsets.CoreUISafeInsets, SHEET_DISPLAY_ORDER);
+}
+
+/**
+ * `CoreUISafeInsets` to match `splash`, which the toast was positioned against before it moved here — it anchors at a share of
+ * the gui's height (`TOP_SCALE`), so a different inset contract would put it at a different height on a phone and nowhere else.
+ */
+function toastGui(): ScreenGui {
+	return configureGui("toast", TOAST_GUI_NAME, Enum.ScreenInsets.CoreUISafeInsets, TOAST_DISPLAY_ORDER);
 }
 
 /**

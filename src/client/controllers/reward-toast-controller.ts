@@ -143,7 +143,7 @@ export class RewardToastController implements OnStart {
 	 * toast that is already fading out is more motion than the information deserves.
 	 */
 	private show(message: RewardToastMessage): void {
-		const gui = getScreenGui("splash");
+		const gui = getScreenGui("toast");
 		const theme = this.theme;
 		const slot = this.live.size();
 

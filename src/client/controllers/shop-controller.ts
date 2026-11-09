@@ -40,6 +40,7 @@ import { chunkyDarkTheme, Theme } from "shared/ui/theme";
 import { fusionOddsForBall, OwnedBall, ownedBallsFrom } from "shared/inventory";
 import { policyAllowsPurchase, PolicyState, policyStateFrom } from "shared/policy";
 import { getScreenGui } from "shared/ui/layers";
+import { lockControls } from "client/controls-lock";
 import { PanelFooter, PANEL_FOOTER_HEIGHT, PANEL_HEADER_HEIGHT, PanelHeader } from "shared/ui/panel";
 import { TabStrip, TAB_STRIP_HEIGHT } from "shared/ui/tabs";
 import { buildChunkyButton, ChunkyButton } from "shared/ui/chunky-button";
@@ -446,8 +447,17 @@ export class ShopController implements OnStart {
 	private readonly railButtons = new Map<PanelId, ChunkyButton>();
 
 	private rail!: Frame;
+
 	private open: "shop" | "inventory" | "none" = "none";
 	private phase = "unknown";
+
+	/**
+	 * Releases the movement lock while a panel is open, or `undefined` when movement is the player's (item 161).
+	 *
+	 * The *presence* of this function is the lock state — there is no separate boolean to keep in step with it, which is what
+	 * makes `applyModal`'s "already in the state we want" test a single comparison.
+	 */
+	private controlsRelease?: () => void;
 
 	// #region store state
 
@@ -608,8 +618,9 @@ export class ShopController implements OnStart {
 	// #endregion
 
 	public onStart(): void {
-		const gui = getScreenGui("hudCore");
+		const gui = getScreenGui("sheet");
 		this.rail = this.buildRail(gui);
+
 		this.applyPhase(this.readPhase());
 		this.connectRemotes();
 		this.connectAttributes();
@@ -831,6 +842,14 @@ export class ShopController implements OnStart {
 		const inIntermission = phase === PHASE_INTERMISSION;
 		this.rail.Visible = inIntermission;
 
+		// **`Modal` follows the phase as well as the panel, so the phase change has to re-answer it (item 161).**
+		//
+		// It is called here *before* the early return, and that ordering is the whole point: item 50's rule below leaves the
+		// sheet open when the phase leaves `Intermission`, so this is the one moment the panel is still visible and must stop
+		// swallowing input. Putting it after the return would make a store left open across `Playing` keep a dead joystick for
+		// the rest of the round — the failure this round exists to prevent, arriving from the other side.
+		this.applyModal();
+
 		if (!inIntermission) {
 			// (B): the sheet stays open. Only the way back in is removed.
 			return;
@@ -942,7 +961,53 @@ export class ShopController implements OnStart {
 		}
 
 		this.restyleRail();
+		this.applyModal();
 		print(`[Shop] open=${this.open} phase=${this.phase}`);
+	}
+
+	/**
+	 * Decides whether movement is taken away, and it is the **only place the lock is taken or released in this controller** (item
+	 * 161).
+	 *
+	 * ## Why not a GUI blocker
+	 *
+	 * The brief's `ScreenGui.Modal` does not exist on `ScreenGui` in this tree's typings — `Modal` is declared on `GuiButton`
+	 * (`None.d.ts:21905`), where it means *"the mouse will not be locked unless the right mouse button is down"*, a cursor-lock
+	 * rule rather than an input capture. And the obvious substitute, a full-screen transparent `TextButton` swallowing every
+	 * touch, **stops the click and not the character**: the dynamic thumbstick is drawn and driven by the `PlayerModule`'s touch
+	 * controls, which read `UserInputService` rather than GUI hit-testing. See `client/controls-lock.ts` for the whole argument.
+	 *
+	 * ## Why it is `open !== "none"` **and** the phase is `Intermission`
+	 *
+	 * This is where item 50's phase rule and this round's input fix collide, and the collision is real: item 50 says a panel left
+	 * open when the phase changes **stays open**, so a store opened in `Intermission` and left open is still on screen during
+	 * `Playing`. If the lock followed visibility alone, that player could not move for the whole race — the panel over the belt
+	 * *and* the character frozen, with nothing in any log to say why.
+	 *
+	 * So it follows both. A panel left open across a phase change keeps item 50's behaviour exactly — visible, not closed by the
+	 * phase — but gives movement back, so the player can still race under it. The cost is named rather than hidden: **a panel
+	 * covering the belt is something the player can still drive under.** Closing it with the `X` restores both.
+	 */
+	private applyModal(): void {
+		const wants = this.open !== "none" && this.phase === PHASE_INTERMISSION;
+
+		if (wants === (this.controlsRelease !== undefined)) {
+			return;
+		}
+
+		if (wants) {
+			this.controlsRelease = lockControls();
+		} else {
+			const release = this.controlsRelease;
+			this.controlsRelease = undefined;
+			if (release !== undefined) {
+				release();
+			}
+		}
+
+		// One line per *toggle*, not per call: "why is the joystick not working" is answered here in one read, and a line printed on
+		// every `setOpen` would bury the two that matter.
+		print(`[Shop] modal=${tostring(wants)} open=${this.open} phase=${this.phase}`);
 	}
 
 	private ensurePanel(id: PanelId): Frame {
@@ -951,9 +1016,20 @@ export class ShopController implements OnStart {
 			return existing;
 		}
 
-		const gui = getScreenGui("hudCore");
+		const gui = getScreenGui("sheet");
 		const panel = id === "shop" ? this.buildStore(gui) : this.buildInventory(gui);
 		panel.Visible = false;
+
+		// **A destroyed panel must release the lock (item 161).** If it is torn down while open, nothing else will: the lock would
+		// stay held and the character would be frozen for the rest of the session with nothing on screen to explain it.
+		panel.Destroying.Connect(() => {
+			if (this.controlsRelease !== undefined) {
+				const release = this.controlsRelease;
+				this.controlsRelease = undefined;
+				release();
+			}
+		});
+
 		this.panels.set(id, panel);
 
 		return panel;
