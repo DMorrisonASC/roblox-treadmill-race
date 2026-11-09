@@ -7,7 +7,7 @@ import { getOrdinal } from "shared/ordinal";
 import { FONT, SPACING, TextVariant, TYPOGRAPHY } from "shared/ui/scale";
 import { chunkyDarkTheme, Theme } from "shared/ui/theme";
 import { getScreenGui } from "shared/ui/layers";
-import { capToViewport } from "shared/ui/viewport";
+import { applyPanelScale } from "shared/ui/ui-scale";
 import { playCoinSound } from "shared/ui/sounds";
 import { CHUNKY_CONTROL_OUTLINE, CHUNKY_CONTROL_STROKE } from "shared/ui/chunky-chrome";
 import { buildChunkyPanel, CHUNKY_PANEL_CORNER } from "shared/ui/chunky-panel";
@@ -232,7 +232,7 @@ export class PayoutController implements OnStart {
 
 		// The one `UISizeConstraint` recipe in the tree. It changes the *size* and never the placement: the builder anchors
 		// the panel at its middle, so a clamped panel stays centred.
-		capToViewport(panel.frame);
+		applyPanelScale(panel.frame, "payout");
 
 		const contentWidth = PANEL_WIDTH - PANEL_PADDING * 2;
 

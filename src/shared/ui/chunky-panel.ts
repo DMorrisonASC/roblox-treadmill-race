@@ -131,10 +131,29 @@ export function buildChunkyPanel(options: ChunkyPanelOptions): ChunkyPanel {
 	//
 	// A child cannot draw behind its own parent's background, so the plate has to be the face's sibling and the two need a
 	// common parent - that parent is the thing a caller positions as one unit.
+	//
+	// ## The plate is the SAME SIZE as the face. Only its position moves.
+	//
+	// Depth is a *position*, not a size: two identical boxes with one pushed `depth` down and right show a uniform strip along
+	// those two edges and nothing along the other two, which is what reads as one card sitting on another. A smaller plate reads
+	// as a drop shadow from a light source; a larger one reads as a second card framing the first.
+	//
+	// Two things had to be fixed for that to be true, and both were wrong before:
+	//
+	// 1. **`fromScale(1, 1)` collapses inside an `AutomaticSize.Y` parent.** The parent asks its children how tall they are, a
+	//    scale child answers "100% of you", and the engine breaks the loop by giving it no height at all - the same circular-size
+	//    trap the face avoids by being the element that *reports*. The plate has no content and cannot report, so it is **told**,
+	//    from the face's resolved height, in `syncShadow` below.
+	// 2. **`ApplyStrokeMode.Border` draws the outline half-outside.** A 6-pixel border puts 3 pixels of the visible panel beyond
+	//    the face on every edge, so a plate matching the *frame* was 6 pixels short on both axes. Matching the frame plus its
+	//    stroke is what makes the two visible boxes equal.
+	const halfStroke = CHUNKY_PANEL_STROKE / 2;
+
 	const shadow = new Instance("Frame");
 	shadow.Name = "Shadow";
-	shadow.Position = UDim2.fromOffset(depth, depth);
-	shadow.Size = UDim2.fromScale(1, 1);
+	// Measured between the two *visible* edges, which is `depth` exactly: the face overhangs the frame by `halfStroke`, so the
+	// plate starts that much earlier.
+	shadow.Position = UDim2.fromOffset(depth - halfStroke, depth - halfStroke);
 	shadow.BackgroundColor3 = options.shadowColor ?? CHUNKY_PANEL_SHADOW;
 	shadow.BackgroundTransparency = 0;
 	shadow.BorderSizePixel = 0;
@@ -160,6 +179,26 @@ export function buildChunkyPanel(options: ChunkyPanelOptions): ChunkyPanel {
 	} else {
 		surface.Size = UDim2.fromScale(1, 1);
 	}
+
+	// **The plate is sized from the face, once the face knows its size.** `AutomaticSize` writes the resolved content height back
+	// into `Size.Y.Offset`, so that offset *is* the face's height in the same design pixels the plate's offsets use - no
+	// measurement, no scale arithmetic, and no lag beyond the layout pass the engine is already doing.
+	//
+	// The frame's own auto-height grows by `CHUNKY_PANEL_STROKE` as a result, because the plate is now the tallest child. That is
+	// invisible - the frame is fully transparent and nothing is positioned from its bottom edge - and excluding the plate from
+	// `AutomaticSize` is not expressible: there is no "ignore this child", and a scale-sized child is exactly the case that
+	// collapses.
+	if (options.autoHeight === true) {
+		const syncShadow = () => {
+			shadow.Size = new UDim2(1, CHUNKY_PANEL_STROKE, 0, surface.Size.Y.Offset + CHUNKY_PANEL_STROKE);
+		};
+
+		syncShadow();
+		surface.GetPropertyChangedSignal("Size").Connect(syncShadow);
+	} else {
+		shadow.Size = new UDim2(1, CHUNKY_PANEL_STROKE, 1, CHUNKY_PANEL_STROKE);
+	}
+
 	surface.BackgroundColor3 = options.color ?? CHUNKY_PANEL_FACE;
 	surface.BackgroundTransparency = 0;
 	surface.BorderSizePixel = 0;

@@ -53,7 +53,7 @@ import {
 } from "shared/ui/chunky-chrome";
 import { attachPressFeedback } from "shared/ui/press";
 import { attachClickSound, playPurchaseSound } from "shared/ui/sounds";
-import { capToViewport } from "shared/ui/viewport";
+import { applyPanelScale } from "shared/ui/ui-scale";
 import { coinIconUri, reportCoinIconLoad } from "shared/ui/coin";
 import { ballName as displayName, rarityLabel as tierName } from "shared/ball-name";
 
@@ -208,13 +208,12 @@ const ROUND = new UDim(1, 0);
 const CENTRE = 0.5;
 
 /**
- * **Placeholder.** Below this viewport width the two chest sections stack instead of sitting side by side, in pixels.
+ * **Deleted in item 160: `STORE_NARROW_WIDTH`.**
  *
- * A **new** constant, because the responsive mechanism it belongs to was removed in item 59: the store is a single
- * vertical column, so there is no existing breakpoint to reuse. The columns are 880 / 2 = ~430 wide above this and the
- * full width below it.
+ * It was the store's and the inventory's only breakpoint, and it stacked both of them below 900 viewport pixels — a *different
+ * composition* for a small screen, which is precisely what was reported as wrong. Both arrangements are now unconditional and
+ * the whole sheet is drawn at a uniform `UIScale` (`applyPanelScale`), so nothing in this file branches on screen size.
  */
-const STORE_NARROW_WIDTH = 900;
 
 /** **Placeholder.** Height of the policy reason line under the Premium buttons, in pixels. */
 const POLICY_NOTE_HEIGHT = 18;
@@ -353,19 +352,6 @@ const INVENTORY_PREVIEW_HEIGHT = 96;
 
 /** **Placeholder.** Diameter of the ball drawn inside that preview, in pixels. */
 const INVENTORY_PREVIEW_BALL = 56;
-
-/** **Placeholder.** Share of the stacked row taken by the collection when the sheet is below the breakpoint. */
-const INVENTORY_STACKED_SPLIT = 0.55;
-
-/**
- * **Placeholder.** How much taller the row gets when it is stacked, as a multiplier.
- *
- * Two panes stacked in the height of one do not fit: the detail pane is a 96-pixel preview plus four lines, so at the
- * desktop row height its lower half would spill over the collection above it. Growing the row and letting
- * `capToViewport` cut it back on a short window keeps the content inside the sheet on a phone and costs a desktop
- * nothing, because a desktop never enters this branch.
- */
-const INVENTORY_STACKED_GROWTH = 1.7;
 
 // #endregion
 
@@ -1035,6 +1021,11 @@ export class ShopController implements OnStart {
 		const panel = buildChunkyPanel({
 			name: "Store",
 			parent,
+			// **The designed width, on every screen (item 160).** This stays `880` and is *not* turned into a fraction: the sheet
+			// is laid out at its design size and the whole composition is then drawn at `panelScaleFor`'s multiplier, which is
+			// what keeps a phone's store identical to a desktop's. Narrowing the sheet instead is the change that produced a
+			// stacked, overflowing phone layout — a fixed width does not overflow a small screen when the screen is not what it is
+			// measured in.
 			size: UDim2.fromOffset(STORE_MAX_WIDTH, 0),
 			autoHeight: true,
 			cornerRadius: SPACING.md,
@@ -1045,7 +1036,11 @@ export class ShopController implements OnStart {
 		});
 
 		const surface = panel.surface;
-		capToViewport(panel.frame);
+		// **The scale replaces the clamp, it does not join it (item 160).** `capToViewport` constrains *layout* size — it would set
+		// the width to 92% of a phone's screen while leaving the height and every band at their designed proportions, which squashes
+		// the composition. `applyPanelScale` is a render transform applied after layout, so the panel keeps its geometry and is drawn
+		// smaller. The two answer the same question and only one can be right.
+		applyPanelScale(panel.frame, "store");
 
 		// Level 0: the store's own vertical list. Header, tabs, content - in that order, nothing positioned by hand.
 		Fusion.New(
@@ -1263,7 +1258,7 @@ export class ShopController implements OnStart {
 	// #region the chest section
 
 	/**
-	 * The two chest sections, side by side above `STORE_NARROW_WIDTH` and stacked below it.
+	 * The two chest sections, side by side on every screen.
 	 *
 	 * ## Why this breakpoint is new
 	 *
@@ -1307,7 +1302,7 @@ export class ShopController implements OnStart {
 		this.chestColumns.push(this.buildChestSection(scope, row, 1));
 		this.chestColumns.push(this.buildPremiumChestSection(scope, row, 2));
 
-		this.applyChestRowLayout(this.viewportWidth());
+		this.applyChestRowLayout();
 		this.watchChestRow();
 
 		return row;
@@ -1321,26 +1316,31 @@ export class ShopController implements OnStart {
 	 * is still usable (a 108-pixel preview plus a stats column plus a shelf), which is why half-width is the desktop
 	 * answer rather than a wider single column.
 	 */
-	private applyChestRowLayout(width: number): void {
+	private applyChestRowLayout(): void {
 		const layout = this.chestRowLayout;
 		if (layout === undefined || this.chestColumns.size() === 0) {
 			return;
 		}
 
-		const narrow = width < STORE_NARROW_WIDTH;
-		layout.FillDirection = narrow ? Enum.FillDirection.Vertical : Enum.FillDirection.Horizontal;
+		// **One arrangement, on every screen (item 160).**
+		//
+		// This used to branch on `width < STORE_NARROW_WIDTH` and stack the two sections vertically below it. That is a
+		// *different composition* for a small screen, and it is exactly what was reported: a phone showed the two chests one
+		// above the other, twice as tall, and the bottom of the sheet left the screen. The sheet is now a fixed design width
+		// drawn through a `UIScale` (see `applyPanelScale`), so a phone is the desktop composition at a smaller multiplier — and
+		// a rule that rearranges by viewport width would be undoing that on every device narrower than the desktop.
+		//
+		// The parameter is gone with the branch. A future rule that genuinely needs the viewport width belongs in
+		// `applyPanelScale`, which is now the only thing that reacts to it.
+
+		layout.FillDirection = Enum.FillDirection.Horizontal;
 
 		for (const section of this.chestColumns) {
-			section.Size = narrow ? new UDim2(1, 0, 0, 0) : new UDim2(0.5, -STORE_COLUMN_GAP / 2, 0, 0);
+			section.Size = new UDim2(0.5, -STORE_COLUMN_GAP / 2, 0, 0);
 		}
 	}
 
-	private viewportWidth(): number {
-		const camera = Workspace.CurrentCamera;
-		return camera !== undefined ? camera.ViewportSize.X : STORE_NARROW_WIDTH;
-	}
-
-	/** Watches the viewport so a window resize re-lays the two sections. */
+	/** Watches the viewport so a window resize re-sizes the expanded prize grid. */
 	private watchChestRow(): void {
 		const camera = Workspace.CurrentCamera;
 		if (camera === undefined) {
@@ -1352,7 +1352,7 @@ export class ShopController implements OnStart {
 				return;
 			}
 
-			this.applyChestRowLayout(camera.ViewportSize.X);
+			this.applyChestRowLayout();
 			// **The grid is re-sized from the same event (item 155).** The sheet is built once and a window can change shape
 			// afterwards; a grid left at the height it was born with would either overflow a short window or waste a tall one.
 			// One watcher for both, because they are both answers to "how big is the screen".
@@ -3836,7 +3836,7 @@ export class ShopController implements OnStart {
 		const surface = parts.surface;
 
 		this.inventoryFrame = parts.frame;
-		capToViewport(parts.frame);
+		applyPanelScale(parts.frame, "inventory");
 
 		// The bands below stack by `LayoutOrder`, so the face needs the list `Panel` used to bring with it. Reproduced
 		// here rather than built into `buildChunkyPanel`, because the store brings its own list with its own padding and
@@ -3908,7 +3908,7 @@ export class ShopController implements OnStart {
 		this.ballsView = this.buildBallsView(scope, row);
 		this.fusionView = this.buildFusionView(scope, row);
 
-		this.applyInventoryLayout(this.viewportWidth());
+		this.applyInventoryLayout();
 		this.watchInventoryRow();
 
 		this.refreshOwned();
@@ -4240,34 +4240,38 @@ export class ShopController implements OnStart {
 	}
 
 	/**
-	 * Re-lays every inventory view: collection beside detail above the breakpoint, stacked below it.
+	 * Places the inventory's collection and detail panes: **always side by side, on every screen** (item 160).
 	 *
-	 * Three things change together and must, or the layout overflows: the band direction inside each view, each band's
-	 * size, and the height of the row the views sit in. Stacking two full-height bands inside one row is the only way
-	 * this arrangement fails, so the stacked branch grows the row and lets `capToViewport` cut the sheet back on a short
-	 * window - a desktop never takes this branch and so costs nothing.
+	 * This used to have a stacked branch below `STORE_NARROW_WIDTH`, chosen from the *viewport* width. With the sheet now drawn at
+	 * a fixed design width through a `UIScale`, a viewport-width test would rearrange a phone's inventory while leaving the store
+	 * beside it — two different answers to the same question, and the rearranged one is the composition that was reported as
+	 * wrong. The branch is gone; the wide arrangement is the only arrangement, so a phone gets the desktop inventory, smaller.
+	 *
+	 * The function remains because it still sets sizes: the row's height, each pane's split, each band's height. What it no longer
+	 * does is *decide* anything from the screen — which is the whole point of a uniform scale.
 	 */
-	private applyInventoryLayout(width: number): void {
+	private applyInventoryLayout(): void {
 		const row = this.inventoryRow;
 		if (row === undefined) {
 			return;
 		}
 
-		const narrow = width < STORE_NARROW_WIDTH;
+		// No width to read any more: the arrangement below is the only arrangement, which is what keeps a phone's inventory
+		// identical to a desktop's.
 
 		for (const layout of this.inventorySplitLayouts) {
-			layout.FillDirection = narrow ? Enum.FillDirection.Vertical : Enum.FillDirection.Horizontal;
+			layout.FillDirection = Enum.FillDirection.Horizontal;
 		}
 
-		const rowHeight = narrow ? math.round(INVENTORY_ROW_HEIGHT * INVENTORY_STACKED_GROWTH) : INVENTORY_ROW_HEIGHT;
-		row.Size = new UDim2(1, 0, 0, rowHeight);
+		row.Size = new UDim2(1, 0, 0, INVENTORY_ROW_HEIGHT);
 
 		if (this.inventoryFrame !== undefined) {
+			// **No `capToViewport` here any more.** It used to re-clamp the sheet on every resize, which fought the scale by
+			// squashing the width while the height stayed — the distortion `applyPanelScale` exists to avoid.
 			this.inventoryFrame.Size = UDim2.fromOffset(
 				STORE_MAX_WIDTH,
-				PANEL_HEADER_HEIGHT + TAB_STRIP_HEIGHT + rowHeight + PANEL_FOOTER_HEIGHT,
+				PANEL_HEADER_HEIGHT + TAB_STRIP_HEIGHT + INVENTORY_ROW_HEIGHT + PANEL_FOOTER_HEIGHT,
 			);
-			capToViewport(this.inventoryFrame);
 		}
 
 		for (const view of [this.ballsView, this.fusionView]) {
@@ -4281,19 +4285,12 @@ export class ShopController implements OnStart {
 				}
 
 				const isCollection = child.Name === "Collection" || child.Name === "Materials";
-				child.Size = narrow
-					? new UDim2(
-							1,
-							0,
-							isCollection ? INVENTORY_STACKED_SPLIT : 1 - INVENTORY_STACKED_SPLIT,
-							-STORE_COLUMN_GAP / 2,
-						)
-					: new UDim2(
-							isCollection ? INVENTORY_COLLECTION_FRACTION : 1 - INVENTORY_COLLECTION_FRACTION,
-							-STORE_COLUMN_GAP / 2,
-							1,
-							0,
-						);
+				child.Size = new UDim2(
+					isCollection ? INVENTORY_COLLECTION_FRACTION : 1 - INVENTORY_COLLECTION_FRACTION,
+					-STORE_COLUMN_GAP / 2,
+					1,
+					0,
+				);
 			}
 		}
 	}
@@ -4309,7 +4306,7 @@ export class ShopController implements OnStart {
 				return;
 			}
 
-			this.applyInventoryLayout(camera.ViewportSize.X);
+			this.applyInventoryLayout();
 		});
 	}
 

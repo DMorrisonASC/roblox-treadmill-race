@@ -79,6 +79,37 @@ edges. The shadow therefore shows along the far edges only — a one-sided strip
   eats the gap to the neighbour above; against a screen edge it clips. Inset the face instead — same shadow, same
   place, and the component's union stays exactly the cell it was given.
 
+### 1.2b The shadow is the SAME SIZE as the face. Only its position moves.
+
+Depth is a **position**, not a size. Two identical boxes with one pushed `D` down and right show a uniform strip along those
+two edges and nothing along the other two — which is what reads as one card sitting on another. A *smaller* plate reads as a
+drop shadow from a light source; a *larger* one reads as a second card framing the first.
+
+Two mechanics give that picture, and which one applies is forced by whether the box is fixed:
+
+| | **inset** (buttons) | **offset sibling** (panels) |
+| --- | --- | --- |
+| cell / frame | fixed by the layout | free-floating, often `AutomaticSize.Y` |
+| shadow | fills the cell at `(0, 0)`, `Scale (1, 1)` | sized **from the face**, moved `+D` |
+| face | inset by `D` on the bottom/right | full size |
+| union | exactly the cell | `D` larger on the right/bottom |
+
+**For the offset sibling, the plate must match the *visible* face, not the frame.** `ApplyStrokeMode.Border` draws the stroke
+centred, so a face is `X` pixels bigger than its frame on **both** axes. Get that wrong by the stroke and the plate is
+`X` pixels short — the "the shadow is smaller than the panel" bug.
+
+**And it must not be `fromScale(1, 1)` inside an `AutomaticSize` parent.** The parent asks its children for a height, a scale
+child answers "100% of you", and the engine breaks the loop by giving it none — the same circular-size trap as §4.1. The face
+dodges it by *reporting* its content height; the plate has no content, so it has to be **told**:
+
+```lua
+shadow.Position = UDim2.fromOffset(D - X/2, D - X/2)            -- equal boxes, offset
+shadow.Size     = UDim2.new(1, X, 0, surface.Size.Y.Offset + X)  -- face height + stroke
+```
+
+The rule stated plainly: **a shadow never has its own size. It is the panel, moved.**
+
+
 ### 1.3 Corners: both plates, same radius
 
 **Every plate in a component carries the same `UICorner` radius ? the shadow included.** A square plate under a
@@ -276,6 +307,57 @@ In Roblox, the equivalent of responsive web layout is mainly **Scale-based `UDim
 - **Fixed-pixel bands do not grow with the type.** If the sheet's type scale is bumped, headers, tab strips and
   footers are still the heights they were. Check the tallest glyph against the tightest band; `24` px of glyph in
   a `44` px header is the case that goes wrong first.
+
+### 4.2 Scale the composition, do not rearrange it (item 160)
+
+**A phone gets the desktop composition, smaller — never a different arrangement.** Every screen-space panel is laid out at
+its designed pixel size on every device and then drawn through **one `UIScale`**, computed by `shared/ui/ui-scale.ts`:
+
+```
+scale = clamp( min( viewport.X × 0.92 / design.X,
+                    viewport.Y × 0.90 / design.Y ), 0.45, 1 )
+```
+
+One number multiplies width, height, gaps, corners, strokes and type together, so **every proportion survives**. That is the
+whole difference between a scale and a reflow:
+
+| | reflow (wrong here) | scale (right here) |
+| --- | --- | --- |
+| phone shows | a rearranged store: stacked sections, re-proportioned bands | the same store, smaller |
+| driven by | a width breakpoint | one uniform multiplier |
+| fails as | "you changed the layout", overlapping bands | nothing, until text is too small |
+
+**The design size is read from the panel itself.** `UIScale` multiplies *rendering* and does not touch `Size`, so
+`root.Size`'s offsets are the design size at all times — including an auto-height sheet, where `AutomaticSize.Y` writes the
+resolved content height back into `Size.Y.Offset`. One function serves six panels with no per-panel constant table to keep in
+step.
+
+**A fixed pixel width does not overflow a small screen when nothing clamps it.** An 880-pixel sheet drawn at `0.75` is 660
+pixels; it overflows only when something *also* clamps its layout box.
+
+#### Why `capToViewport` is not used on these panels
+
+`capToViewport` installs a `UISizeConstraint`, which clamps **layout** size per axis. Given an 880-wide sheet and a 390-wide
+viewport it sets the width to 358 and leaves the height alone — squashing the composition and re-flowing every band inside it,
+which is the distortion the uniform scale exists to avoid. `UIScale` is applied *after* layout, so the geometry is untouched.
+**The two mechanisms answer the same question and only one of them can be in a panel.**
+
+#### Breakpoints
+
+There are none left in the store or the inventory. Both had one that stacked their columns below 900 viewport pixels, which
+made a small screen show a different composition. A panel that scales has no reason to branch on width: the sheet's own width
+never changes, only the multiplier applied to it.
+
+#### The legibility floor, and the honest trade
+
+`MIN_PANEL_SCALE` is `0.45`. Below it the arithmetic is ignored and the panel is drawn **wider than the screen** — visible,
+clipped and reportable — rather than shrunk until its 12-point captions resolve to four points, which is on screen and
+unreadable. That is the "if something hits a practical minimum, constrain that element rather than breaking the layout" case:
+the floor is the constraint, and the overflow it produces is the symptom that says the screen is too small for this
+composition.
+
+In practice the floor only binds on a **portrait** phone. This game is played in landscape, and a 844 × 390 viewport draws an
+880 × 466 store at `0.75` — full composition, legible type, comfortably inside the screen.
 
 ---
 

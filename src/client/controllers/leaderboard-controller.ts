@@ -7,6 +7,7 @@ import { FONT, SPACING, typographyOneStepUp } from "shared/ui/scale";
 import { chunkyDarkTheme } from "shared/ui/theme";
 import { getScreenGui } from "shared/ui/layers";
 import { buildChunkyPanel } from "shared/ui/chunky-panel";
+import { applyPanelScale } from "shared/ui/ui-scale";
 import { addChunkyRing } from "shared/ui/chunky-chrome";
 import { outlineText } from "shared/ui/text";
 
@@ -166,6 +167,12 @@ export class LeaderboardController implements OnStart {
 		frame.AnchorPoint = new Vector2(1, 0);
 		frame.Position = new UDim2(1, -SPACING.md, 0, SPACING.lg);
 		frame.Visible = false;
+
+		// **The board scales like every other composition (item 160).** A 210-pixel board fits any phone, so this is `1` almost
+		// everywhere — but it is the same rule as the store's rather than a special case, and it means a very narrow window cannot
+		// leave the board hanging off the right edge with its rows clipped. Note that `AnchorPoint = (1, 0)` is unaffected by a
+		// `UIScale`: the anchor is resolved against the parent before the transform, so the board stays pinned to the same corner.
+		applyPanelScale(frame, "leaderboard");
 		this.panel = frame;
 
 		const padding = new Instance("UIPadding");

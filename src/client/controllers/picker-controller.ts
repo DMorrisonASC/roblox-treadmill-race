@@ -18,7 +18,7 @@ import { addChunkyRing, applyChunkyChrome, ChunkyChrome, dimChunkyChrome, shadow
 import { buildChunkyPanel } from "shared/ui/chunky-panel";
 import { outlineText } from "shared/ui/text";
 import { attachClickSound } from "shared/ui/sounds";
-import { capToViewport } from "shared/ui/viewport";
+import { applyPanelScale } from "shared/ui/ui-scale";
 
 /**
  * **Placeholder.** Draw order for the sheet's labels.
@@ -686,7 +686,7 @@ export class PickerController implements OnStart {
 		this.buildChoices(panel.surface);
 		this.buildFooter(panel.surface);
 
-		capToViewport(frame);
+		applyPanelScale(frame, "picker");
 		return frame;
 	}
 

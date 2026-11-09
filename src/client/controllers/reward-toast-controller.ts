@@ -5,7 +5,7 @@ import { RewardToastMessage } from "shared/rewards";
 import { SPACING, TextVariant, TYPOGRAPHY } from "shared/ui/scale";
 import { chunkyDarkTheme, Theme } from "shared/ui/theme";
 import { getScreenGui } from "shared/ui/layers";
-import { capToViewport } from "shared/ui/viewport";
+import { applyPanelScale } from "shared/ui/ui-scale";
 import { CHUNKY_CONTROL_OUTLINE, CHUNKY_CONTROL_STROKE } from "shared/ui/chunky-chrome";
 import { buildChunkyPanel } from "shared/ui/chunky-panel";
 import { playCoinSound } from "shared/ui/sounds";
@@ -166,7 +166,7 @@ export class RewardToastController implements OnStart {
 		panel.surface.Active = false;
 		panel.shadow.Active = false;
 
-		capToViewport(panel.frame);
+		applyPanelScale(panel.frame, "reward-toast");
 		this.live.push(panel.frame);
 
 		const faded = new Array<GuiObject>();
