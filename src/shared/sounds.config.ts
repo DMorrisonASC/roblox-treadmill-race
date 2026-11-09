@@ -182,6 +182,63 @@ export const SONG_FADE_SECONDS = 2;
 
 // #endregion
 
+// #region the lobby songs (item 157)
+
+/**
+ * The lobby's first song. **The user's upload** — not a `Placeholder.`, for the same reason the round song's id is not: it
+ * is the asset the designer chose, and proposing a different value here would be a guess presented as a decision.
+ */
+export const LOBBY_SONG_A_ASSET_ID = "103226688466405";
+
+/** The lobby's second song. The user's upload; see `LOBBY_SONG_A_ASSET_ID`. */
+export const LOBBY_SONG_B_ASSET_ID = "139466974097755";
+
+/**
+ * The ids the lobby picks from, **in one array so a third song is one row rather than a branch**.
+ *
+ * The controller indexes this, so nothing downstream knows how many there are: `drawLobbyStart` is about the clip, and the
+ * pick is `ids[math.floor(math.random() * ids.size())]`.
+ */
+export const LOBBY_SONG_ASSET_IDS: ReadonlyArray<string> = [LOBBY_SONG_A_ASSET_ID, LOBBY_SONG_B_ASSET_ID];
+
+/**
+ * **Placeholder.** How long the lobby song takes to fade **in** and to fade **out**, in seconds.
+ *
+ * One number for both directions because the user asked for one: a lobby bed that ramps up in three seconds and down in
+ * one reads as a sound effect rather than as a bed, and the symmetry is the whole of the "this is background" claim.
+ *
+ * **Three, where the round song's is two, and the difference is structural rather than taste.** The round song's fade-out
+ * cannot be aimed at the end of the round (item 37), so its two seconds are an *overlap* into `PostGame`; the lobby song's
+ * fade-out is aimed at a moment the server publishes (`PlayingDeadline`, item 149), so its three seconds are entirely
+ * inside a phase and the song is already silent when the race begins.
+ */
+export const LOBBY_SONG_FADE_SECONDS = 3;
+
+/**
+ * **Placeholder.** How much of the clip's tail is never played, in seconds.
+ *
+ * `ceiling = TimeLength - LOBBY_SONG_TAIL_CUTOFF_SECONDS`, and every pass loops `0 -> ceiling`. The last five seconds of an
+ * upload are usually a fade the author already wrote or silence padding, and splicing onto either with our own loop reads
+ * as a damage rather than as a loop; cutting the tail is the cheap version of "end the loop on a musical beat", which this
+ * repository cannot know. See `no safe-start table` in the round's docblock.
+ */
+export const LOBBY_SONG_TAIL_CUTOFF_SECONDS = 5;
+
+/**
+ * **Placeholder.** The floor, in seconds, on the **first** pass of a randomly-started lobby song.
+ *
+ * The first pass runs `start -> ceiling`, where `start` is drawn at random; every pass after it runs `0 -> ceiling`. Without
+ * a floor a clip could be started two seconds before its ceiling and the "random start" would be an unpleasant stutter
+ * rather than a variation. Ten seconds is long enough to be recognisably a section of music.
+ *
+ * It is also the **bound on the draw**: `start` is uniform over `[0, ceiling - minSpan]`, so a 60-second clip starts
+ * anywhere in `[0, 40]` and a clip shorter than `tailCutoff + minSpan` cannot honour both rules at all — which is a refusal,
+ * not a clamp (`drawLobbyStart` says so).
+ */
+export const LOBBY_SONG_MIN_SPAN_SECONDS = 10;
+
+// #endregion
+
 /**
  * How one sound plays: the two `Sound` properties this repository decides.
  *
@@ -206,7 +263,7 @@ export const DEFAULT_SOUND_TUNING: SoundTuning = { volume: 1, playbackSpeed: 1 }
 /**
  * **The playback values this repository decides, keyed by asset id.**
  *
- * Every id keyed here is one of the seven above, and the spec asserts that: a key that does not match an id is a row
+ * Every id keyed here is one of the nine above, and the spec asserts that: a key that does not match an id is a row
  * nothing reads, and it would leave the sound it *meant* to configure at the default — a quiet failure that looks like an
  * asset problem. The keys are the id constants rather than literals so the two cannot drift.
  *
@@ -236,6 +293,21 @@ export const SOUND_TUNING: Record<string, SoundTuning> = {
 	// music. No pitch shift: this is a bed, and a shared `playbackSpeed` would also change how long the loop points are in
 	// wall-clock seconds, which would silently invalidate both of them.
 	[SONG_ASSET_ID]: { volume: 0.15, playbackSpeed: 1 },
+	// **Placeholder.** The lobby's first song, and the number is a *relative* judgement rather than a mix. `0.1` is two thirds
+	// of the round song's `0.15`, because the lobby is where a player reads the store, the prize view and the countdown, and
+	// a bed at a race's level makes those panels feel like they are shouting over the music. It is also the level at which the
+	// click sound still reads as an event on top of it without being turned up.
+	//
+	// **Two rows rather than one shared lobby volume**, even though the two numbers are currently equal: the two clips are the
+	// user's own uploads and their relative loudness is not knowable from here — an upload normalised at -14 LUFS and one at
+	// -8 are nine decibels apart and there is nothing in the repository that can measure it. One row per id means the first
+	// person to listen can move one number without moving the other, which a shared `LOBBY_SONG_VOLUME` would prevent.
+	[LOBBY_SONG_A_ASSET_ID]: { volume: 0.1, playbackSpeed: 1 },
+	// **Placeholder.** The lobby's second song, at the same starting level as the first for the reason above. No pitch shift
+	// on either, and here it is load-bearing rather than tidy: `playbackSpeed` scales wall-clock time, so a value other than
+	// `1` would move the real length of the clip away from the `TimeLength` the tail cutoff and the random start are drawn
+	// against — the loop ceiling would silently be "five *pitched* seconds from the end".
+	[LOBBY_SONG_B_ASSET_ID]: { volume: 0.1, playbackSpeed: 1 },
 };
 
 /**

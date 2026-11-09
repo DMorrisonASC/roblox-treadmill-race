@@ -10,6 +10,7 @@ import { CHUNKY_CONTROL_OUTLINE, CHUNKY_CONTROL_STROKE } from "shared/ui/chunky-
 import { buildChunkyPanel } from "shared/ui/chunky-panel";
 import { playCoinSound } from "shared/ui/sounds";
 import { outlineText } from "shared/ui/text";
+import { coinIconUri, reportCoinIconLoad } from "shared/ui/coin";
 
 /** **Placeholder.** The poster weight the chunky titles use. A local literal for the same reason as in `payout-controller`. */
 const TITLE_FONT = Enum.Font.GothamBlack;
@@ -90,6 +91,11 @@ export class RewardToastController implements OnStart {
 	private readonly live = new Array<Frame>();
 
 	public onStart(): void {
+		// **Does the coin asset resolve? (item 154.)** Idempotent across the three controllers that draw one, so this and its
+		// twins in the store and the payout panel produce a single `[Coin]` line per session. Asked before the remote is found
+		// so the asset is reported even on a session where the toast never fires.
+		reportCoinIconLoad();
+
 		const folder = ReplicatedStorage.WaitForChild(REMOTES_FOLDER_NAME, 10);
 		if (folder === undefined) {
 			warn(`[Toast] no ${REMOTES_FOLDER_NAME} folder — rewards will not be announced.`);
@@ -172,23 +178,25 @@ export class RewardToastController implements OnStart {
 
 		// ## The coin, then the label, then the amount
 		//
-		// The coin is the store's: `colors.coin`, a full circle, `COIN_SIZE`. It carries a `CHUNKY_CONTROL_OUTLINE` edge here
-		// rather than the store's none, because this one stands alone on charcoal instead of inside a saturated price pill.
-		const coin = new Instance("Frame");
+		// The coin is the store's icon at the store's `COIN_SIZE` (item 154). It **keeps** its `CHUNKY_CONTROL_OUTLINE` edge:
+		// this one stands alone on charcoal instead of inside a saturated price pill, which is the same argument the payout
+		// panel makes for its `colors.shadow` outline — an icon on a dark plate needs an edge to sit on it. The store's is the
+		// only coin of the three without one, and that is because of where it sits rather than because of what it is.
+		const coin = new Instance("ImageLabel");
 		coin.Name = "Coin";
 		coin.AnchorPoint = new Vector2(0, 0.5);
 		coin.Position = UDim2.fromOffset(TOAST_PADDING, TOAST_HEIGHT / 2);
 		coin.Size = UDim2.fromOffset(COIN_SIZE, COIN_SIZE);
-		coin.BackgroundColor3 = theme.colors.coin;
 		coin.BackgroundTransparency = 1;
 		coin.BorderSizePixel = 0;
+		coin.Image = coinIconUri();
+		coin.ScaleType = Enum.ScaleType.Fit;
+		// **`ImageTransparency` is the fade.** The reveal driver fades a `Frame` by its background; on an `ImageLabel` that
+		// would move a box that is already invisible and leave the picture at full opacity on frame one. See `paint`.
+		coin.ImageTransparency = 1;
 		coin.ZIndex = 3;
 		coin.Parent = panel.surface;
 		faded.push(coin);
-
-		const coinCorner = new Instance("UICorner");
-		coinCorner.CornerRadius = new UDim(1, 0);
-		coinCorner.Parent = coin;
 
 		const coinStroke = new Instance("UIStroke");
 		coinStroke.Color = CHUNKY_CONTROL_OUTLINE;
@@ -265,7 +273,12 @@ export class RewardToastController implements OnStart {
 			}
 
 			for (const element of faded) {
-				if (element.IsA("TextLabel")) {
+				// **Three cases, because an `ImageLabel`'s ink is not its background (item 154).** The coin is an image now;
+				// fading its `BackgroundTransparency` would move a box that is already invisible and leave the picture opaque,
+				// so the toast would show a coin a quarter of a second before anything it belongs to.
+				if (element.IsA("ImageLabel")) {
+					element.ImageTransparency = mix(1, 0, amount);
+				} else if (element.IsA("TextLabel")) {
 					element.TextTransparency = mix(1, 0, amount);
 				} else {
 					element.BackgroundTransparency = mix(1, 0, amount);

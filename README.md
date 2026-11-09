@@ -20,7 +20,7 @@ repo describes it as one, that document is describing a previous version of the 
 | Path                                                                                      | What it is                                                                                                                                                                                   |
 | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/server/services/`                                                                    | Six services: `treadmill`, `ball-spawner`, `pickup`, `round`, `economy`, `player-data-store`                                                                                                 |
-| `src/client/controllers/`                                                                 | Twenty-two controllers: belt scroll, marker spin, ball render, wind boost, tail wind, motion blur, pickup sprite, pickup sound, hit effect, elimination splash, decoy outline, round state, phase banner, transition wipe, picker, countdown, shop, leaderboard, payout, reward toast, round song, debug keys |
+| `src/client/controllers/`                                                                 | Twenty-three controllers: belt scroll, marker spin, ball render, wind boost, tail wind, motion blur, pickup sprite, pickup sound, hit effect, elimination splash, decoy outline, round state, phase banner, transition wipe, picker, countdown, shop, leaderboard, payout, reward toast, round song, lobby song, debug keys |
 | `src/server/powers/`                                                                      | The ten powers — pure rules plus one instance-level wrapper, deliberately a module rather than a service                                                                                     |
 | `src/server/{round-outcome,debug-balls,decoy-outline,elimination-signal,picker,admin}.ts` | Plain modules with specs beside the code; no Flamework, so a spec can import them                                                                                                            |
 | `src/shared/`                                                                             | Tag names, attribute names + defaults, remote names, gameplay constants, the economy / powers / models configs and the UI theme                                                              |
@@ -199,7 +199,9 @@ plus the theme tokens; there is no component library underneath the rest.
   openable up to ten at a time in one save; one Robux chest whose pool is rare and above, behind a
   `PolicyService` gate; and an inventory with `Balls` and `Fusion` tabs. Fusion takes two balls and
   spends both, win or lose, and every chance shown is derived from the roll rather than written next
-  to it.
+  to it. Each chest's prize shelf expands into a **read-only catalog** — one card per ball in that
+  chest's pool, with its own probability — via `View All` or any card in the shelf; `Back` returns to
+  the chest, which is where buying happens.
 - **Profiles** are DataStore-backed behind a per-player session lock: every verb saves _before_ it
   reports, a failed save spends nothing, and a profile that cannot be loaded — or is locked by
   another session — goes read-only rather than retrying into it.
@@ -408,14 +410,18 @@ place with your own parts:
 No mesh or model support — every `model` in [`src/shared/models.config.ts`](src/shared/models.config.ts)
 is `undefined`, and a test fails if a ball id has no entry, so the swap fails the suite rather than
 drawing the same sphere. No client prediction: the server owns the velocity and every client sees the
-result a round trip later. Audio is **six one-shot UI sounds plus one round song** and nothing else — a button press, a
+result a round trip later. Audio is **six one-shot UI sounds, one round song and two lobby songs** and nothing else — a button press, a
 granted purchase, a coin earn, a ball leaving the belt, a ball-ball hit, and a pickup that actually raised a ball's speed
-(`src/shared/sounds.config.ts`) — with no ambience and nothing positional. The song is the only sound with a lifecycle
-rather than an event: it starts when `Playing` is observed, fades in over two seconds, loops `0:00 → 1:27` once and then
+(`src/shared/sounds.config.ts`) — with no ambience and nothing positional. The two songs are the only sounds with a lifecycle
+rather than an event. The round song fades in over two seconds **starting with the 3-2-1 countdown**, loops `0:00 → 1:27` once and then
 `0:05 → 1:27` for ever (the intro is **not** part of the loop, which is why it is `Looped = false` and a playhead wrap in
 `src/shared/ui/song.ts`), and fades out over two seconds when the phase ends — so its tail runs about two seconds into
 `PostGame` rather than stopping dead on the frame the round ends, which is the closest a fade can get when the round's end is
-not predictable. The elimination sound is heard only by the player whose ball landed the last
+not predictable. The lobby song fills `Intermission` and `Waiting`: one of two clips at random, started at a random offset,
+fading in over three seconds, kept playing untouched across the `Intermission → Waiting` change, and faded out over three
+seconds so that it is already silent at the gun. It loops `0 → length − 5`, so the clip's last five seconds are never heard
+and its opening is heard on every pass after the first, and the first pass is at least ten seconds long — a clip too short to
+honour both rules is skipped and logged rather than played badly. The elimination sound is heard only by the player whose ball landed the last
 touch on the body that left (or by nobody, if nothing touched it), because the sound means _you_ put that body out. The
 hit sound plays on every hit burst the client is told about. Three of them are throttled and with separate slots, so a
 hit right after an elimination is still heard: the elimination and the hit at one start per half second, and the pickup at
@@ -423,8 +429,8 @@ one per 0.3 s — because a `recycle` ball resting on its surviving pad re-touch
 its decayed speed each time, which without an interval is a buzz rather than a sound. A click, a grant and a coin earn play
 every time.
 Volume and pitch are per sound in `SOUND_TUNING` next to the ids — the hit is deliberately the quietest, the pickup sits
-just above it, and the song is quieter still because it is a bed — and they are applied when each `Sound` is built, not per
-play. The song's row is also the level its two-second fade ramps _to_. No camera work.
+just above it, and the three songs are quieter still because they are beds — and they are applied when each `Sound` is built, not per
+play. A song's row is also the level its fade ramps _to_, which is why a missing row would make it ramp to `1`. No camera work.
 **The VFX are five, and none of them is a world aura:** the power badge, the decoy owner's outline, a ball-ball hit burst —
 one clone of the Studio asset `ReplicatedStorage.hitEffect`, built on each client at the contact midpoint and destroyed by
 `Debris` — two per-ball trails (`windBoost` while a ball is at or above belt speed, `tailWind` while it is in regular

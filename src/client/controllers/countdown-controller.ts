@@ -2,11 +2,14 @@ import { ReplicatedStorage, RunService, TweenService, Workspace } from "@rbxts/s
 import { Controller, OnStart } from "@flamework/core";
 import { PLAYING_DEADLINE_VALUE_NAME, ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import {
+	CAPTION_IN_SECONDS,
+	CAPTION_OUT_SECONDS,
 	CountdownStep,
-	CountdownTiming,
-	countdownDuration,
+	COUNTDOWN_SECONDS,
+	COUNTDOWN_TIMING,
 	countdownStepIndex,
 	countdownSteps,
+	START_FADE_SECONDS,
 } from "shared/ui/countdown";
 import { getScreenGui } from "shared/ui/layers";
 import { getTheme, Theme } from "shared/ui/theme";
@@ -27,50 +30,16 @@ const REPLICATED_WAIT_SECONDS = 10;
 // #region animation — the specification, not a suggestion
 
 /**
- * **Placeholder.** Seconds for a caption to be swept off: scale 1 → 1.85, transparency 0 → 1.
+ * The four durations and the sequence's total come from `shared/ui/countdown.ts` (item 156).
  *
- * The outgoing half is the shorter of the two on purpose. It is the *leave*, and a leave that takes as long as the arrive
- * makes the sequence read as a slideshow rather than as something being shoved out of the way.
- *
- * **Raised from `0.15` to `0.2` in item 152**, with the inbound half, when the caller reported the countdown as too fast.
- * The pair are still in the 2:1 ratio the original brief specified — the leave stays the shorter of the two — so the
- * proportions of the motion are unchanged and only its tempo is.
+ * They lived here until the round song needed the same instant. The song's fade-in now begins when the countdown does, and
+ * "when the countdown does" is `PlayingDeadline - COUNTDOWN_SECONDS` - so a private copy of that sum here and another in
+ * `round-song-controller` would be two numbers that agree only until somebody retunes one of the four durations. The
+ * *look* below is still this file's: how far the sweep goes, which easing, what colour.
  */
-const CAPTION_OUT_SECONDS = 0.2;
-
-/**
- * **Placeholder.** Seconds for the next caption to rush in: scale `SCALE_INCOMING` → 1, transparency 1 → 0.
- *
- * **Raised from `0.2` to `0.4` in item 152.** At `0.2` a caption had no readable moment at all: the inbound tween finished
- * exactly where the outbound one began, so each digit was only fully legible for the single frame it landed on. `0.4` is
- * roughly the time it takes to read one glyph comfortably, and it is the number to move if the countdown still reads as a
- * flicker rather than a count.
- */
-const CAPTION_IN_SECONDS = 0.4;
-
-/** **Placeholder.** Seconds `Start!` is held at rest before it fades. */
-const START_HOLD_SECONDS = 0.6;
-
-/** **Placeholder.** Seconds `Start!` takes to fade. **No zoom on this one** — the race is about to begin and a scaling
- * glyph would still be moving as the belt starts. */
-const START_FADE_SECONDS = 0.25;
-
-/**
- * The five durations, in one object, because `countdownSteps` builds the timeline from exactly these and the controller owns
- * no second copy of them. Changing one here changes when the captions change, and nothing else has to be edited.
- */
-const TIMING: CountdownTiming = {
-	outSeconds: CAPTION_OUT_SECONDS,
-	inSeconds: CAPTION_IN_SECONDS,
-	holdSeconds: START_HOLD_SECONDS,
-	fadeSeconds: START_FADE_SECONDS,
-};
 
 /** The timeline, built once. Every reader of "which caption now" goes through this table. */
-const STEPS: Array<CountdownStep> = countdownSteps(TIMING);
-
-/** How long the whole sequence takes, derived from the table rather than summed here — see `countdownDuration`. */
-const COUNTDOWN_SECONDS = countdownDuration(STEPS);
+const STEPS: Array<CountdownStep> = countdownSteps(COUNTDOWN_TIMING);
 
 /** Scale at rest: a caption sitting still, which is what `hold` and `fade` keep it at. */
 const SCALE_REST = 1;

@@ -6,6 +6,9 @@ import {
 	DEFAULT_SOUND_TUNING,
 	ELIMINATION_SOUND_ASSET_ID,
 	HIT_SOUND_ASSET_ID,
+	LOBBY_SONG_A_ASSET_ID,
+	LOBBY_SONG_ASSET_IDS,
+	LOBBY_SONG_B_ASSET_ID,
 	PICKUP_SOUND_ASSET_ID,
 	PICKUP_SOUND_MIN_INTERVAL_SECONDS,
 	PURCHASE_SOUND_ASSET_ID,
@@ -32,6 +35,8 @@ const ALL_IDS: ReadonlyArray<string> = [
 	PICKUP_SOUND_ASSET_ID,
 	COIN_SOUND_ASSET_ID,
 	SONG_ASSET_ID,
+	LOBBY_SONG_A_ASSET_ID,
+	LOBBY_SONG_B_ASSET_ID,
 ];
 
 /** The ids that deliberately keep the engine's defaults, so a tuning row that drifts fails here rather than in the mix. */
@@ -88,7 +93,7 @@ describe("sounds.config", () => {
 		expect(song.playbackSpeed).toBe(1);
 	});
 
-	it("keeps the seven ids bare and distinct", () => {
+	it("keeps the nine ids bare and distinct", () => {
 		// The constants must not carry the scheme themselves: `soundUri` is the one place it is written, and a constant
 		// that already had it would produce `rbxassetid://rbxassetid://…` at the only call site.
 		//
@@ -183,6 +188,34 @@ describe("sounds.config", () => {
 		expect(soundTuningFor(COIN_SOUND_ASSET_ID).volume).toBe(0.8);
 	});
 
+	it("gives both lobby songs an entry below the round song's", () => {
+		// The eighth and ninth rows, added with the lobby song (item 157). Two things are pinned here and neither is the
+		// number itself: that both ids have a row at all (an absent row plays at 1/1, which is *louder* than the round song
+		// and the opposite of the intent), and that both sit strictly below the round song's volume, which is the claim the
+		// brief makes about a lobby being quieter than a race.
+		const song = soundTuningFor(SONG_ASSET_ID);
+		const a = soundTuningFor(LOBBY_SONG_A_ASSET_ID);
+		const b = soundTuningFor(LOBBY_SONG_B_ASSET_ID);
+
+		expect(a.volume < song.volume).toBe(true);
+		expect(b.volume < song.volume).toBe(true);
+
+		// No pitch shift, which for these two is load-bearing rather than tidy: a `playbackSpeed` other than 1 rescales
+		// wall-clock time, and the random start and the loop ceiling are both derived from `Sound.TimeLength`, which does
+		// not rescale with it. A pitched clip would loop five *pitched* seconds from its end.
+		expect(a.playbackSpeed).toBe(1);
+		expect(b.playbackSpeed).toBe(1);
+
+		// Distinct keys rather than one shared row: a kind-keyed record would put both lobby songs in one slot and the first
+		// person to balance one clip against the other would find they could not.
+		const rows = new Set<string>();
+		for (const id of LOBBY_SONG_ASSET_IDS) {
+			rows.add(id);
+			expect(soundTuningFor(id).playbackSpeed).toBe(1);
+		}
+		expect(rows.size()).toBe(2);
+	});
+
 	it("answers an id it has never heard of with the default", () => {
 		// The forward-compatibility property: a fifth sound added later without a tuning row still plays, at 1/1, rather
 		// than arriving silent because the lookup threw or answered `nil`. The near-miss id is deliberate — a lookup that
@@ -191,7 +224,7 @@ describe("sounds.config", () => {
 		expect(soundTuningFor("")).toBe(DEFAULT_SOUND_TUNING);
 	});
 
-	it("keys every tuning row by one of the seven real ids", () => {
+	it("keys every tuning row by one of the nine real ids", () => {
 		// A key that is not an id is a row nothing reads, and the sound it meant to configure stays at the default — the
 		// quietest possible failure. Counting as well as checking membership catches both directions: a stray key and a
 		// missing row.

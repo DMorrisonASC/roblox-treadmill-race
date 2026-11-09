@@ -142,6 +142,19 @@ export interface Colors {
 	 * palette, but a coin that is the same colour as a legendary border makes the two unreadable as different things —
 	 * and "this is money" is a meaning the UI will need everywhere a price appears, which is exactly what makes it a
 	 * domain slot rather than a one-off literal in the store.
+	 *
+	 * ## It is no longer the coin's fill (item 154)
+	 *
+	 * The three places that drew a coin used to fill a circle with this colour, and item 58's argument above was written
+	 * for that circle. The coin is an image now — `shared/ui/coin.ts` — so **nothing fills a disc with this any more**, and
+	 * that part of the slot's life is over. **The slot survives anyway, and the reason is the one this docblock already
+	 * gives:** "this is money" is a meaning, and an image does not consume a meaning. It still reads today at six sites
+	 * that are not the coin's shape — the payout panel's total, base and bonus figures, the bonus progress bar's fill, the
+	 * toast's amount, and the picker's re-roll cost diamond and its label — every one of which wants coin-yellow *ink*
+	 * rather than a coin-yellow circle.
+	 *
+	 * Deleting it now would mean those six sites reach for an amber literal, which is precisely the outcome item 58 exists
+	 * to prevent. The next round that wants "money-coloured text" has this slot to read.
 	 */
 	coin: Color3;
 

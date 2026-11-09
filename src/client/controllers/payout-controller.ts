@@ -12,6 +12,7 @@ import { playCoinSound } from "shared/ui/sounds";
 import { CHUNKY_CONTROL_OUTLINE, CHUNKY_CONTROL_STROKE } from "shared/ui/chunky-chrome";
 import { buildChunkyPanel, CHUNKY_PANEL_CORNER } from "shared/ui/chunky-panel";
 import { outlineText, TEXT_OUTLINE_THICKNESS } from "shared/ui/text";
+import { coinIconUri, reportCoinIconLoad } from "shared/ui/coin";
 
 /*
  * # Why this panel was rebuilt in the house style
@@ -162,6 +163,11 @@ export class PayoutController implements OnStart {
 	private readonly theme: Theme = chunkyDarkTheme();
 
 	public onStart(): void {
+		// **Does the coin asset resolve? (item 154.)** Idempotent across the three controllers that draw one, so this and its
+		// twins in the store and the toast produce a single `[Coin]` line per session. Asked before the remote is found, so a
+		// session with no payout remote still reports the asset — the two facts are unrelated.
+		reportCoinIconLoad();
+
 		const folder = ReplicatedStorage.WaitForChild(REMOTES_FOLDER_NAME, 10);
 		if (folder === undefined) {
 			warn(`[Payout] no ${REMOTES_FOLDER_NAME} folder — round payouts will not be shown.`);
@@ -299,26 +305,29 @@ export class PayoutController implements OnStart {
 		balanceCap.Size = UDim2.fromOffset(contentWidth - PLATE_PADDING * 2, TYPOGRAPHY.overline.lineHeight);
 		faded.push(balanceCap);
 
-		// **The coin, at the store's own parameters.** `COIN_SIZE` is the store's `COIN_SIZE` and the fill is `colors.coin`, so
-		// the coin beside a balance is literally the coin beside a price - there is no coin image in this tree and this is the
-		// one coin it draws. The store's dot has **no** outline because it lives inside a saturated price pill; this one sits on
-		// a charcoal plate at the same 20 pixels next to the largest number on screen, where an edge is what makes it a coin
-		// rather than a spot, so it takes `colors.shadow` at the text-outline weight.
-		const coin = new Instance("Frame");
+		// **The coin, at the store's own parameters — now the store's own icon (item 154).** `COIN_SIZE` is the store's
+		// `COIN_SIZE` and the picture is `coinIconUri()`, so the coin beside a balance is literally the coin beside a price.
+		// The store's dot has **no** outline because it lives inside a saturated price pill; this one sits on a charcoal plate
+		// at the same 20 pixels next to the largest number on screen, where an edge is what makes it a coin rather than a
+		// spot — so it **keeps** `colors.shadow` at the text-outline weight, drawn on the image exactly as it was drawn on the
+		// circle. The alternative (drop it because the icon has its own edge) would have made this panel disagree with the
+		// toast, which keeps its chunky outline for the same reason this one keeps its shadow.
+		const coin = new Instance("ImageLabel");
 		coin.Name = "Coin";
 		coin.AnchorPoint = new Vector2(0, 0.5);
 		coin.Position = UDim2.fromOffset(PLATE_PADDING, BALANCE_NUMBER_TOP + TYPOGRAPHY.h4.lineHeight / 2);
 		coin.Size = UDim2.fromOffset(COIN_SIZE, COIN_SIZE);
-		coin.BackgroundColor3 = theme.colors.coin;
 		coin.BackgroundTransparency = 1;
 		coin.BorderSizePixel = 0;
+		coin.Image = coinIconUri();
+		coin.ScaleType = Enum.ScaleType.Fit;
+		// **`ImageTransparency`, not `BackgroundTransparency`, is the fade.** The reveal driver below fades a `Frame` by its
+		// background; on an `ImageLabel` the background is already transparent and the *image* is the ink, so this starts at
+		// `1` and the driver moves this property. See `paint`.
+		coin.ImageTransparency = 1;
 		coin.ZIndex = 4;
 		coin.Parent = plate;
 		faded.push(coin);
-
-		const coinCorner = new Instance("UICorner");
-		coinCorner.CornerRadius = new UDim(1, 0);
-		coinCorner.Parent = coin;
 
 		const coinStroke = new Instance("UIStroke");
 		coinStroke.Color = theme.colors.shadow;
@@ -529,7 +538,13 @@ export class PayoutController implements OnStart {
 			}
 
 			for (const element of faded) {
-				if (element.IsA("TextLabel")) {
+				// **Three cases, because an `ImageLabel`'s ink is not its background (item 154).** The coin became an image,
+				// and `BackgroundTransparency` on one fades a box that is already invisible: the coin would have appeared fully
+				// opaque on the first frame while the panel behind it was still nothing, which is the one element of this panel
+				// that would have popped rather than faded.
+				if (element.IsA("ImageLabel")) {
+					element.ImageTransparency = mix(1, 0, amount);
+				} else if (element.IsA("TextLabel")) {
 					element.TextTransparency = mix(1, 0, amount);
 				} else {
 					element.BackgroundTransparency = mix(1, 0, amount);

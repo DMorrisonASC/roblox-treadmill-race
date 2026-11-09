@@ -16,6 +16,7 @@ import {
 	FUSION_INPUT_COUNT,
 	FUSION_TABLE,
 	RARITIES,
+	RARITY_WEIGHTS,
 	Rarity,
 	ROBUX_CHEST_BUNDLE_COUNT,
 	ROBUX_CHEST_BUNDLE_PRICE_ROBUX,
@@ -23,6 +24,7 @@ import {
 	ROBUX_CHEST_PRICE_ROBUX,
 	ROBUX_CHEST_PRODUCT_ID,
 	ROBUX_CHEST_RARITIES,
+	robuxChestWeights,
 } from "shared/economy.config";
 import { ChestOdd, chestOdds, robuxChestOdds } from "shared/odds";
 import {
@@ -42,10 +44,17 @@ import { PanelFooter, PANEL_FOOTER_HEIGHT, PANEL_HEADER_HEIGHT, PanelHeader } fr
 import { TabStrip, TAB_STRIP_HEIGHT } from "shared/ui/tabs";
 import { buildChunkyButton, ChunkyButton } from "shared/ui/chunky-button";
 import { buildChunkyPanel } from "shared/ui/chunky-panel";
-import { addChunkyRing, applyChunkyChrome, dimChunkyChrome, shadowOf } from "shared/ui/chunky-chrome";
+import {
+	addChunkyRing,
+	applyChunkyChrome,
+	CHUNKY_CONTROL_DEPTH,
+	dimChunkyChrome,
+	shadowOf,
+} from "shared/ui/chunky-chrome";
 import { attachPressFeedback } from "shared/ui/press";
 import { attachClickSound, playPurchaseSound } from "shared/ui/sounds";
 import { capToViewport } from "shared/ui/viewport";
+import { coinIconUri, reportCoinIconLoad } from "shared/ui/coin";
 import { ballName as displayName, rarityLabel as tierName } from "shared/ball-name";
 
 /**
@@ -88,7 +97,7 @@ const PREVIEW_ROW_HEIGHT = 116;
 const CHEST_SQUARE = 108;
 
 /** **Placeholder.** Height of the `Prize Preview` / `View All` header row, in pixels. */
-const PRIZE_HEADER_HEIGHT = 22;
+const PRIZE_HEADER_HEIGHT = 28;
 
 /** **Placeholder.** Height of the scrolling prize shelf, in pixels. */
 const SHELF_HEIGHT = 82;
@@ -98,6 +107,66 @@ const CARD_WIDTH = 82;
 
 /** **Placeholder.** Prize card art height, in pixels. */
 const CARD_ART = 46;
+
+/**
+ * **Placeholder.** The `View All` control's cell, in pixels.
+ *
+ * Height-matched to `PRIZE_HEADER_HEIGHT` rather than chosen: the control sits in that row and a button shorter than the
+ * band would float in it. `28` is the smallest band that still satisfies the chunky depth rule for a control
+ * (`CHUNKY_CONTROL_DEPTH = 6` against `CHUNKY_CONTROL_STROKE = 3`, so `D >= 2X` holds at exactly 6 and the visible strip is
+ * 4.5 px) while leaving a face tall enough for a `caption` label. The band was 22 px when it held a text placeholder; it
+ * grew by six when the placeholder became something a player can press.
+ */
+const VIEW_ALL_WIDTH = 96;
+
+// #region the expanded prize view (item 155)
+
+/**
+ * **Placeholder.** Fraction of the viewport height the expanded view's grid may take.
+ *
+ * The sheet is clamped to 88% of the viewport by `capToViewport`, and everything above the grid - header, back row, chest
+ * band, title band, status line and their gaps - is about 250 pixels. `0.42` of a 720-pixel viewport is 302, which leaves
+ * the whole sheet comfortably inside the clamp; the bounds below take over on a short window.
+ *
+ * **A fixed height rather than `AutomaticSize.Y`, and that is the decision this constant exists to record.** The sheet and
+ * its face both measure their own content, so a grid that sized itself from its contents would make the sheet grow to fit
+ * ten cards - past the viewport clamp, with the overflow drawn outside the frame rather than scrolled inside it
+ * (`clipsDescendants` is false on the face, deliberately). Giving the grid a height is what turns "ten cards" into "a box
+ * ten cards scroll inside", which is the only shape in which `ScrollingFrame` does anything.
+ */
+const PRIZE_GRID_VIEWPORT_FRACTION = 0.42;
+
+/** **Placeholder.** Floor for that height, in pixels: below this a grid shows one row and reads as broken rather than small. */
+const PRIZE_GRID_MIN_HEIGHT = 180;
+
+/** **Placeholder.** Ceiling for that height, in pixels, so a very tall monitor does not turn the sheet into a phone book. */
+const PRIZE_GRID_MAX_HEIGHT = 340;
+
+/** **Placeholder.** A card in the expanded grid, in pixels. Wider than a shelf card because it carries a third line. */
+const PRIZE_CARD_WIDTH = 96;
+
+/** **Placeholder.** Its height: art block, name, probability. */
+const PRIZE_CARD_HEIGHT = 100;
+
+/** **Placeholder.** The art block inside one, in pixels. */
+const PRIZE_CARD_ART = 52;
+
+/** **Placeholder.** The chest block in the expanded view's identity band, in pixels. Compact: it is one row, not a column. */
+const PRIZE_CHEST_BLOCK = 44;
+
+/** **Placeholder.** Height of the `Back` row, in pixels. Same cell as `View All`, so the two read as the same control. */
+const PRIZE_BACK_HEIGHT = 28;
+
+/** **Placeholder.** The `Back` control's width, in pixels. Wide enough for the chevron and the word. */
+const PRIZE_BACK_WIDTH = 88;
+
+/** **Placeholder.** Height of the title band above the grid, in pixels. */
+const PRIZE_TITLE_HEIGHT = 22;
+
+/** **Placeholder.** Separator between the tier percentages on the identity band's odds line. */
+const ODDS_SEPARATOR = "  ·  ";
+
+// #endregion
 
 /** **Placeholder.** Height of the purchase-button row, in pixels. A tall target, as in the reference. */
 const BUTTON_ROW_HEIGHT = 58;
@@ -325,6 +394,33 @@ type FusionResult = { ok: true; outcome: "success" | "fail"; resultBallId?: stri
 /** Which panel the controller can open. */
 type PanelId = "shop" | "inventory";
 
+/** Which chest a section is, and therefore which pool the expanded prize view lists. */
+type ChestKind = "coin" | "premium";
+
+/**
+ * Everything the expanded prize view needs to describe one chest (item 155).
+ *
+ * ## Why this is a value rather than four lookups at the call sites
+ *
+ * Both chest sections have a `View All` and a shelf of clickable cards, so the view has two possible subjects. Passing the
+ * *kind* and re-deriving the rest inside the view would put the coin/premium branch in two places - once where the shelf is
+ * filled and once where the grid is - and the third chest would need it in three. A spec built by `chestSpecOf` means the
+ * view is written once against a description, and "which chests exist" stays a fact about `economy.config.ts`.
+ *
+ * `weights` and `odds` are carried together because they are the same fact in two forms: per-ball probability needs the
+ * weights, the band's summary line needs the apportioned percentages, and deriving one from the other at the call site is
+ * how the grid and the summary would end up disagreeing.
+ */
+interface ChestSpec {
+	readonly kind: ChestKind;
+	readonly title: string;
+	/** The tiers this chest can actually grant, in display order. `RARITIES` for the coin chest, minus common for the paid one. */
+	readonly rarities: ReadonlyArray<Rarity>;
+	readonly weights: Record<Rarity, number>;
+	/** What `oddsFrom` makes of `weights`: the same numbers the chest section's stat column already prints. */
+	readonly odds: Array<ChestOdd>;
+}
+
 /**
  * The store and the inventory: two rail tabs, two sheets, one open state.
  *
@@ -392,6 +488,42 @@ export class ShopController implements OnStart {
 	private chestButtons = new Array<ChestButton>();
 
 	private chestSection?: Frame;
+
+	// #region expanded prize view state (item 155)
+
+	/**
+	 * The expanded view's band, or `undefined` before the store has been built.
+	 *
+	 * **A second state of the same sheet, not a second sheet.** It is a sibling of `Content` inside the store's own vertical
+	 * list, hidden until a `View All` or a shelf card asks for it; the header, the coin pill and the close button above it
+	 * are the store's, unchanged and not duplicated. Only one of `Content`/`prizeView` is ever visible, so the two sharing a
+	 * `LayoutOrder` is a tie that cannot be observed - and a hidden child is not laid out at all, so the band takes no space
+	 * while the chest sections are showing.
+	 */
+	private prizeView?: Frame;
+
+	/** The store's normal content band, kept so the two states can be swapped without rebuilding either. */
+	private storeContent?: Frame;
+
+	/** The grid the cards are built into, and the message shown instead when a chest has no pool. */
+	private prizeGrid?: ScrollingFrame;
+	private prizeEmpty?: TextLabel;
+
+	/** The identity band's three live pieces: the tinted block, the chest's name, and its tier summary. */
+	private prizeChestBlock?: Frame;
+	private prizeChestName?: TextLabel;
+	private prizeOddsLabel?: TextLabel;
+
+	/** The title band's right-hand count. */
+	private prizeCountLabel?: TextLabel;
+
+	/** Which chest is expanded, or `undefined` while the chest sections are showing. The whole of the view's state. */
+	private expandedChest?: ChestKind;
+
+	/** The cards currently in the grid, so a re-open for the other chest can drop the previous set. */
+	private readonly prizeCards = new Array<TextButton>();
+
+	// #endregion
 
 	/** True between a press and its reply, so one press cannot become three. */
 	private busy = false;
@@ -498,6 +630,12 @@ export class ShopController implements OnStart {
 		this.connectPolicyGate();
 		this.connectPurchasePrompt();
 		this.drivePrizeShelf();
+
+		// **Does the coin asset resolve? (item 154.)** Once per session across every panel that draws one — the helper is
+		// idempotent, so this line here and the identical ones in the payout and toast controllers produce one log line
+		// between them. The panels are already built by now: a missing icon draws a gap, and a gap is better than a shop
+		// that refused to open over a picture.
+		reportCoinIconLoad();
 
 		print(`[Shop] mounted phase=${this.phase} tabs=${this.rail.Visible ? "visible" : "hidden"}`);
 	}
@@ -845,15 +983,26 @@ export class ShopController implements OnStart {
 	 * ```
 	 * Store                       (Vertical list)
 	 *   Header                    (Horizontal: title, spacer, coin pill, close)
-	 *   Content                   (Vertical)
-	 *     Coin Chest Section      (Vertical)
-	 *       "Coin Chest"          (title)
+	 *   Content                   (Vertical)        ─┐ exactly one of these
+	 *     Coin Chest Section      (Vertical)         │ two is visible, because
+	 *       "Coin Chest"          (title)            │ the expanded prize view
 	 *       Preview Row           (Horizontal: chest square, rarity stats)
-	 *       Prize Preview Header  (Horizontal: "Prize Preview", "View All >")
-	 *       Prize Scroller        (Horizontal, auto-scrolling)
+	 *       Prize Preview Header  (Horizontal: "Prize Preview", View All)
+	 *       Prize Scroller        (Horizontal, auto-scrolling, clickable cards)
 	 *       Purchase Buttons      (Horizontal: Open 1, Open 10)
 	 *     Premium Chest Section   (Vertical, same shape, Robux)
+	 *   PrizeView                 (Vertical)        ─┘
+	 *     Back Row                (Horizontal: Back)
+	 *     Chest Band              (Horizontal: tinted CHEST block, name, tier odds)
+	 *     All Prizes              (Horizontal: title, spacer, "<N> items")
+	 *     Prize Grid              (ScrollingFrame + UIGridLayout, fixed height)
+	 *   Status                    (one line, shared by both states)
 	 * ```
+	 *
+	 * **The expanded prize view is a second state of this band, not a second sheet (item 155).** It is a sibling of
+	 * `Content` inside the same list, hidden until a `View All` or a shelf card asks for it, so the header, the coin pill and
+	 * the close button above both of them are literally the same objects in both states. Only one of the two is ever
+	 * visible, which is why they share a `LayoutOrder` without a tie anybody can see.
 	 *
 	 * **The category tabs are gone.** They held `Balls` and `Fusion`, and both of those are now tabs of the inventory
 	 * sheet, which is where a player's own balls belong. A single-tab strip would have been a button that does nothing.
@@ -922,6 +1071,7 @@ export class ShopController implements OnStart {
 
 		this.buildHeader(scope, surface);
 		this.buildContent(scope, surface);
+		this.buildPrizeView(scope, surface);
 
 		// The status band: one line at the foot, where a refusal or a result appears. Part of the same vertical list,
 		// so it sits under the content rather than floating at a fixed offset.
@@ -1102,6 +1252,10 @@ export class ShopController implements OnStart {
 		// section left a single category, and a strip with one button is an affordance that does nothing — so the
 		// strip went with it and the chest row is the store's only content.
 		this.chestSection = this.buildChestRow(scope, content, 1);
+
+		// **A handle on the band, because the expanded view swaps with it (item 155).** The store has two states and they are
+		// the same sheet, so the only thing the swap needs is a reference to what to hide.
+		this.storeContent = content;
 	}
 
 	// #endregion
@@ -1199,6 +1353,10 @@ export class ShopController implements OnStart {
 			}
 
 			this.applyChestRowLayout(camera.ViewportSize.X);
+			// **The grid is re-sized from the same event (item 155).** The sheet is built once and a window can change shape
+			// afterwards; a grid left at the height it was born with would either overflow a short window or waste a tall one.
+			// One watcher for both, because they are both answers to "how big is the screen".
+			this.applyPrizeGridHeight();
 		});
 	}
 
@@ -1264,10 +1422,10 @@ export class ShopController implements OnStart {
 		this.text(scope, section, "Coin Chest", "h6", "primary", 1, new UDim2(1, 0, 0, SECTION_TITLE_HEIGHT), false);
 
 		this.buildPreviewRow(scope, section, 2, chestOdds());
-		this.buildPrizeHeaderRow(scope, section, 3);
+		this.buildPrizeHeaderRow(scope, section, 3, "coin");
 
 		const shelf = this.buildPrizeShelf(scope, section, 4);
-		this.fillPrizeShelf(scope, shelf, RARITIES);
+		this.fillPrizeShelf(scope, shelf, RARITIES, "coin");
 		this.prizeShelves.push(shelf);
 
 		this.buildPurchaseRow(scope, section, 5);
@@ -1405,10 +1563,10 @@ export class ShopController implements OnStart {
 		badgeLabel.TextYAlignment = Enum.TextYAlignment.Center;
 
 		this.buildPreviewRow(scope, section, 2, robuxChestOdds());
-		this.buildPrizeHeaderRow(scope, section, 3);
+		this.buildPrizeHeaderRow(scope, section, 3, "premium");
 
 		const shelf = this.buildPrizeShelf(scope, section, 4);
-		this.fillPrizeShelf(scope, shelf, ROBUX_CHEST_RARITIES);
+		this.fillPrizeShelf(scope, shelf, ROBUX_CHEST_RARITIES, "premium");
 		this.prizeShelves.push(shelf);
 
 		this.buildPremiumPurchaseRow(scope, section, 5);
@@ -1685,8 +1843,30 @@ export class ShopController implements OnStart {
 		value.TextColor3 = this.theme.colors.rarity[rarity];
 	}
 
-	/** `Prize Preview` on the left, a `View All >` placeholder on the right. */
-	private buildPrizeHeaderRow(scope: Fusion.Scope<unknown>, parent: Instance, order: number): void {
+	/**
+	 * `Prize Preview` on the left, the **`View All` control** on the right (item 155).
+	 *
+	 * ## What this row was, and why the placeholder is now a button
+	 *
+	 * It read *"a placeholder by design: the brief says it needs no functionality yet. It is a label rather than a button so
+	 * nothing invites a click that would do nothing."* Both halves of that were right for a round that had nothing to open:
+	 * a label cannot invite a click. What changed is that there is now somewhere to go, so the same reasoning points the
+	 * other way - a control that looks pressable and is not is the state this round exists to leave behind.
+	 *
+	 * ## Why it is a `TextButton` with `applyChunkyChrome` rather than `buildChunkyButton`
+	 *
+	 * `buildChunkyButton` is the card builder: it takes a required `iconAssetId`, a title band and a badge, and its whole
+	 * shape is a poster. This needs chrome and one word. `applyChunkyChrome` is the builder for exactly that case - it is
+	 * what the inventory's ball cards and the fusion rows already use - and its `label` option exists because the button's
+	 * own `Text` is covered by the face.
+	 *
+	 * ## Why the row is a nested list rather than two hand-placed children
+	 *
+	 * The left label takes the remaining width and the control keeps its own cell on the right, which is the same
+	 * arrangement the header uses for the coin pill and the close button. Hand-placing an `AnchorPoint(1, 0.5)` control
+	 * would also work and would be the first element in this sheet positioned by arithmetic instead of by a layout.
+	 */
+	private buildPrizeHeaderRow(scope: Fusion.Scope<unknown>, parent: Instance, order: number, kind: ChestKind): void {
 		const row = Fusion.New(
 			scope,
 			"Frame",
@@ -1709,14 +1889,73 @@ export class ShopController implements OnStart {
 			Parent: row,
 		});
 
-		const left = this.text(scope, row, "Prize Preview", "body2", "primary", 1, new UDim2(0.5, 0, 1, 0), false);
+		const left = this.text(
+			scope,
+			row,
+			"Prize Preview",
+			"body2",
+			"primary",
+			1,
+			new UDim2(1, -VIEW_ALL_WIDTH - SPACING.sm, 1, 0),
+			false,
+		);
 		left.TextYAlignment = Enum.TextYAlignment.Center;
 
-		// A placeholder by design: the brief says it needs no functionality yet. It is a label rather than a button so
-		// nothing invites a click that would do nothing.
-		const viewAll = this.text(scope, row, "View All >", "caption", "secondary", 2, new UDim2(0.5, 0, 1, 0), false);
-		viewAll.TextXAlignment = Enum.TextXAlignment.Right;
-		viewAll.TextYAlignment = Enum.TextYAlignment.Center;
+		// The right-hand cell. A list with `HorizontalAlignment.Right` is what lets the control keep its fixed width while the
+		// row's spare pixels are absorbed here rather than by a magic number on the control's position.
+		const right = Fusion.New(
+			scope,
+			"Frame",
+		)({
+			Name: "Actions",
+			Size: new UDim2(0, VIEW_ALL_WIDTH, 1, 0),
+			BackgroundTransparency: 1,
+			LayoutOrder: 2,
+			ZIndex: STORE_Z_INDEX + 2,
+			Parent: row,
+		});
+
+		Fusion.New(
+			scope,
+			"UIListLayout",
+		)({
+			FillDirection: Enum.FillDirection.Horizontal,
+			HorizontalAlignment: Enum.HorizontalAlignment.Right,
+			VerticalAlignment: Enum.VerticalAlignment.Center,
+			SortOrder: Enum.SortOrder.LayoutOrder,
+			Parent: right,
+		});
+
+		const control = new Instance("TextButton");
+		control.Name = "ViewAll";
+		control.Size = UDim2.fromOffset(VIEW_ALL_WIDTH, PRIZE_HEADER_HEIGHT);
+		control.BorderSizePixel = 0;
+		control.AutoButtonColor = false;
+		control.Text = "";
+		control.LayoutOrder = 1;
+		control.ZIndex = STORE_Z_INDEX + 3;
+		control.Parent = right;
+
+		// The face is `paint.trough`'s colour, not an accent: this is a secondary affordance beside a section that already
+		// has two saturated buttons, and a third accent-tinted control in one column would compete with the things that
+		// spend money. The shadow is derived from the same colour, so the three-value ladder holds without a second literal.
+		applyChunkyChrome(control, {
+			color: this.theme.paint.trough.color,
+			shadowColor: shadowOf(this.theme.paint.trough.color),
+			zIndex: STORE_Z_INDEX + 3,
+			corner: SPACING.xs,
+			label: {
+				text: "View All",
+				textSize: PANEL_TYPE.caption.size,
+				color: this.theme.colors.textPrimary,
+				// The face is at `+4` and its own outline is part of it, so the label needs `+5` to sit above both.
+				zIndex: STORE_Z_INDEX + 5,
+			},
+		});
+
+		attachPressFeedback(control);
+		attachClickSound(control);
+		control.Activated.Connect(() => this.showPrizeView(kind));
 	}
 
 	/**
@@ -1732,6 +1971,11 @@ export class ShopController implements OnStart {
 	 *
 	 * `drivePrizeShelf` scrolls the canvas and wraps at half its width. That is only seamless if the second half
 	 * repeats the first exactly, so the shelf is filled twice and the wrap point is invisible.
+	 *
+	 * **The duplication is also why a card is not a door (item 155).** Every card in a shelf opens the same expanded view,
+	 * and there are two of each - so a click has to be idempotent about which copy it landed on. That is handled at the
+	 * destination (`showPrizeView` returns immediately if that chest is already expanded), not here: making the second pass
+	 * unclickable would be two kinds of card in one shelf, and the seam moves as the canvas scrolls anyway.
 	 */
 	private buildPrizeShelf(scope: Fusion.Scope<unknown>, parent: Instance, order: number): ScrollingFrame {
 		const shelf = Fusion.New(
@@ -1781,7 +2025,12 @@ export class ShopController implements OnStart {
 	}
 
 	/** Fills a shelf twice: once per ball, then the same list again so the scroll can wrap invisibly. */
-	private fillPrizeShelf(scope: Fusion.Scope<unknown>, shelf: ScrollingFrame, rarities: ReadonlyArray<Rarity>): void {
+	private fillPrizeShelf(
+		scope: Fusion.Scope<unknown>,
+		shelf: ScrollingFrame,
+		rarities: ReadonlyArray<Rarity>,
+		kind: ChestKind,
+	): void {
 		const cards = new Array<{ id: string; rarity: Rarity }>();
 
 		for (const rarity of rarities) {
@@ -1797,93 +2046,791 @@ export class ShopController implements OnStart {
 		let order = 1;
 		for (let pass = 0; pass < 2; pass++) {
 			for (const card of cards) {
-				this.buildPrizeCard(scope, shelf, card.id, card.rarity, order);
+				this.buildPrizeCard(scope, shelf, card.id, card.rarity, order, kind);
 				order++;
 			}
 		}
 	}
 
-	/** One prize card: a tinted art block with a ball silhouette, and the ball's name beneath. */
+	/**
+	 * One prize card: a tinted art block with a ball silhouette, and the ball's name beneath.
+	 *
+	 * ## Why this is a button now (item 155)
+	 *
+	 * It was a `Frame`, because it had no job beyond being looked at. Every card in the shelf now opens the expanded prize
+	 * view for the chest it belongs to, so it is a control and takes the chunky treatment the rest of the sheet's controls
+	 * take: a transparent cell, a shadow plate, a face, a thick outline, and a rarity ring on a frame of its own.
+	 *
+	 * **The ring is the reason this cannot stay a `Frame` with a coloured `UIStroke`.** The old card's rarity border was a
+	 * single hairline on the frame; once the card is chromed, that hairline and the chunky outline are two strokes on one
+	 * object and the newer wins - item 118's failure, recorded on `addChunkyRing`.
+	 *
+	 * The tint is the *ring*, not the face: a shelf of saturated cards would out-shout the chest buttons below it, and the
+	 * rarity is already carried by the art block inside.
+	 */
 	private buildPrizeCard(
 		scope: Fusion.Scope<unknown>,
 		parent: Instance,
 		ballId: string,
 		rarity: Rarity,
 		order: number,
+		kind: ChestKind,
 	): void {
-		const card = Fusion.New(
+		const tint = this.theme.colors.rarity[rarity];
+
+		const card = new Instance("TextButton");
+		card.Name = `Prize_${ballId}_${order}`;
+		// **The cell is the old card plus the chrome's depth.** The face is inset by `CHUNKY_CONTROL_DEPTH`, so a cell of the
+		// old height would give the face six pixels less than the art block and the name needed - and the name, being drawn
+		// above the art, would clip the art's bottom edge. Adding the depth back keeps every inner measurement as it was.
+		card.Size = UDim2.fromOffset(
+			CARD_WIDTH,
+			CARD_ART + PANEL_TYPE.caption.lineHeight + SPACING.xs * 2 + CHUNKY_CONTROL_DEPTH,
+		);
+		card.BorderSizePixel = 0;
+		card.AutoButtonColor = false;
+		// The name is drawn on the face below, so the button itself carries nothing.
+		card.Text = "";
+		card.LayoutOrder = order;
+		card.ZIndex = STORE_Z_INDEX + 2;
+		card.Parent = parent;
+
+		const chrome = applyChunkyChrome(card, {
+			color: this.theme.paint.card.color,
+			shadowColor: shadowOf(this.theme.paint.card.color),
+			zIndex: STORE_Z_INDEX + 2,
+			corner: SPACING.xs,
+		});
+
+		addChunkyRing(chrome.face, tint, HAIRLINE);
+
+		const art = new Instance("Frame");
+		art.Name = "Art";
+		art.Size = new UDim2(1, -SPACING.xs * 2, 0, CARD_ART);
+		art.Position = UDim2.fromOffset(SPACING.xs, SPACING.xs);
+		art.BackgroundColor3 = tint;
+		art.BackgroundTransparency = 0.84;
+		art.BorderSizePixel = 0;
+		art.ZIndex = STORE_Z_INDEX + 4;
+		art.Parent = chrome.face;
+
+		const artCorner = new Instance("UICorner");
+		artCorner.CornerRadius = new UDim(0, SPACING.xs);
+		artCorner.Parent = art;
+
+		const ball = new Instance("Frame");
+		ball.Name = "Ball";
+		ball.AnchorPoint = new Vector2(CENTRE, CENTRE);
+		ball.Position = UDim2.fromScale(CENTRE, CENTRE);
+		ball.Size = UDim2.fromOffset(SWATCH, SWATCH);
+		ball.BackgroundColor3 = tint;
+		ball.BorderSizePixel = 0;
+		ball.ZIndex = STORE_Z_INDEX + 5;
+		ball.Parent = art;
+
+		const ballCorner = new Instance("UICorner");
+		ballCorner.CornerRadius = ROUND;
+		ballCorner.Parent = ball;
+
+		const name = new Instance("TextLabel");
+		name.Name = "Name";
+		name.AnchorPoint = new Vector2(0, 1);
+		name.Position = UDim2.fromScale(0, 1);
+		name.Size = new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight);
+		name.BackgroundTransparency = 1;
+		name.Font = FONT;
+		name.TextSize = PANEL_TYPE.caption.size;
+		name.TextColor3 = this.theme.colors.textPrimary;
+		name.TextXAlignment = Enum.TextXAlignment.Center;
+		name.TextYAlignment = Enum.TextYAlignment.Center;
+		name.TextTruncate = Enum.TextTruncate.AtEnd;
+		name.Text = displayName(ballId);
+		// Above the art and the ball, because a tie in `ZIndex` is resolved by creation order - item 5.4 in the style guide.
+		name.ZIndex = STORE_Z_INDEX + 6;
+		name.Parent = chrome.face;
+
+		outlineText(name);
+
+		attachPressFeedback(card);
+		attachClickSound(card);
+		card.Activated.Connect(() => this.showPrizeView(kind));
+	}
+
+	// #region the expanded prize view (item 155)
+
+	/**
+	 * The expanded view: a second state of the store sheet, built once and shown on demand.
+	 *
+	 * ```
+	 * PrizeView                       (Vertical list; hidden until something asks)
+	 *   Back row                      (Back control, left)
+	 *   Chest band                    (Horizontal: tinted CHEST block, name + tier odds)
+	 *   Title band                    (Horizontal: "All Prizes", "<N> items")
+	 *   Prize grid                    (ScrollingFrame + UIGridLayout, fixed height)
+	 * ```
+	 *
+	 * ## What it deliberately does not have
+	 *
+	 * **No second header.** The title, the coin pill and the close button above this band are the store's, and they are
+	 * the same objects in both states - so a player who is looking at the catalog still sees their balance and can still
+	 * close the sheet. A copy of the header here would be a second place for `refreshCoins` to have to write.
+	 *
+	 * **No purchase buttons.** They live in the chest sections, which are hidden while this is showing. Duplicating them
+	 * would mean a second call site for the same remotes, a second `busy` guard and a second policy gate - three places for
+	 * one bug - so this view is read-only and the player backs out to buy. That is the one place this departs from the
+	 * reference, which puts `Open 1`/`Open 10` in its footer.
+	 *
+	 * **No category row.** The store has one vertical hierarchy and a `Shop`/`Inventory` rail; the categories the reference
+	 * shows were removed here on purpose and are not coming back inside a sub-view.
+	 *
+	 * ## Why one chest at a time
+	 *
+	 * Both chest sections have a `View All` and both shelves are clickable, so the view has two possible subjects and takes
+	 * whichever was asked for. `showPrizeView` fills it from a `ChestSpec`, which is why nothing here branches on which
+	 * chest it is.
+	 */
+	private buildPrizeView(scope: Fusion.Scope<unknown>, parent: Instance): void {
+		const view = Fusion.New(
 			scope,
 			"Frame",
 		)({
-			Name: `Prize_${ballId}_${order}`,
-			Size: UDim2.fromOffset(CARD_WIDTH, CARD_ART + PANEL_TYPE.caption.lineHeight + SPACING.xs * 2),
-			BackgroundColor3: this.theme.paint.card.color,
-			BackgroundTransparency: this.theme.paint.card.transparency,
-			BorderSizePixel: 0,
+			Name: "PrizeView",
+			Size: new UDim2(1, 0, 0, 0),
+			AutomaticSize: Enum.AutomaticSize.Y,
+			BackgroundTransparency: 1,
+			// The same order as `Content`: exactly one of the two is ever visible, and a hidden child is not laid out at all,
+			// so the tie cannot be observed. Sharing the slot is what keeps the status line below both of them.
+			LayoutOrder: 3,
+			ZIndex: STORE_Z_INDEX + 2,
+			Visible: false,
+			Parent: parent,
+		});
+
+		Fusion.New(
+			scope,
+			"UIListLayout",
+		)({
+			FillDirection: Enum.FillDirection.Vertical,
+			SortOrder: Enum.SortOrder.LayoutOrder,
+			Padding: new UDim(0, BAND_GAP),
+			Parent: view,
+		});
+
+		this.buildPrizeBackRow(scope, view, 1);
+		this.buildPrizeChestBand(scope, view, 2);
+		this.buildPrizeTitleBand(scope, view, 3);
+		this.buildPrizeGrid(scope, view, 4);
+
+		this.prizeView = view;
+	}
+
+	/**
+	 * The `Back` control and nothing else, on its own row.
+	 *
+	 * **`Back` is section-level, not sheet-level.** The rail's `Shop`/`Inventory` switch is the store's navigation and is
+	 * untouched; this returns to the chest sections the player came from, with both sections exactly as they were - the
+	 * shelf scroll positions, the coin balance and the status line are all still live, because none of them were rebuilt.
+	 */
+	private buildPrizeBackRow(scope: Fusion.Scope<unknown>, parent: Instance, order: number): void {
+		const row = Fusion.New(
+			scope,
+			"Frame",
+		)({
+			Name: "BackRow",
+			Size: new UDim2(1, 0, 0, PRIZE_BACK_HEIGHT),
+			BackgroundTransparency: 1,
 			LayoutOrder: order,
 			ZIndex: STORE_Z_INDEX + 2,
 			Parent: parent,
 		});
 
-		this.corners(scope, card, SPACING.xs);
+		Fusion.New(
+			scope,
+			"UIListLayout",
+		)({
+			FillDirection: Enum.FillDirection.Horizontal,
+			VerticalAlignment: Enum.VerticalAlignment.Center,
+			SortOrder: Enum.SortOrder.LayoutOrder,
+			HorizontalAlignment: Enum.HorizontalAlignment.Left,
+			Parent: row,
+		});
+
+		const control = new Instance("TextButton");
+		control.Name = "Back";
+		control.Size = UDim2.fromOffset(PRIZE_BACK_WIDTH, PRIZE_BACK_HEIGHT);
+		control.BorderSizePixel = 0;
+		control.AutoButtonColor = false;
+		control.Text = "";
+		control.LayoutOrder = 1;
+		control.ZIndex = STORE_Z_INDEX + 3;
+		control.Parent = row;
+
+		// The same face as `View All`, for the same reason: two navigation controls on one sheet should look like one control
+		// in two positions, and neither should read as a purchase.
+		applyChunkyChrome(control, {
+			color: this.theme.paint.trough.color,
+			shadowColor: shadowOf(this.theme.paint.trough.color),
+			zIndex: STORE_Z_INDEX + 3,
+			corner: SPACING.xs,
+			label: {
+				text: "<  Back",
+				textSize: PANEL_TYPE.caption.size,
+				color: this.theme.colors.textPrimary,
+				zIndex: STORE_Z_INDEX + 5,
+			},
+		});
+
+		attachPressFeedback(control);
+		attachClickSound(control);
+		control.Activated.Connect(() => this.backToChests());
+	}
+
+	/**
+	 * The chest's identity, in one band.
+	 *
+	 * The reference puts this in a whole column - a large render, a name plate and a stacked odds table. This game has no
+	 * chest art (item 58 established the tinted `CHEST` block as the placeholder and an invented `rbxassetid` is a broken
+	 * image on every client), so the column collapses to a row: block, name, and the tier percentages on one line. The odds
+	 * are here rather than only in the chest section because this is where the player is reading what the chest can give.
+	 */
+	private buildPrizeChestBand(scope: Fusion.Scope<unknown>, parent: Instance, order: number): void {
+		const band = Fusion.New(
+			scope,
+			"Frame",
+		)({
+			Name: "ChestBand",
+			Size: new UDim2(1, 0, 0, PRIZE_CHEST_BLOCK),
+			BackgroundTransparency: 1,
+			LayoutOrder: order,
+			ZIndex: STORE_Z_INDEX + 2,
+			Parent: parent,
+		});
+
+		Fusion.New(
+			scope,
+			"UIListLayout",
+		)({
+			FillDirection: Enum.FillDirection.Horizontal,
+			VerticalAlignment: Enum.VerticalAlignment.Center,
+			SortOrder: Enum.SortOrder.LayoutOrder,
+			Padding: new UDim(0, SPACING.md),
+			Parent: band,
+		});
+
+		const block = Fusion.New(
+			scope,
+			"Frame",
+		)({
+			Name: "ChestBlock",
+			Size: UDim2.fromOffset(PRIZE_CHEST_BLOCK, PRIZE_CHEST_BLOCK),
+			BackgroundColor3: this.theme.paint.trough.color,
+			BackgroundTransparency: this.theme.paint.trough.transparency,
+			BorderSizePixel: 0,
+			LayoutOrder: 1,
+			ZIndex: STORE_Z_INDEX + 2,
+			Parent: band,
+		});
+
+		this.corners(scope, block, SPACING.sm);
 
 		Fusion.New(
 			scope,
 			"UIStroke",
 		)({
-			Color: this.theme.colors.rarity[rarity],
+			Color: this.theme.colors.border,
 			Thickness: HAIRLINE,
 			ApplyStrokeMode: Enum.ApplyStrokeMode.Border,
-			Parent: card,
+			Parent: block,
 		});
 
-		const art = Fusion.New(
+		const blockLabel = this.text(scope, block, "CHEST", "overline", "disabled", 1, UDim2.fromScale(1, 1), false);
+		blockLabel.TextXAlignment = Enum.TextXAlignment.Center;
+		blockLabel.TextYAlignment = Enum.TextYAlignment.Center;
+
+		// The name and the odds, stacked in one cell so the band is one row high however long the odds line gets.
+		const textColumn = Fusion.New(
 			scope,
 			"Frame",
 		)({
-			Name: "Art",
-			Size: new UDim2(1, -SPACING.xs * 2, 0, CARD_ART),
-			Position: UDim2.fromOffset(SPACING.xs, SPACING.xs),
-			BackgroundColor3: this.theme.colors.rarity[rarity],
-			BackgroundTransparency: 0.84,
-			BorderSizePixel: 0,
-			ZIndex: STORE_Z_INDEX + 3,
-			Parent: card,
+			Name: "Identity",
+			Size: new UDim2(1, -PRIZE_CHEST_BLOCK - SPACING.md, 1, 0),
+			BackgroundTransparency: 1,
+			LayoutOrder: 2,
+			ZIndex: STORE_Z_INDEX + 2,
+			Parent: band,
 		});
 
-		this.corners(scope, art, SPACING.xs);
-
-		const ball = Fusion.New(
+		Fusion.New(
 			scope,
-			"Frame",
+			"UIListLayout",
 		)({
-			Name: "Ball",
-			AnchorPoint: new Vector2(CENTRE, CENTRE),
-			Position: UDim2.fromScale(CENTRE, CENTRE),
-			Size: UDim2.fromOffset(SWATCH, SWATCH),
-			BackgroundColor3: this.theme.colors.rarity[rarity],
-			BorderSizePixel: 0,
-			ZIndex: STORE_Z_INDEX + 4,
-			Parent: art,
+			FillDirection: Enum.FillDirection.Vertical,
+			VerticalAlignment: Enum.VerticalAlignment.Center,
+			SortOrder: Enum.SortOrder.LayoutOrder,
+			Parent: textColumn,
 		});
 
-		this.corners(scope, ball, 0, ROUND);
-
-		const name = this.text(
+		this.prizeChestName = this.text(
 			scope,
-			card,
-			displayName(ballId),
-			"caption",
+			textColumn,
+			"",
+			"h6",
 			"primary",
-			2,
-			new UDim2(1, -SPACING.xs * 2, 0, PANEL_TYPE.caption.lineHeight),
+			1,
+			new UDim2(1, 0, 0, PANEL_TYPE.h6.lineHeight),
 			false,
 		);
-		name.Position = UDim2.fromOffset(SPACING.xs, CARD_ART + SPACING.xs);
+		this.prizeChestName.TextYAlignment = Enum.TextYAlignment.Center;
+
+		this.prizeOddsLabel = this.text(
+			scope,
+			textColumn,
+			"",
+			"caption",
+			"secondary",
+			2,
+			new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight),
+			false,
+		);
+		this.prizeOddsLabel.TextYAlignment = Enum.TextYAlignment.Center;
+
+		this.prizeChestBlock = block;
+	}
+
+	/** `All Prizes` on the left, `<N> items` on the right. The count is derived from the pool, never written. */
+	private buildPrizeTitleBand(scope: Fusion.Scope<unknown>, parent: Instance, order: number): void {
+		const band = Fusion.New(
+			scope,
+			"Frame",
+		)({
+			Name: "AllPrizes",
+			Size: new UDim2(1, 0, 0, PRIZE_TITLE_HEIGHT),
+			BackgroundTransparency: 1,
+			LayoutOrder: order,
+			ZIndex: STORE_Z_INDEX + 2,
+			Parent: parent,
+		});
+
+		Fusion.New(
+			scope,
+			"UIListLayout",
+		)({
+			FillDirection: Enum.FillDirection.Horizontal,
+			VerticalAlignment: Enum.VerticalAlignment.Center,
+			SortOrder: Enum.SortOrder.LayoutOrder,
+			Parent: band,
+		});
+
+		const title = this.text(scope, band, "All Prizes", "body1", "primary", 1, new UDim2(0, 0, 1, 0), true);
+		title.TextYAlignment = Enum.TextYAlignment.Center;
+
+		const spacer = Fusion.New(
+			scope,
+			"Frame",
+		)({
+			Name: "Spacer",
+			Size: new UDim2(0, 0, 1, 0),
+			BackgroundTransparency: 1,
+			LayoutOrder: 2,
+			Parent: band,
+		});
+
+		Fusion.New(scope, "UIFlexItem")({ FlexMode: Enum.UIFlexMode.Fill, Parent: spacer });
+
+		this.prizeCountLabel = this.text(scope, band, "", "caption", "secondary", 3, new UDim2(0, 0, 1, 0), true);
+		this.prizeCountLabel.TextXAlignment = Enum.TextXAlignment.Right;
+		this.prizeCountLabel.TextYAlignment = Enum.TextYAlignment.Center;
+	}
+
+	/**
+	 * The scroll box the catalog lives in.
+	 *
+	 * ## Why the columns are not chosen
+	 *
+	 * `UIGridLayout` fills from its container's width, so the column count is a *consequence* of `PRIZE_CARD_WIDTH` and the
+	 * sheet's width - the same decision item 50 made for the shelf and item 59 for the sheet. At the store's 880-pixel
+	 * maximum the inner width is 856 pixels: eight 96-pixel cards plus their 4-pixel gaps is 804, so eight fit and the
+	 * derived count is 8. A ninth would need a card narrower than the art block inside it reads well.
+	 *
+	 * ## Why the height is a number
+	 *
+	 * See `PRIZE_GRID_VIEWPORT_FRACTION`: the sheet measures its own content, so a self-sizing grid would grow the sheet past
+	 * the viewport clamp instead of scrolling. `applyPrizeGridHeight` keeps the box inside the sheet's budget and re-applies
+	 * it on a resize, because the sheet is built once and a window can change shape afterwards.
+	 */
+	private buildPrizeGrid(scope: Fusion.Scope<unknown>, parent: Instance, order: number): void {
+		const grid = Fusion.New(
+			scope,
+			"ScrollingFrame",
+		)({
+			Name: "PrizeGrid",
+			Size: new UDim2(1, 0, 0, PRIZE_GRID_MIN_HEIGHT),
+			BackgroundColor3: this.theme.paint.surface.color,
+			BackgroundTransparency: this.theme.paint.surface.transparency,
+			BorderSizePixel: 0,
+			ClipsDescendants: true,
+			ScrollBarThickness: SPACING.xs,
+			ScrollBarImageColor3: this.theme.colors.border,
+			ScrollingDirection: Enum.ScrollingDirection.Y,
+			CanvasSize: UDim2.fromOffset(0, 0),
+			AutomaticCanvasSize: Enum.AutomaticSize.Y,
+			ElasticBehavior: Enum.ElasticBehavior.Never,
+			LayoutOrder: order,
+			ZIndex: STORE_Z_INDEX + 2,
+			Parent: parent,
+		});
+
+		this.corners(scope, grid, SPACING.sm);
+
+		Fusion.New(
+			scope,
+			"UIGridLayout",
+		)({
+			CellSize: UDim2.fromOffset(PRIZE_CARD_WIDTH, PRIZE_CARD_HEIGHT),
+			CellPadding: UDim2.fromOffset(SPACING.xs, SPACING.xs),
+			SortOrder: Enum.SortOrder.LayoutOrder,
+			FillDirectionMaxCells: 0,
+			Parent: grid,
+		});
+
+		Fusion.New(
+			scope,
+			"UIPadding",
+		)({
+			PaddingTop: new UDim(0, SPACING.xs),
+			PaddingBottom: new UDim(0, SPACING.xs),
+			PaddingLeft: new UDim(0, SPACING.xs),
+			PaddingRight: new UDim(0, SPACING.xs),
+			Parent: grid,
+		});
+
+		// The message that takes the grid's place when a chest has no pool. Inside the band rather than a fourth state of the
+		// view, because "no cards" is still a catalog - it just has nothing in it, and a player should be told that rather
+		// than shown an empty box.
+		this.prizeEmpty = this.text(
+			scope,
+			parent,
+			"",
+			"caption",
+			"disabled",
+			order + 1,
+			new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight),
+			false,
+		);
+		this.prizeEmpty.TextXAlignment = Enum.TextXAlignment.Center;
+		this.prizeEmpty.TextYAlignment = Enum.TextYAlignment.Center;
+		this.prizeEmpty.Visible = false;
+
+		this.prizeGrid = grid;
+		this.applyPrizeGridHeight();
+	}
+
+	/** Sizes the grid from the viewport, bounded. Called at build and on every viewport change. */
+	private applyPrizeGridHeight(): void {
+		const grid = this.prizeGrid;
+		if (grid === undefined) {
+			return;
+		}
+
+		const camera = Workspace.CurrentCamera;
+		const viewport = camera !== undefined ? camera.ViewportSize.Y : PRIZE_GRID_MIN_HEIGHT * 2;
+		const height = math.clamp(
+			viewport * PRIZE_GRID_VIEWPORT_FRACTION,
+			PRIZE_GRID_MIN_HEIGHT,
+			PRIZE_GRID_MAX_HEIGHT,
+		);
+
+		grid.Size = new UDim2(1, 0, 0, height);
+	}
+
+	/**
+	 * Everything about a chest the view needs, in one value.
+	 *
+	 * The weights are carried with the odds because per-ball probability and the tier summary are the same table read two
+	 * ways, and a view that derived one of them from a different source is how the two would come to disagree.
+	 */
+	private chestSpecOf(kind: ChestKind): ChestSpec {
+		if (kind === "premium") {
+			return {
+				kind,
+				title: "Premium Chest",
+				rarities: ROBUX_CHEST_RARITIES,
+				weights: robuxChestWeights(),
+				odds: robuxChestOdds(),
+			};
+		}
+
+		return {
+			kind,
+			title: "Coin Chest",
+			rarities: RARITIES,
+			weights: RARITY_WEIGHTS,
+			odds: chestOdds(),
+		};
+	}
+
+	/**
+	 * One ball's chance of coming out of one roll, as a percentage of the chest.
+	 *
+	 * ## Why this is a derivation and not a table
+	 *
+	 * `chestOdds()` apportions `RARITY_WEIGHTS` into per-**tier** rows. Within a tier every ball is equally likely, so one
+	 * ball's chance is its tier's share divided by how many balls that tier holds. Writing the ten numbers out would be a
+	 * second table to update when `BALL_POOL` changes, and the first ball added after it drifted would print a wrong
+	 * percentage on a card - the "looks right, is wrong" failure the odds module exists to avoid.
+	 *
+	 * `total` is the sum of the chest's own weights rather than 100: the coin chest's sum to 1000 and the paid one's do too,
+	 * but nothing in the types makes that true, and dividing by the table's own total is correct either way.
+	 */
+	private perBallPercent(spec: ChestSpec, rarity: Rarity): number {
+		let total = 0;
+		for (const tier of RARITIES) {
+			total += spec.weights[tier];
+		}
+
+		const pool = BALL_POOL[rarity];
+		if (total <= 0 || pool.size() === 0) {
+			return 0;
+		}
+
+		return ((spec.weights[rarity] / total) * 100) / pool.size();
+	}
+
+	/**
+	 * A percentage for a card, at the store's own rounding.
+	 *
+	 * `chestOdds()` rounds to one decimal through largest-remainder apportionment, so `60` prints as `60%` and `4.5` as
+	 * `4.5%`. This matches that scale - one decimal, with a whole number printing without a trailing `.0` - rather than
+	 * inventing a second convention beside the odds line the chest section already shows.
+	 */
+	private formatPercent(value: number): string {
+		const rounded = math.round(value * 10) / 10;
+		return `${rounded}%`;
+	}
+
+	/**
+	 * Shows the expanded view for one chest.
+	 *
+	 * ## Idempotent by construction
+	 *
+	 * Three things can call this for the same chest - the `View All` control, a shelf card in the first copy of the shelf,
+	 * and the same card in the duplicated copy the auto-scroll wraps through - and a second call must not rebuild the grid
+	 * or reset the scroll position the player put it at. The guard is one line: if that chest is already expanded, do
+	 * nothing, so a click on either copy of a card is the same click.
+	 *
+	 * Comparing against `expandedChest` rather than a boolean is what makes the guard also correct for the day a card for a
+	 * *different* chest is reachable from here: today both entry points live in the band this view hides, so a chest can only
+	 * be changed by backing out first - but the comparison is already written for the alternative.
+	 */
+	private showPrizeView(kind: ChestKind): void {
+		const view = this.prizeView;
+		if (view === undefined || this.expandedChest === kind) {
+			return;
+		}
+
+		this.expandedChest = kind;
+		this.fillPrizeView(this.chestSpecOf(kind));
+
+		if (this.storeContent !== undefined) {
+			this.storeContent.Visible = false;
+		}
+		view.Visible = true;
+
+		// The shelf's scroll position is reset while hidden: returning to the chest section should show it from the start
+		// rather than wherever the two states happened to leave the canvas.
+		for (const shelf of this.prizeShelves) {
+			shelf.CanvasPosition = new Vector2(0, 0);
+		}
+	}
+
+	/** Returns to the chest sections. Sheet-level state (balance, status, phase) is untouched because none of it was rebuilt. */
+	private backToChests(): void {
+		const view = this.prizeView;
+		if (view === undefined || this.expandedChest === undefined) {
+			return;
+		}
+
+		this.expandedChest = undefined;
+		view.Visible = false;
+
+		if (this.storeContent !== undefined) {
+			this.storeContent.Visible = true;
+		}
+	}
+
+	/** Drops the previous chest's cards and rebuilds from the spec. Progress bars and balances are not this method's business. */
+	private fillPrizeView(spec: ChestSpec): void {
+		for (const card of this.prizeCards) {
+			card.Destroy();
+		}
+		this.prizeCards.clear();
+
+		if (this.prizeChestName !== undefined) {
+			this.prizeChestName.Text = spec.title;
+		}
+
+		// The tier summary, built from the same rows the chest section's stat column prints. The separator is a constant so
+		// the line reads as one string rather than as three labels fighting for a row.
+		if (this.prizeOddsLabel !== undefined) {
+			const parts = new Array<string>();
+			for (const row of spec.odds) {
+				parts.push(`${tierName(row.rarity)} ${this.formatPercent(row.percent)}`);
+			}
+			this.prizeOddsLabel.Text = parts.join(ODDS_SEPARATOR);
+		}
+
+		if (this.prizeChestBlock !== undefined) {
+			// The block is tinted per chest, so the paid one is not described by the coin chest's accent - the same
+			// distinction the two sections' outlines make. Both the well and its hairline move, because a tinted hairline on
+			// a neutral well is a 1-pixel difference nobody would see.
+			const tint = spec.kind === "premium" ? this.theme.colors.premium : this.theme.colors.accent;
+			this.prizeChestBlock.BackgroundColor3 = tint;
+			this.prizeChestBlock.BackgroundTransparency = 0.85;
+
+			const stroke = this.prizeChestBlock.FindFirstChildOfClass("UIStroke");
+			if (stroke !== undefined) {
+				stroke.Color = tint;
+			}
+		}
+
+		const grid = this.prizeGrid;
+		const empty = this.prizeEmpty;
+		if (grid === undefined || empty === undefined) {
+			return;
+		}
+
+		let order = 1;
+		for (const rarity of spec.rarities) {
+			for (const ballId of BALL_POOL[rarity]) {
+				this.prizeCards.push(this.buildPrizeCatalogCard(grid, ballId, rarity, order, spec));
+				order++;
+			}
+		}
+
+		const count = this.prizeCards.size();
+		if (this.prizeCountLabel !== undefined) {
+			// Derived, so adding a ball to `BALL_POOL` changes this line and adds a card with no code change here.
+			this.prizeCountLabel.Text = count === 1 ? "1 item" : `${count} items`;
+		}
+
+		// An empty pool is not a state `BALL_POOL` can be in today, but a grid of nothing is indistinguishable from a broken
+		// grid - so the box hides and one line says why.
+		grid.Visible = count > 0;
+		empty.Visible = count === 0;
+		empty.Text = count === 0 ? "This chest has no prizes configured." : "";
+	}
+
+	/**
+	 * One card in the catalog: art, name, rarity ring, and that ball's own chance.
+	 *
+	 * A `GuiButton` with the chunky chrome rather than a flat `Frame`, because it is the same object as a shelf card and the
+	 * style guide's rule is that a card is a control. Its `Activated` re-opens the view it is already in, which the guard in
+	 * `showPrizeView` makes a no-op - the alternative was a card that looks pressable (depth, hover, click sound) and
+	 * ignores the press, which is the state this round is removing from `View All`.
+	 */
+	private buildPrizeCatalogCard(
+		parent: Instance,
+		ballId: string,
+		rarity: Rarity,
+		order: number,
+		spec: ChestSpec,
+	): TextButton {
+		const tint = this.theme.colors.rarity[rarity];
+
+		const card = new Instance("TextButton");
+		card.Name = `Catalog_${ballId}`;
+		card.Size = UDim2.fromOffset(PRIZE_CARD_WIDTH, PRIZE_CARD_HEIGHT);
+		card.BorderSizePixel = 0;
+		card.AutoButtonColor = false;
+		card.Text = "";
+		card.LayoutOrder = order;
+		card.ZIndex = STORE_Z_INDEX + 3;
+		card.Parent = parent;
+
+		const chrome = applyChunkyChrome(card, {
+			color: this.theme.paint.card.color,
+			shadowColor: shadowOf(this.theme.paint.card.color),
+			zIndex: STORE_Z_INDEX + 3,
+			corner: SPACING.xs,
+		});
+
+		// The rarity, on its own frame. A second `UIStroke` on the face would silently replace the chunky outline - the
+		// failure `addChunkyRing` exists to prevent, and the reason both card builders in this file call it.
+		addChunkyRing(chrome.face, tint, HAIRLINE);
+
+		const art = new Instance("Frame");
+		art.Name = "Art";
+		art.Size = new UDim2(1, -SPACING.xs * 2, 0, PRIZE_CARD_ART);
+		art.Position = UDim2.fromOffset(SPACING.xs, SPACING.xs);
+		art.BackgroundColor3 = tint;
+		art.BackgroundTransparency = 0.84;
+		art.BorderSizePixel = 0;
+		art.ZIndex = STORE_Z_INDEX + 5;
+		art.Parent = chrome.face;
+
+		const artCorner = new Instance("UICorner");
+		artCorner.CornerRadius = new UDim(0, SPACING.xs);
+		artCorner.Parent = art;
+
+		const ball = new Instance("Frame");
+		ball.Name = "Ball";
+		ball.AnchorPoint = new Vector2(CENTRE, CENTRE);
+		ball.Position = UDim2.fromScale(CENTRE, CENTRE);
+		ball.Size = UDim2.fromOffset(SWATCH, SWATCH);
+		ball.BackgroundColor3 = tint;
+		ball.BorderSizePixel = 0;
+		ball.ZIndex = STORE_Z_INDEX + 6;
+		ball.Parent = art;
+
+		const ballCorner = new Instance("UICorner");
+		ballCorner.CornerRadius = ROUND;
+		ballCorner.Parent = ball;
+
+		const name = new Instance("TextLabel");
+		name.Name = "Name";
+		name.AnchorPoint = new Vector2(0.5, 1);
+		name.Position = new UDim2(0.5, 0, 1, -PANEL_TYPE.overline.lineHeight - SPACING.xs / 2);
+		name.Size = new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight);
+		name.BackgroundTransparency = 1;
+		name.Font = FONT;
+		name.TextSize = PANEL_TYPE.caption.size;
+		name.TextColor3 = this.theme.colors.textPrimary;
 		name.TextXAlignment = Enum.TextXAlignment.Center;
 		name.TextYAlignment = Enum.TextYAlignment.Center;
 		name.TextTruncate = Enum.TextTruncate.AtEnd;
+		name.Text = displayName(ballId);
+		name.ZIndex = STORE_Z_INDEX + 7;
+		name.Parent = chrome.face;
+
+		outlineText(name);
+
+		// The probability, in the tier's own colour so the number and the ring agree about what kind of ball it is.
+		const chance = new Instance("TextLabel");
+		chance.Name = "Chance";
+		chance.AnchorPoint = new Vector2(0.5, 1);
+		chance.Position = UDim2.fromScale(0.5, 1);
+		chance.Size = new UDim2(1, 0, 0, PANEL_TYPE.overline.lineHeight);
+		chance.BackgroundTransparency = 1;
+		chance.Font = FONT;
+		chance.TextSize = PANEL_TYPE.overline.size;
+		chance.TextColor3 = tint;
+		chance.TextXAlignment = Enum.TextXAlignment.Center;
+		chance.TextYAlignment = Enum.TextYAlignment.Center;
+		chance.TextTruncate = Enum.TextTruncate.AtEnd;
+		chance.Text = this.formatPercent(this.perBallPercent(spec, rarity));
+		chance.ZIndex = STORE_Z_INDEX + 7;
+		chance.Parent = chrome.face;
+
+		outlineText(chance);
+
+		attachPressFeedback(card);
+		attachClickSound(card);
+		card.Activated.Connect(() => this.showPrizeView(spec.kind));
+
+		return card;
 	}
+
+	// #endregion
 
 	/**
 	 * Purchase buttons: `Open 1` and `Open MAX_BULK_OPEN`, equal width, side by side.
@@ -2019,24 +2966,49 @@ export class ShopController implements OnStart {
 		this.chestButtons.push({ button, count, priceLabel: amount, actionLabel: top });
 	}
 
-	/** The yellow coin placeholder: a plain circle, because the tree ships no coin image. */
-	private coinDot(scope: Fusion.Scope<unknown>, parent: Instance, size: number, order: number): Frame {
-		const dot = Fusion.New(
+	/**
+	 * The coin: **the user's icon, at `COIN_SIZE` pixels** (item 154).
+	 *
+	 * ## What this replaced, and why the old reasoning is kept
+	 *
+	 * It was a `Frame` with a `UICorner` at `UDim.new(1, 0)` filled with `theme.colors.coin` — *"the yellow coin placeholder:
+	 * a plain circle, because the tree ships no coin image"*. That was true until the designer uploaded one, and the
+	 * placeholder is exactly what a placeholder is for: the two facts it encoded are worth keeping even though neither is
+	 * live. The shape was a circle because a circle reads as money in every icon set, and the colour was `colors.coin`
+	 * rather than a literal because "this is money" is a domain meaning (item 58).
+	 *
+	 * Both are now the asset's job. The **colour survives as a meaning but not as the coin's fill** — see
+	 * `theme.colors.coin` — and the circle survives only as a memory.
+	 *
+	 * ## Why the `UICorner` is gone and no stroke replaced it
+	 *
+	 * An image is its own shape; a corner radius on an `ImageLabel` would clip a picture that already has an outline drawn
+	 * into it. The **absence of a stroke is deliberate here and is the one place the three coin sites disagree**: this coin
+	 * sits inside a saturated price pill where an added edge was removed on purpose (item 58), and an icon carries its own.
+	 * The payout panel and the reward toast keep theirs, for the reason stated at each of them.
+	 *
+	 * ## `fromOffset`, not `fromScale`
+	 *
+	 * `COIN_SIZE` is a pixel count and this is a screen-space UI element inside a `UIListLayout`; `fromScale` would make it
+	 * a share of its row and the coin would change size with the pill. The same class of unit error item 145 found in the
+	 * sprite's billboard — the wrong `UDim2` component — one coordinate system over.
+	 */
+	private coinDot(scope: Fusion.Scope<unknown>, parent: Instance, size: number, order: number): ImageLabel {
+		return Fusion.New(
 			scope,
-			"Frame",
+			"ImageLabel",
 		)({
 			Name: "Coin",
 			Size: UDim2.fromOffset(size, size),
-			BackgroundColor3: this.theme.colors.coin,
+			BackgroundTransparency: 1,
 			BorderSizePixel: 0,
+			Image: coinIconUri(),
+			ScaleType: Enum.ScaleType.Fit,
+			ImageTransparency: 0,
 			LayoutOrder: order,
 			ZIndex: STORE_Z_INDEX + 5,
 			Parent: parent,
 		});
-
-		this.corners(scope, dot, 0, ROUND);
-
-		return dot;
 	}
 
 	// #endregion
@@ -2126,6 +3098,14 @@ export class ShopController implements OnStart {
 	private drivePrizeShelf(): void {
 		RunService.RenderStepped.Connect((dt) => {
 			if (this.open !== "shop") {
+				return;
+			}
+
+			// **Nothing to scroll while the catalog is showing (item 155).** The shelves are children of the band the expanded
+			// view hides, so they are off screen - and their `Visible` property is still `true`, because hiding an ancestor does
+			// not write it. Two shelf loops running behind a hidden band is not a bug, but it is work for nothing, and a reader
+			// who sees the check will know that.
+			if (this.expandedChest !== undefined) {
 				return;
 			}
 

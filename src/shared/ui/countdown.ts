@@ -25,6 +25,16 @@
  * The **look** - how far the sweep goes, what easing, what colour. Those live in the controller, because they are one
  * controller's presentation. What lives here is *when*, which is a fact about the sequence and the only part that can be
  * reasoned about without a screen.
+ *
+ * ## Why the five durations live here rather than in the controller (item 156)
+ *
+ * Because the sequence's **length** stopped being one controller's private business. `RoundSongController` starts the
+ * round song's fade-in the moment the countdown begins, so that the music is up when the race is rather than arriving two
+ * seconds after it — and "the moment the countdown begins" is `PlayingDeadline - COUNTDOWN_SECONDS`. Two files now need
+ * that number, and a second copy of it in the song controller is how the music would come to start a hundred milliseconds
+ * before or after the `3` appeared, on whichever round somebody last retuned one of the four and not the other.
+ *
+ * So the durations are exported beside the sequence they describe, and both callers import the sum.
  */
 
 /**
@@ -33,7 +43,7 @@
  */
 const COUNTDOWN_CAPTIONS: Array<string> = ["3", "2", "1", "Start!"];
 
-/** How long each kind of step lasts. Every value is the caller's, because every one of them is a tuned number. */
+/** How long each kind of step lasts. Every value is a tuned number; see `COUNTDOWN_TIMING` for what each one does. */
 export interface CountdownTiming {
 	/** A caption being swept off screen: the outgoing half of a change. */
 	readonly outSeconds: number;
@@ -136,3 +146,59 @@ export function countdownStepIndex(steps: Array<CountdownStep>, elapsedSeconds: 
 
 	return found;
 }
+
+// #region the shipped timing (item 156)
+
+/**
+ * **Placeholder.** Seconds for a caption to be swept off: scale 1 → 1.85, transparency 0 → 1.
+ *
+ * The outgoing half is the shorter of the two on purpose. It is the *leave*, and a leave that takes as long as the arrive
+ * makes the sequence read as a slideshow rather than as something being shoved out of the way.
+ *
+ * **Raised from `0.15` to `0.2` in item 152**, with the inbound half, when the caller reported the countdown as too fast.
+ * The pair are still the 2:1 ratio the original brief specified — the leave stays the shorter of the two — so the
+ * proportions of the motion are unchanged and only its tempo is.
+ */
+export const CAPTION_OUT_SECONDS = 0.2;
+
+/**
+ * **Placeholder.** Seconds for the next caption to rush in.
+ *
+ * **Raised from `0.2` to `0.4` in item 152.** At `0.2` a caption had no readable moment at all: the inbound tween finished
+ * exactly where the outbound one began, so each digit was only fully legible for the single frame it landed on. `0.4` is
+ * roughly the time it takes to read one glyph comfortably, and it is the number to move if the countdown still reads as a
+ * flicker rather than a count.
+ *
+ * A caption's visible moment is this plus the `out` step that follows it, which is why the pair moved together.
+ */
+export const CAPTION_IN_SECONDS = 0.4;
+
+/** **Placeholder.** Seconds `Start!` is held at rest before it fades. */
+export const START_HOLD_SECONDS = 0.6;
+
+/**
+ * **Placeholder.** Seconds `Start!` takes to fade. **No zoom on this one** — the race is about to begin and a scaling glyph
+ * would still be moving as the belt starts.
+ */
+export const START_FADE_SECONDS = 0.25;
+
+/** The four durations as one value, because `countdownSteps` builds the timeline from exactly these. */
+export const COUNTDOWN_TIMING: CountdownTiming = {
+	outSeconds: CAPTION_OUT_SECONDS,
+	inSeconds: CAPTION_IN_SECONDS,
+	holdSeconds: START_HOLD_SECONDS,
+	fadeSeconds: START_FADE_SECONDS,
+};
+
+/**
+ * **How long the whole sequence takes, in seconds** — about `3.05` at the shipped durations.
+ *
+ * Derived from the table rather than summed here, for the reason the countdown's own start time depends on it: a literal
+ * that drifted from `countdownSteps` would put the sequence either inside the picker's window or past the phase change.
+ *
+ * **Two readers, which is why it is exported:** `CountdownController` uses it to place the sequence before
+ * `PlayingDeadline`, and `RoundSongController` uses it to start the song's fade-in at the same instant (item 156).
+ */
+export const COUNTDOWN_SECONDS = countdownDuration(countdownSteps(COUNTDOWN_TIMING));
+
+// #endregion
