@@ -36,6 +36,7 @@ import { ROUND_TRANSITION_ATTRIBUTE, TRANSITION_NETWORK_STEP } from "shared/cons
 import { TRANSITION_CONFIG, coverSeconds, holdSeconds, openSeconds } from "shared/config/transition.config";
 import {
 	BELT_RAMP_SECONDS,
+	ENROLLMENT_CUTOFF_SECONDS,
 	INTERMISSION_SECONDS,
 	PICKER_WINDOW_SECONDS,
 	POST_GAME_SECONDS,
@@ -193,6 +194,46 @@ export class RoundService implements OnStart {
 	/** The linear ramp's frame connection. `undefined` whenever the belt is not ramping. */
 	private rampConnection?: RBXScriptConnection;
 
+	// #region enrollment (item 159)
+
+	/**
+	 * **Who is in the next round**, as `UserId`s. One set, one owner, memory only.
+	 *
+	 * ## Why this exists at all
+	 *
+	 * The competitor list is decided at `Waiting` entry, from `Players.GetPlayers()` at that instant — thirty seconds after the
+	 * lobby began. Everything between those two moments is a hole a joiner falls into: they arrive, see a lobby, and get a body
+	 * in a round whose countdown they never saw. This set is the other half of that rule: a player is a competitor if they were
+	 * connected before the last `ENROLLMENT_CUTOFF_SECONDS` of `Intermission`, and otherwise spectates this one.
+	 *
+	 * ## Why it is a running set and not a snapshot
+	 *
+	 * The alternative — freeze the list at the cutoff — records "was here at end − 5 s" instead of "is here now", and a
+	 * snapshot cannot answer the question it exists to answer: somebody who arrived at end − 10 s and left at end − 3 s is in
+	 * a snapshot and would be spawned as a body whose player is gone. Membership is therefore live: `PlayerAdded` adds while
+	 * the window is open, `PlayerRemoving` always removes.
+	 *
+	 * ## Why the *window* is a separate flag and not "is the set non-empty"
+	 *
+	 * The set keeps its members after the window closes — that is what makes a `UserId` in it meaningful at spawn time — so
+	 * "open" cannot be inferred from its contents. `enrollmentOpen` is the gate; the set is the record.
+	 */
+	private readonly enrolledUserIds = new Set<number>();
+
+	/**
+	 * Bumped every time a window opens, so a close callback armed by a previous window cannot close this one.
+	 *
+	 * Same guard shape as `generation`, and needed for the same reason the timer loop needs it: the zero-player re-arm opens a
+	 * **new** window inside the same `Intermission`, so the previous window's `task.delay` is still pending and will fire after
+	 * the new one has already closed — which would reopen nothing and silently end the new window five seconds early.
+	 */
+	private enrollmentGeneration = 0;
+
+	/** Whether `PlayerAdded` currently enrolls. Opened by `openEnrollmentWindow`, closed by that window's own timer. */
+	private enrollmentOpen = false;
+
+	// #endregion
+
 	/** True once the "no zone" warning has been said for the current round. */
 	private warnedNoZone = false;
 
@@ -299,6 +340,13 @@ export class RoundService implements OnStart {
 		this.createRoundPayoutRemote();
 		this.createRoundStateValue();
 
+		// **Connected before the first window opens.** `startIntermissionTimer` seeds the enrollment set from the players
+		// already here, so these two handlers are only ever needed for arrivals and departures *after* this line. Binding them
+		// first nonetheless means there is no window in which a connection could happen with no listener: a handler that
+		// arrives a millisecond later is a joiner who is a competitor by the seed and would never be removed.
+		Players.PlayerAdded.Connect((player) => this.enrollOnJoin(player));
+		Players.PlayerRemoving.Connect((player) => this.enrolledUserIds.delete(player.UserId));
+
 		// The first `[Round]` line a fresh server prints must name the phase it is in, not the one it is
 		// leaving, so it is a state line rather than an arrow. `Intermission` is the initial value of
 		// `this.phase`, so there is no transition to log — only the announcement.
@@ -368,7 +416,7 @@ export class RoundService implements OnStart {
 		this.clearAllBodies("debug key 2");
 		this.resetSyntheticCounter();
 
-		const spawned = this.startWaitingRound(reason);
+		const spawned = this.startWaitingRound(reason, false);
 
 		// **Bots, but only where `startWaitingRound` did not already add them (item 150).**
 		//
@@ -423,7 +471,7 @@ export class RoundService implements OnStart {
 			this.clearAllBodies("debug key 3 restart");
 			this.resetSyntheticCounter();
 
-			const restarted = this.spawnRoundCompetitors("debug key 3 restart", true);
+			const restarted = this.spawnRoundCompetitors("debug key 3 restart", false, true);
 			if (restarted === 0) {
 				// `spawnRoundCompetitors` already printed the reason (no players, or no spawners). Staying in
 				// `Playing` with an empty belt is the honest outcome: the round is running and has nothing to
@@ -460,7 +508,7 @@ export class RoundService implements OnStart {
 		this.clearAllBodies("debug key 3");
 		this.resetSyntheticCounter();
 
-		const spawned = this.spawnRoundCompetitors(reason, true);
+		const spawned = this.spawnRoundCompetitors(reason, false, true);
 		if (spawned === 0) {
 			// `spawnRoundCompetitors` already logged why. Staying put is the only honest outcome: entering
 			// `Playing` with nothing to race is the 21:42 failure, and clearing again here would destroy
@@ -500,6 +548,13 @@ export class RoundService implements OnStart {
 	 * one call wide and the reading is the one that matters: the players who exist at the moment bodies are
 	 * made.
 	 *
+	 * **That read is no longer the only thing the list is made of (item 159).** `Players.GetPlayers()` is still
+	 * the source, but on the automatic path it is filtered by `enrolledUserIds` first, so a player who connected
+	 * inside the last `ENROLLMENT_CUTOFF_SECONDS` of `Intermission` — or during `Waiting` — is connected and
+	 * still not a competitor. The filter is the caller's decision rather than this function's, which is why it
+	 * arrives as `useEnrollment` and not as a branch on `reason`: a reason string is a log line, and the
+	 * automatic timer and the `2` key pass different policies through the same words.
+	 *
 	 * ## Capped, not wrapped
 	 *
 	 * Two players cannot share a lane — they would spawn inside each other and the round would read as one
@@ -515,13 +570,38 @@ export class RoundService implements OnStart {
 	 * `true` gives every competitor a drawn id instead, which is a *debug* affordance and must not become the fallback:
 	 * defaulting it on would let a real round with a missing offer race a random ball rather than the one on the player's
 	 * screen.
+	 *
+	 * ## Why `useEnrollment` has no default
+	 *
+	 * A default is a policy nobody wrote down. `false` would make every future caller silently exempt from the cutoff — the
+	 * bug this item exists to fix — and `true` would make a caller that forgot it spawn nobody in an empty lobby. So every
+	 * call site states its answer, and the compiler is what remembers for the next one.
 	 */
-	public spawnRoundCompetitors(reason: string, drawBallIds = false): number {
-		const players = Players.GetPlayers();
+	public spawnRoundCompetitors(reason: string, useEnrollment: boolean, drawBallIds = false): number {
+		const connected = Players.GetPlayers();
+		const players = useEnrollment
+			? connected.filter((player) => this.enrolledUserIds.has(player.UserId))
+			: connected;
+
+		// **Said before the refusal below, because it changes what a refusal means.** "no players connected" and "players
+		// connected but none enrolled" are the same zero and completely different situations, and the second is the one that
+		// needs the log.
+		const skipped = connected.size() - players.size();
+		if (skipped > 0) {
+			print(`[Round] spawn skipped not-enrolled=${skipped} of ${connected.size()} connected (${reason})`);
+		}
+
 		const wanted = players.size();
 
 		if (wanted === 0) {
-			print(`[Round] spawn refused — no players connected (${reason})`);
+			// **Two different zeros, two different lines.** "nobody is here" and "somebody is here and is not in this round" produce
+			// the same refusal and want opposite responses from whoever reads it — the first is a server waiting for a player, the
+			// second is a player watching a round they will not be in.
+			print(
+				connected.size() > 0
+					? `[Round] spawn refused — ${connected.size()} connected, none enrolled (${reason})`
+					: `[Round] spawn refused — no players connected (${reason})`,
+			);
 			return 0;
 		}
 
@@ -574,7 +654,14 @@ export class RoundService implements OnStart {
 				print(`[Picker] spawn player=${player.Name} ball=${chosen}`);
 			}
 
-			print(`[Round] spawn lane=${lane} owner=${owner.displayName}(${owner.userId}) body=${ball.GetFullName()}`);
+			// **`enrolled=` is the fact, not the decision.** The filter above dropped a non-enrolled player before this line, so
+			// on the automatic path every body here reads `enrolled=true`. It is the debug paths, which bypass the filter, that
+			// make the field worth printing: a `false` on a body means a debug key put it there, and the alternative — a field
+			// that is always `true` where it appears — is a field a reader would stop trusting.
+			const enrolled = this.enrolledUserIds.has(owner.userId);
+			print(
+				`[Round] spawn lane=${lane} owner=${owner.displayName}(${owner.userId}) enrolled=${tostring(enrolled)} body=${ball.GetFullName()}`,
+			);
 		}
 
 		return spawned;
@@ -911,6 +998,11 @@ export class RoundService implements OnStart {
 
 		this.treadmill.setBeltSpeed(0);
 
+		// **The enrollment window ends with the lobby (item 159).** Usually the cutoff already closed it five seconds ago; this
+		// is for the debug press that leaves `Intermission` early and would otherwise leave the flag saying "open" through the
+		// whole of `Waiting`. Idempotent, so the ordinary path prints nothing here.
+		this.closeEnrollmentWindow();
+
 		print(`[Round] ${from} → Waiting (${reason}, competitors=${competitors})`);
 		this.publishPhase();
 
@@ -1215,6 +1307,101 @@ export class RoundService implements OnStart {
 	}
 
 	/**
+	 * Opens the enrollment window for one `Intermission`, and schedules its close.
+	 *
+	 * ## Called from the timer, not from `enterIntermission`
+	 *
+	 * That is the one place every `Intermission` passes through: `onStart` arms the timer directly without entering the phase
+	 * (the boot state *is* `Intermission`), `enterIntermission` arms it, and — the case that decides it — **the zero-player
+	 * re-arm loops inside the same timer task and never re-enters the phase at all**. Opening the window in
+	 * `enterIntermission` would therefore leave a re-armed lobby with a closed window for ever: `PlayerAdded` would stop
+	 * enrolling, the first joiner would never be a competitor, `startWaitingRound` would return zero, and the timer would
+	 * re-arm again. A deadlock whose log reads as "waiting for a player" while a player is standing in the lobby.
+	 *
+	 * ## The seed
+	 *
+	 * Every connected player is enrolled at open, because somebody already here when the lobby starts is not a late joiner.
+	 * Without the seed the rule would be "did you connect during this thirty seconds", which is not the rule — it would
+	 * exclude the very players the lobby is for.
+	 *
+	 * ## The guard the close needs
+	 *
+	 * A re-arm opens a second window while the first window's close is still pending, so the callback compares its captured
+	 * generation before acting. A `task.delay` that cannot be cancelled is fine as long as it is harmless when it fires.
+	 */
+	private openEnrollmentWindow(spanSeconds: number): void {
+		this.enrollmentGeneration++;
+		const generation = this.enrollmentGeneration;
+
+		this.enrolledUserIds.clear();
+		this.enrollmentOpen = true;
+
+		let seeded = 0;
+		for (const player of Players.GetPlayers()) {
+			this.enrolledUserIds.add(player.UserId);
+			seeded++;
+		}
+
+		print(`[Enrollment] window open generation=${generation} seeded=${seeded}`);
+
+		// `max` and not a bare subtraction: a future tuning pass that made the cutoff longer than the phase would otherwise
+		// schedule a negative delay, which the engine clamps to "now" — a window that closes in the same frame it opens, with
+		// no line saying why.
+		const delay = math.max(0, spanSeconds - ENROLLMENT_CUTOFF_SECONDS);
+
+		task.delay(delay, () => {
+			if (generation !== this.enrollmentGeneration) {
+				return;
+			}
+
+			this.closeEnrollmentWindow();
+		});
+	}
+
+	/**
+	 * Closes the window: no further joins enroll. **Idempotent, and that is what lets two callers exist.**
+	 *
+	 * The scheduled close is the real one — it is the cutoff — but `enterWaiting` closes it too, because a debug press can leave
+	 * `Intermission` long before the cutoff arrives and a flag that says "open" while the phase is `Waiting` is a lie waiting
+	 * to be read as a bug. The second caller finds `enrollmentOpen` already false and says nothing, so one window produces one
+	 * line whichever path got there first.
+	 *
+	 * **The set is deliberately not cleared.** It is what `enrolled=` on the spawn line is read from, and the spawn happens
+	 * before this — but more importantly a cleared set would make every later spawn report `enrolled=false`, including the
+	 * bodies spawned by a debug key, which is the case that field exists to distinguish. The gate is `enrollmentOpen`, not the
+	 * set's contents; the next `Intermission` clears it when it seeds.
+	 */
+	private closeEnrollmentWindow(): void {
+		if (!this.enrollmentOpen) {
+			return;
+		}
+
+		this.enrollmentOpen = false;
+
+		print(
+			`[Enrollment] window closed generation=${this.enrollmentGeneration} enrolled=${this.enrolledUserIds.size()} cutoff=${ENROLLMENT_CUTOFF_SECONDS}s`,
+		);
+	}
+
+	/**
+	 * `PlayerAdded`: enroll while the window is open, and say why not when it is closed.
+	 *
+	 * **The log line is the point of this method.** A late joiner's client looks identical to an enrolled player's for the
+	 * whole of `Waiting` — same lobby, same picker (or not), no lane — so "why am I not racing" otherwise has no answer in the
+	 * log at all. It fires once per join, which for a `PlayerAdded` handler is once per connection.
+	 */
+	private enrollOnJoin(player: Player): void {
+		if (!this.enrollmentOpen) {
+			print(
+				`[Enrollment] late join "${player.Name}" (generation=${this.enrollmentGeneration}) — spectating until next Intermission`,
+			);
+			return;
+		}
+
+		this.enrolledUserIds.add(player.UserId);
+	}
+
+	/**
 	 * Arms the `Intermission → Waiting` timer, re-arming itself while the server is empty.
 	 *
 	 * **Zero players means the timer restarts rather than advancing.** A server that has been empty for an
@@ -1241,8 +1428,16 @@ export class RoundService implements OnStart {
 			// always runs its full duration before the first check.
 			let first = true;
 			while (this.phase === "Intermission" && generation === this.generation) {
-				task.wait(INTERMISSION_SECONDS + (first ? hold : 0));
+				// **The enrollment window is opened per iteration, not once outside the loop (item 159).** The re-arm path below
+				// is a `continue` inside this loop and never re-enters `enterIntermission`, so a window opened at phase entry
+				// would be closed for the second lobby onwards — and the first joiner after an empty spell would never be a
+				// competitor, which reads in the log as "waiting for a player" while one is standing in the lobby.
+				const span = INTERMISSION_SECONDS + (first ? hold : 0);
 				first = false;
+
+				this.openEnrollmentWindow(span);
+
+				task.wait(span);
 
 				if (this.phase !== "Intermission" || generation !== this.generation) {
 					return;
@@ -1264,7 +1459,10 @@ export class RoundService implements OnStart {
 				// `Waiting` timer would refuse forever. A refusal from the spawn (a player who left between
 				// the check above and this call) re-arms `Intermission` instead, which is where a server with
 				// nobody watching belongs.
-				const spawned = this.startWaitingRound("intermission elapsed");
+				//
+				// **`true`: this is the automatic path, so the enrollment cutoff applies (item 159).** The debug keys pass
+				// `false` and spawn everybody, because a Studio test wants every connected player on a lane.
+				const spawned = this.startWaitingRound("intermission elapsed", true);
 				if (spawned === 0) {
 					print(
 						`[Round] Intermission timer restarted — no competitors spawned, another ${INTERMISSION_SECONDS}s`,
@@ -1938,11 +2136,18 @@ export class RoundService implements OnStart {
 	 *
 	 * There are two ways into `Waiting` — the `1` key and the intermission timer — and "roll the offers" appearing twice is
 	 * how one path ends up without them. Both call this.
+	 *
+	 * ## `useEnrollment`, and why the offers follow it (item 159)
+	 *
+	 * The automatic timer passes `true` and the `2` key passes `false`, and the flag travels to **both** halves: the spawn
+	 * filters on the enrollment set, and the offers skip anyone who is not in it. A player the round has decided not to
+	 * enroll must not be handed a "choose your ball" panel either — a panel for a body that will never exist is the same lie
+	 * as a lane they are not on, and it is the more visible of the two.
 	 */
-	private startWaitingRound(reason: string): number {
-		this.openOffers();
+	private startWaitingRound(reason: string, useEnrollment: boolean): number {
+		this.openOffers(useEnrollment);
 
-		const spawned = this.spawnRoundCompetitors(reason);
+		const spawned = this.spawnRoundCompetitors(reason, useEnrollment);
 
 		// **A solo Studio session gets company, automatically (item 150).** Without this, a Studio playtest is one player's
 		// body and item 72 declares it the winner on the first tick — which is not a round, and which made key `4` inside the
@@ -2008,10 +2213,17 @@ export class RoundService implements OnStart {
 	 * measured from the roll (i.e. from behind the transition wipe) and left a hole before the countdown. The roll stays here
 	 * because the *body* needs it; the deadline travels with the announcement.
 	 */
-	private openOffers(): void {
+	private openOffers(useEnrollment: boolean): void {
 		this.offers.clear();
 
 		for (const player of Players.GetPlayers()) {
+			// **A spectator is not offered a ball (item 159).** See `startWaitingRound` for why the flag reaches this half of
+			// the entry as well as the spawn.
+			if (useEnrollment && !this.enrolledUserIds.has(player.UserId)) {
+				print(`[Picker] offer skipped player=${player.Name} (not enrolled this round)`);
+				continue;
+			}
+
 			const offer = this.generateOfferFor(player);
 			if (offer === undefined) {
 				continue;

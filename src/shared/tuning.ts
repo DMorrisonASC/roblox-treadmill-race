@@ -329,6 +329,38 @@ export const WAITING_SECONDS = 15;
 export const PICKER_WINDOW_SECONDS = 11;
 
 /**
+ * **Placeholder.** How long before `Intermission` ends a player must already be connected to be enrolled in the next round,
+ * in seconds.
+ *
+ * ## What it exists for
+ *
+ * The competitor list is decided at `Waiting` entry (`spawnRoundCompetitors`), which is `INTERMISSION_SECONDS` after
+ * `Intermission` begins — and `Waiting` itself does not spawn anyone who joins during it. So without a cutoff a player could
+ * arrive with two seconds of lobby left, be handed a body, and race a round they never saw announced; and a player arriving
+ * twenty-nine seconds in would get the same treatment. The cutoff says: **you are in this round if you were here before the
+ * last five seconds of the lobby**, and otherwise you watch it and play the next one (item 159).
+ *
+ * ## Why five, and why it is not the wipe's length
+ *
+ * The transition wipe covers `Intermission → Waiting` and holds for roughly 2.5 s, all of it inside this window, so a player
+ * joining under the wipe is *always* inside the cutoff and never enrolled. That is the intended reading — the wipe is the
+ * last moment of the lobby, and somebody arriving under it has not seen the lobby at all — but it means the constant must be
+ * comfortably larger than the hold, or the rule would be "the wipe decides". Five is twice the hold, so a client that arrives
+ * just as the wipe opens is still (correctly) excluded while a client that arrives a second and a half earlier was already
+ * excluded by the cutoff itself rather than by an effect.
+ *
+ * ## Why it is a separate constant from `PICKER_WINDOW_SECONDS`
+ *
+ * They are two different questions about the same phase — "can you still choose a ball" and "are you in this round at all" —
+ * and they are answered in opposite order: the pick window opens *after* the cutoff closes. Sharing one number would tie the
+ * enrollment rule to the countdown's arithmetic and move both whenever either was retuned.
+ *
+ * This is a duration, not an instant, and it is subtracted from the phase's whole length (including any wipe hold) so that
+ * the window is the same five seconds regardless of whether the lobby arrived behind a transition.
+ */
+export const ENROLLMENT_CUTOFF_SECONDS = 5;
+
+/**
  * **Placeholder.** Seconds for the belt to reach full speed once `Playing` begins.
  *
  * Linear, not eased. A linear ramp means the acceleration is constant and identical for every ball
