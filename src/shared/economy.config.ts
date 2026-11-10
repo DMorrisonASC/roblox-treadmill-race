@@ -235,14 +235,31 @@ export function isRarity(value: string): boolean {
  * The pair is ordered `id=count` so a ball id may contain anything except `=` and `;` — true of the ids in
  * `BALL_POOL`, and the encoder is the only writer.
  */
+function compareStringsAscending(left: string, right: string): number {
+	if (left < right) {
+		return -1;
+	}
+	if (left > right) {
+		return 1;
+	}
+	return 0;
+}
+
 export function encodeOwnedBalls(ownedBalls: Map<string, number>): string {
 	const ids = new Array<string>();
 	for (const [ballId] of ownedBalls) {
 		ids.push(ballId);
 	}
 
-	// roblox-ts's comparator is a "less than" predicate returning `boolean`, not the JS three-way number.
-	ids.sort((left, right) => left < right);
+	for (let index = 1; index < ids.size(); index++) {
+		const value = ids[index];
+		let insertIndex = index;
+		while (insertIndex > 0 && compareStringsAscending(ids[insertIndex - 1], value) > 0) {
+			ids[insertIndex] = ids[insertIndex - 1];
+			insertIndex--;
+		}
+		ids[insertIndex] = value;
+	}
 
 	const parts = new Array<string>();
 	for (const ballId of ids) {

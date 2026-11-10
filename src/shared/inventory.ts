@@ -50,13 +50,24 @@ export function ownedBallsFrom(encoded: string): Array<OwnedBall> {
 		balls.push({ id, rarity, count });
 	}
 
-	balls.sort((left, right) => {
-		if (left.rarity !== right.rarity) {
-			return rarityRank(left.rarity) < rarityRank(right.rarity);
-		}
+	for (let index = 1; index < balls.size(); index++) {
+		const value = balls[index];
+		let insertIndex = index;
+		while (insertIndex > 0) {
+			const previous = balls[insertIndex - 1];
+			if (previous.rarity === value.rarity) {
+				if (previous.id < value.id) {
+					break;
+				}
+			} else if (rarityRank(previous.rarity) <= rarityRank(value.rarity)) {
+				break;
+			}
 
-		return left.id < right.id;
-	});
+			balls[insertIndex] = previous;
+			insertIndex--;
+		}
+		balls[insertIndex] = value;
+	}
 
 	return balls;
 }

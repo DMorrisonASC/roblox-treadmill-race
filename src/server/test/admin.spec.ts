@@ -49,7 +49,15 @@ function snapshot(profile: Profile): string {
 	}
 
 	// Sorted, so a restore that refilled the map in a different order is not reported as a change when it is not one.
-	ids.sort((left, right) => left < right);
+	for (let index = 1; index < ids.size(); index++) {
+		const value = ids[index];
+		let insertIndex = index;
+		while (insertIndex > 0 && ids[insertIndex - 1] > value) {
+			ids[insertIndex] = ids[insertIndex - 1];
+			insertIndex--;
+		}
+		ids[insertIndex] = value;
+	}
 
 	return `${profile.coins}|${ids.join(",")}|${profile.purchases.join(",")}`;
 }

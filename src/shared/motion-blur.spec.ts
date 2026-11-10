@@ -163,7 +163,7 @@ describe("motionBlurAnchor", () => {
 		expect(math.round(anchor.Position.Z)).toBe(7);
 
 		// And the basis is the zone's, not the identity.
-		expect(math.round(anchor.RightVector.X)).toBe(0);
+		expect(math.abs(anchor.RightVector.X) < 1e-6).toBe(true);
 		expect(math.round(anchor.RightVector.Z)).toBe(-1);
 	});
 });

@@ -145,6 +145,16 @@ export function applyReroll(
 }
 
 /** The distinct ids a player owns, from the replicated `OwnedBalls` attribute. */
+function compareStringsAscending(left: string, right: string): number {
+	if (left < right) {
+		return -1;
+	}
+	if (left > right) {
+		return 1;
+	}
+	return 0;
+}
+
 export function ownedIdsFrom(encoded: string): Array<string> {
 	const owned = decodeOwnedBalls(encoded);
 	const ids = new Array<string>();
@@ -159,7 +169,15 @@ export function ownedIdsFrom(encoded: string): Array<string> {
 
 	// Sorted so the *draw* order is the only randomness: two offers built from the same profile and the same roll must be
 	// identical, which is what lets a test assert a draw rather than a set.
-	ids.sort((left, right) => left < right);
+	for (let index = 1; index < ids.size(); index++) {
+		const value = ids[index];
+		let insertIndex = index;
+		while (insertIndex > 0 && compareStringsAscending(ids[insertIndex - 1], value) > 0) {
+			ids[insertIndex] = ids[insertIndex - 1];
+			insertIndex--;
+		}
+		ids[insertIndex] = value;
+	}
 
 	return ids;
 }

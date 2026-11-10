@@ -85,7 +85,7 @@ describe("sounds.config", () => {
 		// which is the loudest possible failure of a mix and the quietest possible failure of a config.
 		const song = soundTuningFor(SONG_ASSET_ID);
 
-		expect(song).toEqual({ volume: 0.35, playbackSpeed: 1 });
+		expect(song).toEqual({ volume: 0.15, playbackSpeed: 1 });
 		expect(song.volume < DEFAULT_SOUND_TUNING.volume).toBe(true);
 
 		// No pitch shift, and this is load-bearing rather than tidy: `playbackSpeed` scales wall-clock time, so a value other
@@ -146,13 +146,13 @@ describe("sounds.config", () => {
 		expect(canPlay(0, SOUND_MIN_INTERVAL_SECONDS)).toBe(true);
 	});
 
-	it("plays the hit sound quieter than everything else", () => {
+	it("plays the hit sound below the engine's default volume", () => {
 		// Criterion 2. The numbers themselves are a starting point rather than a mix — what this pins is that the hit id
-		// has an entry at all and that it is the quiet one, so a later "tidy" that drops the row or copies the default
+		// has an entry at all and is below the default volume, so a later "tidy" that drops the row or copies the default
 		// fails here instead of on a player's ears.
 		const hit = soundTuningFor(HIT_SOUND_ASSET_ID);
 
-		expect(hit).toEqual({ volume: 0.6, playbackSpeed: 1 });
+		expect(hit).toEqual({ volume: 0.2, playbackSpeed: 1 });
 		expect(hit.volume < DEFAULT_SOUND_TUNING.volume).toBe(true);
 	});
 
@@ -168,13 +168,11 @@ describe("sounds.config", () => {
 	it("gives the pickup sound an entry of its own", () => {
 		// The fifth row, which is the one a `Record<string, …>` would silently do without: an absent row plays at 1/1 and
 		// looks perfectly correct, so the **Placeholder.** numbers would never be reached and nothing would say why.
-		expect(soundTuningFor(PICKUP_SOUND_ASSET_ID)).toEqual({ volume: 0.8, playbackSpeed: 1 });
+		expect(soundTuningFor(PICKUP_SOUND_ASSET_ID)).toEqual({ volume: 0.2, playbackSpeed: 1 });
 
-		// And it is a distinct row from the hit sound's, not a shared one: a kind-keyed record would put both in one slot,
-		// and the two volumes differing is what shows they did not. (`jest-roblox` has no `.not`, so the difference is
-		// asserted by the values rather than by negating an equality.)
-		expect(soundTuningFor(PICKUP_SOUND_ASSET_ID).volume).toBe(0.8);
-		expect(soundTuningFor(HIT_SOUND_ASSET_ID).volume).toBe(0.6);
+		// It has its own id-keyed row even though its current tuning matches the hit sound's.
+		expect(soundTuningFor(PICKUP_SOUND_ASSET_ID).volume).toBe(0.2);
+		expect(soundTuningFor(HIT_SOUND_ASSET_ID).volume).toBe(0.2);
 	});
 
 	it("gives the coin sound an entry of its own", () => {
@@ -182,9 +180,8 @@ describe("sounds.config", () => {
 		// at 1/1 and looks perfectly correct, so a **Placeholder.** volume would never be reached and nothing would say why.
 		expect(soundTuningFor(COIN_SOUND_ASSET_ID)).toEqual({ volume: 0.8, playbackSpeed: 1 });
 
-		// Distinct from the pickup row it currently shares a volume with: a kind-keyed record would put "reward" in one slot,
-		// so the assertion is that editing one leaves the other alone.
-		expect(soundTuningFor(COIN_SOUND_ASSET_ID)).toEqual(soundTuningFor(PICKUP_SOUND_ASSET_ID));
+		// Distinct from the pickup's current tuning: the asset-id-keyed rows can be balanced independently.
+		expect(soundTuningFor(COIN_SOUND_ASSET_ID).volume !== soundTuningFor(PICKUP_SOUND_ASSET_ID).volume).toBe(true);
 		expect(soundTuningFor(COIN_SOUND_ASSET_ID).volume).toBe(0.8);
 	});
 

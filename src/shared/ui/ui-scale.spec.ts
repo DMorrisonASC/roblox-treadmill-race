@@ -33,7 +33,7 @@ describe("panelScaleFor", () => {
 	it("fits a landscape phone by the height, because that is the axis that binds", () => {
 		// A 844 × 390 phone is wide and short: `844 * 0.92 / 880 = 0.88` by width but `390 * 0.9 / 466 = 0.75` by height. Taking the
 		// width would draw a 774 × 410 store through a 390-pixel-tall window — cut off, which is the reported bug in one dimension.
-		expect(panelScaleFor(new Vector2(844, 390), STORE_DESIGN)).toBe((390 * 0.9) / 466);
+		expect(math.abs(panelScaleFor(new Vector2(844, 390), STORE_DESIGN) - (390 * 0.9) / 466) < 1e-6).toBe(true);
 
 		// Stated as the comparison it is, so an inverted `min` fails here even if the fraction above is retuned.
 		expect(panelScaleFor(new Vector2(844, 390), STORE_DESIGN) < (844 * 0.92) / 880).toBe(true);
@@ -75,7 +75,9 @@ describe("panelScaleFor", () => {
 		// `AutomaticSize` has not resolved. The cheap implementation divides by zero and every panel vanishes; **a zero is "not
 		// saying", not "infinitely small"**.
 		expect(panelScaleFor(new Vector2(0, 0), STORE_DESIGN)).toBe(1);
-		expect(panelScaleFor(new Vector2(844, 390), new Vector2(880, 0))).toBe((844 * 0.92) / 880);
+		expect(math.abs(panelScaleFor(new Vector2(844, 390), new Vector2(880, 0)) - (844 * 0.92) / 880) < 1e-6).toBe(
+			true,
+		);
 		expect(panelScaleFor(new Vector2(0, 1080), new Vector2(0, 466))).toBe(1);
 	});
 

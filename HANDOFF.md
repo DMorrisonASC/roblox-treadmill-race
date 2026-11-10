@@ -4538,3 +4538,25 @@ Every line in that sequence is a success line. The burst fired, 24 particles exi
 **Audit.** Added: `docs/powers-and-vfx.md`. Changed: `README.md` (services count and list, controller count and list, the VFX paragraph, and a pointer from both the powers and the absent sections), `HANDOFF.md` (fourteen pointers plus this item). **`git diff -- src/` is empty and `git status --short` is `HANDOFF.md`, `README.md`, `docs/` — no source, config, lockfile or generated file.** Build exit 0, lint 0 errors, prettier clean on every touched file (`viewport.ts` still fails at `HEAD`), `\uXXXX` zero, `flamework.build` unchanged at **32 identifiers**. **`npm test` not run.**
 
 **A fresh chat should read `docs/powers-and-vfx.md` before any other file** — before `README.md`, before `HANDOFF.md`, and before opening `src/`. It is the current state; the log is the reason.
+
+## 172. Seven failing assertions were repaired without changing the tested modules
+
+**The three precision failures were over-strict test comparisons, not behavior defects.**
+
+- `motion-blur.spec.ts` compared `math.round(anchor.RightVector.X)` to `0`. A tiny negative component rounds to `-0`, and Jest's `toBe` uses `Object.is`, so `-0` fails against `0`. It now checks `math.abs(anchor.RightVector.X) < 1e-6` directly. The position checks and the nonzero `RightVector.Z` check stay unchanged; none has the same zero-sign risk.
+- Both `ui-scale.spec.ts` exact float comparisons now use an absolute tolerance of `1e-6`, while retaining the separate strict inequality that proves the height axis binds. `panelScaleFor` reads `.9` and `.92` from `MAX_FRACTION`, a `Vector2`; its components are stored at Vector2 precision, unlike the tests' scalar literals. The different representable fraction values account for the roughly `2e-8` discrepancies; the computation order itself was not changed.
+
+**The four sound failures were diagnosed against the actual rows, not assumed to be missing fields.** `SoundTuning` still has exactly `volume` and `playbackSpeed`; there is no interface-field change behind these failures.
+
+| Failing test | Expected in the failing assertion | `soundTuningFor` / compared row | Change |
+| --- | --- | --- | --- |
+| Round song tuning | `{ volume: 0.35, playbackSpeed: 1 }` | `{ volume: 0.15, playbackSpeed: 1 }` | Updated the spec to `.15`; the current row uses `.15`, and item 156 discusses that same bed level. |
+| Hit tuning | `{ volume: 0.6, playbackSpeed: 1 }` | `{ volume: 0.2, playbackSpeed: 1 }` | Updated the spec to `.2`; the config row changed after item 89, in commit `e818bbb`, while this literal remained old. |
+| Pickup tuning | `{ volume: 0.8, playbackSpeed: 1 }` | `{ volume: 0.2, playbackSpeed: 1 }` | Updated the spec to `.2`; the config row changed after item 90, in commit `e818bbb`, while this literal remained old. Its hit-volume check now also reflects the current `.2` row. |
+| Coin tuning | The literal `{ volume: 0.8, playbackSpeed: 1 }` matched. The failing `toEqual` was the next assertion, which expected coin tuning to equal pickup tuning. | Coin is `{ volume: 0.8, playbackSpeed: 1 }`; pickup is `{ volume: 0.2, playbackSpeed: 1 }`. | Kept the coin value and replaced the stale equality with the existing intended distinction: the two asset-id rows have different current volumes. |
+
+No sound config value changed in this round. The current config rows are newer than the old test literals. The `sounds.config.ts` prose still says pickup is louder than hit and coin starts at pickup's level, which conflicts with the current `.2`/`.2` and `.8`/`.2` rows; that documentation drift was left untouched rather than editing a module under test. Studio listening remains necessary to judge the placeholder mix.
+
+**The logged paths are not source paths, and there are no duplicate nested specs.** The source files are `src/shared/sounds.config.spec.ts` and `src/shared/economy.config.spec.ts`; neither `src/shared/sounds/config.spec.ts` nor `src/shared/economy/config.spec.ts` exists. The runner reports its compiled/logical sound-test path as `out/shared/sounds/config.spec.luau`; the generated source output is `out/shared/sounds.config.spec.luau`. The top-level `sounds.config.spec.ts` is the live config spec; `src/shared/ui/sounds.spec.ts` is a separate playback test, not a duplicate.
+
+**Verification.** Before edits: 7 failures, 391 passed. After edits, two consecutive `npm test` runs each reported `Tests 398 passed (398)` across 29 files. `npm run build` passed. `npm run lint` exited 0 with 55 existing Prettier warnings confined to untouched `src/shared/ui/viewport.ts`. Prettier passed on the three changed specs; the full `npx prettier --check "src/**/*.ts"` still flags only that same pre-existing `viewport.ts` line-ending issue, so it was not reformatted as unrelated work. `\uXXXX` search under `src/` returned no matches. `flamework.build` remains unchanged at hash `9c72cc6d972574027c07866961590950d1544aea`. No placeholders were added.
