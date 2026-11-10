@@ -4560,3 +4560,144 @@ No sound config value changed in this round. The current config rows are newer t
 **The logged paths are not source paths, and there are no duplicate nested specs.** The source files are `src/shared/sounds.config.spec.ts` and `src/shared/economy.config.spec.ts`; neither `src/shared/sounds/config.spec.ts` nor `src/shared/economy/config.spec.ts` exists. The runner reports its compiled/logical sound-test path as `out/shared/sounds/config.spec.luau`; the generated source output is `out/shared/sounds.config.spec.luau`. The top-level `sounds.config.spec.ts` is the live config spec; `src/shared/ui/sounds.spec.ts` is a separate playback test, not a duplicate.
 
 **Verification.** Before edits: 7 failures, 391 passed. After edits, two consecutive `npm test` runs each reported `Tests 398 passed (398)` across 29 files. `npm run build` passed. `npm run lint` exited 0 with 55 existing Prettier warnings confined to untouched `src/shared/ui/viewport.ts`. Prettier passed on the three changed specs; the full `npx prettier --check "src/**/*.ts"` still flags only that same pre-existing `viewport.ts` line-ending issue, so it was not reformatted as unrelated work. `\uXXXX` search under `src/` returned no matches. `flamework.build` remains unchanged at hash `9c72cc6d972574027c07866961590950d1544aea`. No placeholders were added.
+
+## 173. Ball contacts gained a shared physical profile and a lower-serial Y-only pop
+
+`BallSpawnerService.spawnBall` now assigns every body the same explicit physical profile: density `0.7`, friction `0.05`,
+elasticity `0.8`, with the three-argument `PhysicalProperties` constructor so both weights stay at their defaults. The density
+matches the existing Plastic/floor baseline; `heavy` is not denser, so a `heavy`↔`bully` engine collision has no power-specific
+mass advantage. The existing transfer arithmetic remains what makes `heavy` shove. `spawnDecoy` now assigns the same profile
+explicitly; it previously copied shape, size and material only.
+
+The pop chance is **Placeholder.** `0.12` by default, with `heavy` at exactly half (`0.06`). A contact uses the lower of the
+two power chances: either heavy body makes it half, two heavy bodies remain half rather than quarter, and missing/unknown
+powers use default. `spawnDecoy` is only reached for `decoy`, so actual twins currently use default; a future decoy carrying a
+`heavy` power label would use half.
+
+Only the lower-serial contact handler rolls, once, and on success writes Y on both bodies. The velocity is reconstructed from
+the current vector and the target Y only; X, Z and `BALL_SPEED` are untouched. The pop shares the burst's 2-second round-age
+gate and 0.5-second per-contact-owner cooldown. It skips the roll if either body's absolute Y velocity is at or above the
+**Placeholder.** 18 studs/s target, so it does not replace a fast physics bounce. A resting contact cannot pop every physics
+step; the chance plus shared cooldown limits it, and the age gate excludes the measured spawn pile-up.
+
+Source verification corrected two stale claims: `stepBallSpeeds` overwrites along-belt X and sets sway Z, but preserves Y, so
+the old `onBallCollision` statement that an `AssemblyLinearVelocity` write would be overwritten was too broad. Also, the
+spawner comment describing multiple shapes was stale: `SHAPE_POOL` currently contains only a Ball sphere. Installed
+`@rbxts/types` declares `CustomPhysicalProperties: PhysicalProperties | undefined`, the three- and five-argument
+`PhysicalProperties` constructors, its five fields, `Shape: Enum.PartType`, and settable `AssemblyLinearVelocity: Vector3`.
+Those typings do not state exact collision-fidelity semantics for `PartType.Ball`; source confirms the pool uses Ball, but the
+typing is not evidence for the prompt's exactness claim.
+
+The belt floor remains `PhysicalProperties(0.7, 0, 0.5, 1, 1)`. Its elasticity participates in ball-floor contacts; friction
+zero does not disable restitution. The ball's low nonzero friction can contribute to the contact pair. Whether the resulting
+bounce looks right, chatters, or hovers is Studio-only, as are whether the collision reads as a hit, whether the pop is visible
+from the belt camera, whether pile-up contacts strobe after the age gate, and whether `heavy` feels appropriately forceful.
+
+The requested `shouldPop(..., serial, random)` signature has a no-argument random callback, while `drawTimers` takes
+`random(min, max)`; the explicit signature was followed and tests inject normalized rolls. The lower-serial election belongs
+in the handler, which applies one result to both bodies rather than asking the other `Touched` callback to roll again.
+
+**Validation:** `npm run build` passed. `npm test` passed with **401 tests** across 29 files. `npm run lint` exited 0 with 55
+pre-existing Prettier warnings in `src/shared/ui/viewport.ts`. The requested full `npx prettier --check "src/**/*.ts"` still
+fails only on that unrelated, pre-existing line-ending formatting in `viewport.ts`; all changed TypeScript files were formatted
+and are clean. A Studio run remains outstanding.
+
+## 174. Ball elasticity raised to 0.95, and the floor lowered to hold its contact where it was
+
+`BALL_PHYSICAL_ELASTICITY` is `0.95` (**Placeholder.**), up from `0.8`. It reaches every spawned ball and every decoy through
+the one module-scope `BALL_PHYSICAL_PROPERTIES` in `BallSpawnerService`; nothing else was re-plumbed.
+
+**The floor, verified in source rather than from item 173's prose.** It is created in `TreadmillService.ensureSurface`, once per
+belt bind (stored in `this.surfaces` keyed by belt, rebuilt when its parent is gone), and its properties were inline:
+`new PhysicalProperties(0.7, 0, 0.5, 1, 1)` — density `0.7`, friction `0`, elasticity `0.5`, weights `1, 1`. So the record was
+right about the values and the floor is per-belt, not one shared part; because the literal was the only copy, editing it plus a
+constant covers every belt.
+
+**The pair rule, verified against the Roblox `PhysicalProperties` docs (2026-11-10), not from memory.** The datatype resolves a
+pair's friction and elasticity with the same pairwise weighted average,
+`(a.V * a.Weight + b.V * b.Weight) / (a.Weight + b.Weight)`, with weights clamped `[0, 100]`. Consequences, all arithmetic
+rather than judgement:
+
+| pair | before | after |
+| --- | --- | --- |
+| ball-ball | `(0.8 + 0.8) / 2 = 0.80` | `(0.95 + 0.95) / 2 = 0.95` |
+| ball-floor, floor left at `0.5` | `(0.8 + 0.5) / 2 = 0.65` | `(0.95 + 0.5) / 2 = 0.725` |
+| ball-floor, floor at `0.1` | — | `(0.95 + 0.1) / 2 = 0.525` |
+| ball-floor, floor at **`0.35`** (shipped) | — | `(0.95 + 0.35) / 2 = 0.65` |
+
+Ball-ball is exact regardless of the default weight, because both bodies share the profile and equal weights cancel. The floor
+pair depends on the ball's default weight, which the docs do not publish numerically for the three-argument constructor; the
+docs' own `CustomPhysicalProperties` sample writes `1` for both weights and every stock material behaves that way, so the
+equal-weight mean is the reading used here.
+
+**Floor decision: (a), with `0.35` rather than the prompt's `0.1`.** `BELT_SURFACE_ELASTICITY` is a new **Placeholder.** in
+`tuning.ts`; `TreadmillService` passes it and logs it on the existing `floor created` line (no new line). `0.35` holds the
+ball-floor pair at exactly the `0.65` that shipped, so the only contact whose feel changed is ball-ball. `0.1` would give
+`0.525` — about 19% less restitution than today — making every landing deader than at `HEAD`, which is a second unrequested
+change to the same contact. Friction stays `0` (the `BALL_SPEED` model depends on it), density stays `0.7`, and the weights stay
+explicit `1, 1` so the profile reads in one line.
+
+**Three arguments were dropped or corrected.** (1) The prompt's `BALL_COLLISION_POP_UPWARD_SPEED (18)` is stale — the constant
+is `30` in source, from a later tune; item 173's paragraph above still says `18` and is left as history. (2) The prompt's
+suggested floor of `0.1` overcorrects, per the table. (3) `heavy` density was left alone: symmetric separation is the decision,
+and a heavier `heavy` would have changed the engine's shove in the same round as the bounce, making neither readable.
+
+**Expected but unverified.** Symmetric elasticity should make two balls leave each other faster, so the spawn pile-up should
+*quiet* — each contact resolves in fewer re-touches — but it can also send a ball into a third body, so the `Touched` rate after
+the initial two seconds is the thing to watch against item 109's measurement. Landing at `0.65` should be unchanged. Whether
+`0.95` reads as "fighting" or "on springs" is the designer's call; it is one constant.
+
+**Validation:** `npm run build` passed. `npm test` passed with **401 tests** across 29 files; no test asserted any physical
+property or belt-surface value, so none changed. `npm run lint` exited 0 with the same 55 pre-existing Prettier warnings in
+`src/shared/ui/viewport.ts`. The touched files pass `prettier --check`; the full-tree check still fails only on that file.
+`\uXXXX` search under `src/` returned no matches and `flamework.build` is unchanged.
+
+## 175. Contacts shove sideways, through the sway's own writer rather than against it
+
+**The observation, and what the Studio log proved.** "I don't see much sideways push" is arithmetic, not tuning. `stepBallSpeeds`
+sets the lateral (world Z) component of every ball's velocity each tick — the sway owns that axis since item 151 — so a
+collision's lateral separation lasts exactly one physics step, about `1/60` of a stud, and is then replaced. The pasted log
+shows the burst and pop lines firing at roughly the expected rate while no Z motion results, because both effects are
+vertical (the pop) or purely visual (the burst). Raising elasticity in item 174 could not fix this either: it raises the
+*speed* a pair separates at in every axis, but the Z component of that speed is still erased before it moves anything.
+
+**The fix is an impulse, not a velocity.** A new module, `server/lateral-shove.ts`, holds a per-body vertical-free horizontal
+impulse. `onBallCollision`'s new `maybeShove` records one impulse of `BALL_COLLISION_SHOVE_SPEED` on each body, opposite
+directions along the flattened contact normal; `stepBallSpeeds` reads it, projects it onto the belt's `across`, **adds it to
+the sway's lateral rate** and decays it by `BALL_COLLISION_SHOVE_DECAY_SECONDS`. The axis keeps exactly one writer, and the
+shove cannot be erased because it is not a velocity — it is an input to that writer, the same relationship `BALL_SPEED` has
+with X.
+
+**The numbers, both Placeholder.** `5` studs/second peak and a `0.3` s time constant. The continuous displacement is
+`speed * decay` = **1.5 studs**; the discrete per-tick sum the game actually produces is about **1.54**, which the spec
+asserts at 5% and documents. One and a half ball diameters on a 12-stud belt, with lanes two studs apart: visible at the belt
+camera, unable to carry a body into the neighbouring lane's resting spot. The sway's own position correction
+(`SWAY_TRACK_SECONDS = 1.5`) walks the ball back to its wave, so a shove reads as a knock and a settle, not a lane change.
+
+**Deliberate choices.** (1) The shove does not roll. The pop is a flourish and is chance-gated (currently `0.5` in the log);
+separation is the consequence of a contact, so half the hits would still read as nudges if the two shared a roll. (2) It
+shares the burst's round-age gate, its per-body cooldown and its lower-serial election, and runs before `maybeBurst` stamps
+that clock — one `Touched` pair, one shove. (3) Impulses accumulate only up to one impulse's speed, so a body hit by three
+neighbours inside a window refreshes rather than multiplies. (4) The along-belt part of the contact normal is dropped by the
+writer's projection, so a dead-on rear-end contact barely shoves sideways and X stays the model's. That is deliberate: a
+head-on pair has no sideways normal, and inventing one would read as a random flick. (5) `powers` stores a world-space normal
+and the spawner projects it, so `powers` still needs no belt frame and the module makes no axis-aligned assumption.
+
+**Cleanup.** `forgetLateralShove` is called from both spawner death paths, alongside the existing `lateral`/`startSpeeds`
+deletes, so the map tracks the live set exactly as the other per-ball maps do.
+
+**Tests.** New `src/server/test/lateral-shove.spec.ts` — 11 cases over the pure helpers (`shoveDirection`, `shoveStep`,
+`clampShove`) and the map state machine. Two corrections came out of running it: `Vector3` components are 32-bit floats, so
+the first tolerances (`1e-9`) were asserting float width rather than direction and now use `1e-6`; and the distance test
+compares a **discrete** sum against `speed * decay`, which is 2.8% high at 60 Hz by `x / (1 - e^-x)`, so it asserts "above
+the integral and within 5%" instead of within 1%.
+
+**Validation:** `npm run build` passed. `npm test` passed with **412 tests** across 30 files (11 new). `npm run lint` exited 0
+with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`. Every touched file passes `prettier --check`;
+the full-tree check still fails only on that file. `\uXXXX` search under `src/` returned no matches; `flamework.build` is
+unchanged — the new file is a plain module, not a controller or service.
+
+**Studio-only:** whether 1.5 studs reads as a shove or as a wobble at the actual camera; whether adding a decaying lateral
+term to the sway's write makes a shoved ball re-enter its wave smoothly or visibly fight it; and whether the pile-up gains
+chatter now that balls are knocked across each other's paths. The `[Powers] shove` line reports the speed and direction
+recorded, so a run distinguishes "not recorded" from "recorded and invisible".

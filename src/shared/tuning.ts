@@ -251,6 +251,30 @@ export const BELT_BOUNCE_COOLDOWN = 1;
 export const BELT_SURFACE_THICKNESS = 0.1;
 
 /**
+ * **Placeholder.** Restitution of the invisible floor each belt creates under itself.
+ *
+ * ## Why raising the ball made this number move (item 174)
+ *
+ * The engine's pair rule is a weighted average of the two bodies' elasticity, not the ball's alone. The floor used to be
+ * `0.5` against a ball of `0.8`, which is a pair of `(0.8 + 0.5) / 2 = 0.65`. Left at `0.5` against the new `0.95` ball,
+ * the pair would be `0.725` — every landing would return about 11% more speed, which is a bouncier belt nobody asked for.
+ * `0.35` holds the pair at `(0.95 + 0.35) / 2 = 0.65`, exactly the number that shipped at item 173, so the only pair that
+ * changed is ball-ball.
+ *
+ * `0.1` is the other obvious answer and is deliberately not used: it gives `(0.95 + 0.1) / 2 = 0.525`, roughly 19% less
+ * restitution than the floor has today, so landings would read **deader** than before. "Not bouncier" is the requirement;
+ * "deader" would be a second, unrequested change to the same contact.
+ *
+ * Not `1` and not `0` either: both are different mechanics rather than quieter versions of this one. A perfectly
+ * inelastic floor never rebounds at all, and a perfectly elastic one never settles, which is the failure this constant is
+ * choosing away from.
+ *
+ * Friction is untouched at `0` in `TreadmillService`: it is load-bearing for the `BALL_SPEED` model, and this constant is
+ * about bounce only.
+ */
+export const BELT_SURFACE_ELASTICITY = 0.35;
+
+/**
  * **Placeholder.** How far the moving collider is allowed to overhang the belt's own footprint, in
  * studs.
  *
@@ -904,6 +928,67 @@ export const BALL_SPEED_MIN = 0;
  */
 export const BALL_SPEED_MAX = 20;
 
+/** **Placeholder.** Density shared by every spawned body; this matches Plastic's current default density. */
+export const BALL_PHYSICAL_DENSITY = 0.7;
+
+/** **Placeholder.** Low friction for ball-to-ball contacts, so contacts separate rather than drag. */
+export const BALL_PHYSICAL_FRICTION = 0.05;
+
+/**
+ * **Placeholder.** Restitution for every spawned ball — the coefficient of restitution, where `1` returns all of the
+ * closing speed and `0` returns none.
+ *
+ * `0.95` is a contact that separates at 95% of the speed it closed at, so two bodies meeting at belt speeds shove each
+ * other visibly apart instead of reading as a nudge. It is deliberately not `1`: a perfectly elastic pair loses no energy,
+ * so nothing settles and a resting pair would keep trading a small bounce forever. `0.95` is the top of the usable band
+ * below that.
+ *
+ * ## The pair rule, and why the floor moved with it (item 174)
+ *
+ * The engine does not use one part's elasticity. The pair value is the weighted average
+ * `(a.Elasticity * a.ElasticityWeight + b.Elasticity * b.ElasticityWeight) / (a.ElasticityWeight + b.ElasticityWeight)`,
+ * the same function the Roblox `PhysicalProperties` docs give for friction (verified 2026-11-10).
+ *
+ * Ball-ball is therefore exactly this number: both bodies share the profile and share the same default weight, so the
+ * weights cancel and the result is `(0.95 + 0.95) / 2 = 0.95`. Ball-floor is the mean of this and
+ * `BELT_SURFACE_ELASTICITY`, which is why the floor's own number is not left alone — see there.
+ */
+export const BALL_PHYSICAL_ELASTICITY = 0.95;
+
+/** **Placeholder.** Minimum upward velocity for a successful contact pop, in studs/second. */
+export const BALL_COLLISION_POP_UPWARD_SPEED = 30;
+
+/**
+ * **Placeholder.** Peak sideways speed one contact gives each body, in studs/second.
+ *
+ * ## Why this is a number at all, when the engine already separates in Z
+ *
+ * Because the engine's lateral separation is erased. The sway sets the lateral component of every ball's velocity on every
+ * tick (item 151), so a collision imparts one physics step of sideways motion — about `1/60` of a stud — and the next tick
+ * replaces it. A Studio log showed `hit` and `pop` lines with no visible sideways movement, which is that arithmetic, not
+ * a missing shove in the engine.
+ *
+ * ## The displacement this buys
+ *
+ * A shove of `s` decaying with time constant `T` moves a body `s * T` studs in total. At `5` and
+ * `BALL_COLLISION_SHOVE_DECAY_SECONDS = 0.3` that is **1.5 studs** — one and a half ball diameters, on a 12-stud belt whose
+ * lanes sit two apart. Large enough to read as a knock at the belt camera, small enough that one contact cannot carry a
+ * ball into the neighbouring lane's resting spot.
+ *
+ * The sway's own position correction (`SWAY_TRACK_SECONDS = 1.5`) then walks the ball back to its wave, so the shove
+ * settles instead of permanently changing lane.
+ */
+export const BALL_COLLISION_SHOVE_SPEED = 10;
+
+/**
+ * **Placeholder.** Time constant of a contact shove, in seconds.
+ *
+ * Exponential: the shove is at 37% of its peak after one of these, 14% after two, and gone after about three. Short enough
+ * that the knock reads as a hit rather than a slide, long enough that it survives more than a frame at 60 Hz — a single
+ * tick would move a body `5 / 60 = 0.08` studs, which is invisible, which is the complaint this constant answers.
+ */
+export const BALL_COLLISION_SHOVE_DECAY_SECONDS = 1;
+
 /**
  * **Placeholder.** The speed a pickup sets a ball to, in studs/second. Above `BELT_SPEED` on purpose.
  *
@@ -1034,7 +1119,7 @@ export const SWAY_PHASE_JITTER = math.pi;
  * studs) leaves at about 3.3 studs/s and is gone in roughly four time constants - about 6 seconds of an 18-second ride.
  * Large values are gentler but let a ball spend most of its life finding the wave. `0` is invalid: division by zero.
  */
-export const SWAY_TRACK_SECONDS = 1.5;
+export const SWAY_TRACK_SECONDS = 4;
 
 /** **Placeholder.** The folder `PickupService` parents its pads into, created on demand. */
 export const PICKUPS_FOLDER_NAME = "SpawnedPickups";

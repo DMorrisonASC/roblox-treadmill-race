@@ -9,6 +9,7 @@ import {
 	POWER_BADGE_GLYPH_WIDTH,
 	POWER_BADGE_WIDTH,
 	POWER_IDS,
+	DEFAULT_COLLISION_POP_CHANCE,
 	powerForBallId,
 	powerLabel,
 	powerLabelFits,
@@ -30,6 +31,7 @@ import {
 	pickupDecision,
 	powerTickDelta,
 	setRoundActive,
+	shouldPop,
 	spawnsDecoy,
 	speedAfterPickup,
 	transferAmounts,
@@ -41,10 +43,9 @@ import {
  *
  * ## Why every one of these is a function of numbers rather than of instances
  *
- * `BallSpawnerService` rewrites a ball's velocity from `BALL_SPEED` every tick, so a power is a number, a multiplier or a
- * collision group — and a number is testable without a `BasePart`. `powers` is a module rather than a `@Service()` for
- * exactly this reason: a service is constructed by `Flamework.ignite()` against a DataModel, so ten powers living inside
- * one would be ten rules nobody could assert.
+ * `BallSpawnerService` rewrites the along-belt velocity from `BALL_SPEED`, sets lateral sway and leaves Y to gravity; the
+ * collision pop is the intentional Y-only exception. `powers` is a module rather than a `@Service()` so its pure numeric
+ * decisions, including the pop roll, can be asserted without constructing a service against a DataModel.
  *
  * **What this cannot prove:** the badge's appearance and apparent size, whether `PhysicsService` actually honours the two
  * groups on a real place, the felt effect of any magnitude, and that a body destroyed mid-round really loses its state
@@ -78,6 +79,52 @@ function tick(overrides: TickOverrides): PowerTickInput {
 function aura(power: string, distance: number, eclipsing = false): PowerAura {
 	return { power, distance, eclipsing };
 }
+
+describe("shouldPop", () => {
+	it("uses the default chance for unpowered and unknown bodies", () => {
+		const sampleCount = 10_000;
+		const countPops = (attackerPower: string, victimPower: string) => {
+			let count = 0;
+			for (let index = 0; index < sampleCount; index++) {
+				const roll = index / sampleCount;
+				if (shouldPop(attackerPower, victimPower, 1, () => roll)) {
+					count++;
+				}
+			}
+			return count;
+		};
+
+		const defaultCount = countPops("bully", "bully");
+		expect(defaultCount).toBe(DEFAULT_COLLISION_POP_CHANCE * sampleCount);
+		expect(countPops("", "unknown-power")).toBe(defaultCount);
+	});
+
+	it("uses exactly half the default chance whenever either body is heavy", () => {
+		const sampleCount = 10_000;
+		const countPops = (attackerPower: string, victimPower: string) => {
+			let count = 0;
+			for (let index = 0; index < sampleCount; index++) {
+				const roll = index / sampleCount;
+				if (shouldPop(attackerPower, victimPower, 1, () => roll)) {
+					count++;
+				}
+			}
+			return count;
+		};
+
+		const defaultCount = countPops("bully", "bully");
+		const heavyCount = defaultCount / 2;
+		expect(countPops("heavy", "bully")).toBe(heavyCount);
+		expect(countPops("bully", "heavy")).toBe(heavyCount);
+		expect(countPops("heavy", "heavy")).toBe(heavyCount);
+	});
+
+	it("uses a strict roll threshold and rejects an unregistered contact serial", () => {
+		expect(shouldPop("bully", "bully", 1, () => 0)).toBe(true);
+		expect(shouldPop("bully", "bully", 1, () => DEFAULT_COLLISION_POP_CHANCE)).toBe(false);
+		expect(shouldPop("bully", "bully", 0, () => 0)).toBe(false);
+	});
+});
 
 describe("powerTickDelta", () => {
 	it("returns zero for a body with no power", () => {

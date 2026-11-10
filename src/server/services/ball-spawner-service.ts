@@ -43,6 +43,9 @@ import {
 	BALL_SPEED_MIN,
 	BALL_SPEED_START,
 	BALL_SPEED_START_JITTER,
+	BALL_PHYSICAL_DENSITY,
+	BALL_PHYSICAL_ELASTICITY,
+	BALL_PHYSICAL_FRICTION,
 	BALL_TEXTURE_ASSET,
 	BALL_TEXTURE_OFFSET_RANGE,
 	BALL_TEXTURE_OFFSET_RANGE_V,
@@ -54,7 +57,14 @@ import {
 	SWAY_PHASE_JITTER,
 	SWAY_TRACK_SECONDS,
 } from "shared/tuning";
+import { forgetLateralShove, lateralShoveFor } from "server/lateral-shove";
 import { TreadmillService } from "./treadmill-service";
+
+const BALL_PHYSICAL_PROPERTIES = new PhysicalProperties(
+	BALL_PHYSICAL_DENSITY,
+	BALL_PHYSICAL_FRICTION,
+	BALL_PHYSICAL_ELASTICITY,
+);
 
 /**
  * Three-decimal rounding instead of `string.format`: these numbers span `0.001`-scale local offsets
@@ -1044,10 +1054,9 @@ export class BallSpawnerService implements OnStart {
 			return undefined;
 		}
 
-		// Shape, size and orientation are all decided here and nowhere else. The pool entry decides what
-		// the object *can* do; the rotation decides which of those it does this spawn, which is the
-		// whole point of the pool — a sphere is invariant under rotation, a cylinder is not. Anything
-		// below this block is identical for every shape.
+		// Shape, size and orientation are all decided here and nowhere else. The pool currently has one
+		// entry, a sphere, so rotation is a geometric no-op; the same spawn path remains ready if the
+		// shape pool grows. Everything below this block is identical for every entry.
 		const entry = pickPoolEntry();
 		const rotation = randomSpawnRotation();
 		const halfY = rotatedHalfHeight(rotation, entry.size);
@@ -1058,12 +1067,10 @@ export class BallSpawnerService implements OnStart {
 		ball.Size = entry.size;
 		ball.Anchored = false;
 		ball.CanCollide = true;
-		// Default material rather than CustomPhysicalProperties: every body is the same material, so
-		// density is uniform and mass follows only from shape and volume. Writing explicit physical
-		// properties would add a tuning knob that nothing in this slice turns, and would have to be kept
-		// in sync with the belt's friction to mean anything. If belt drag ever proves too weak, friction
-		// is the knob to reach for — on the belt, not on the object.
+		// Plastic remains the visual material. This explicit profile is the same for every power, so
+		// density does not make `heavy` mechanically heavier; its shove remains the transfer rule.
 		ball.Material = Enum.Material.Plastic;
+		ball.CustomPhysicalProperties = BALL_PHYSICAL_PROPERTIES;
 		ball.TopSurface = Enum.SurfaceType.Smooth;
 		ball.BottomSurface = Enum.SurfaceType.Smooth;
 
@@ -1224,6 +1231,7 @@ export class BallSpawnerService implements OnStart {
 		decoy.Anchored = false;
 		decoy.CanCollide = true;
 		decoy.Material = parent.Material;
+		decoy.CustomPhysicalProperties = BALL_PHYSICAL_PROPERTIES;
 		decoy.TopSurface = Enum.SurfaceType.Smooth;
 		decoy.BottomSurface = Enum.SurfaceType.Smooth;
 		decoy.CFrame = parent.CFrame.add(new Vector3(DECOY_OFFSET_STUDS, 0, 0));
@@ -1642,11 +1650,20 @@ export class BallSpawnerService implements OnStart {
 				// `across` is horizontal, so the vertical component still belongs to gravity and a ball in the air still
 				// falls. The along-belt component is removed separately, as before.
 				const carriedLateral = velocity.Dot(across);
+
+				// **The contact shove, applied by the writer that owns the axis.** A collision handler cannot leave a
+				// lateral *velocity* behind: the `sub(across ...)` above removes it one tick later. It can leave an
+				// *impulse*, and that is what this reads. The projection onto `across` is what keeps X the model's: a
+				// dead-on contact normal is mostly along-belt, and its along-belt part must not become an unmodelled
+				// positional nudge. `across` is horizontal, so Y is untouched. See `lateral-shove.ts`.
+				const shoveImpulse = lateralShoveFor(ball, dt);
+				const lateralShove = across.mul(shoveImpulse.Dot(across));
 				ball.AssemblyLinearVelocity = velocity
 					.sub(right.mul(along))
 					.sub(across.mul(carriedLateral))
 					.add(right.mul(-relative))
-					.add(lateral);
+					.add(lateral)
+					.add(lateralShove);
 				continue;
 			}
 
@@ -1792,6 +1809,7 @@ export class BallSpawnerService implements OnStart {
 				this.ballKillY.delete(ball);
 				this.lateral.delete(ball);
 				this.startSpeeds.delete(ball);
+				forgetLateralShove(ball);
 				forgetBallPower(ball);
 				this.forgetDecoy(ball);
 			} else {
@@ -1854,6 +1872,7 @@ export class BallSpawnerService implements OnStart {
 		// while placing `forgetBall` in this block, which is the same bug for a third map.
 		this.lateral.delete(ball);
 		this.startSpeeds.delete(ball);
+		forgetLateralShove(ball);
 		this.forgetDecoy(ball);
 		const index = this.liveBalls.indexOf(ball);
 		if (index !== -1) {

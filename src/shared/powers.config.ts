@@ -10,20 +10,23 @@
  *
  * ## The constraint every power below is written against
  *
- * A ball's velocity is **rewritten from its `BALL_SPEED` attribute every tick** by `BallSpawnerService.stepBallSpeeds`:
- * `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED` along the belt's `RightVector`, the decorative lateral term added, Y left to
- * gravity. There is no force, no friction and no mass that matters. Anything a power writes as a *velocity* or a
- * *force* is therefore erased within one frame, so a power is one of exactly three things:
+ * `BallSpawnerService.stepBallSpeeds` rewrites the along-belt component from `BALL_SPEED`, sets the decorative lateral Z,
+ * and leaves Y to gravity. The `BALL_SPEED` model does not read contact friction or mass; the physics solver does. Anything
+ * written to X or Z by a power is overwritten within one frame, while the contact pop explicitly changes only Y. A power is
+ * therefore one of:
  *
  * 1. a **delta to `BALL_SPEED`** returned to the tick loop, which stays the single writer per tick;
  * 2. a **direct write to `BALL_SPEED`** from a collision handler, which is safe only because nothing writes between two
  *    ticks — a force applied here would be gone before it did anything;
- * 3. a change to the **body itself** (a collision group, a spawned decoy, a badge) that the model cannot overwrite.
+ * 3. a **Y-only contact pop**, outside the scalar speed model and overwritten by neither its X rewrite nor the Z sway;
+ * 4. a change to the **body itself** (physical properties, a collision group, a spawned decoy, a badge) that the model cannot
+ *    overwrite.
  *
  * ## The exchange rate the magnitudes are chosen against
  *
  * `BALL_SPEED` decays at `BALL_SPEED_DECAY_RATE` = 0.1 per second, so **one point of `BALL_SPEED` is about 10 seconds of
- * ride**. Every number below is reported against that: "steals 1.0" means "steals giving up ten seconds".
+ * ride**. Transfer magnitudes below are reported against that: "steals 1.0" means "steals giving up ten seconds"; pop
+ * chances are probabilities, not ride-time values.
  *
  * ## Design notes — recorded, not enforced
  *
@@ -166,6 +169,20 @@ export const HIT_EFFECT_MIN_ROUND_AGE_SECONDS = 2;
  * enough", which is the reading this constant exists to make obvious.
  */
 export const HIT_EFFECT_COOLDOWN_SECONDS = 0.5;
+
+/**
+ * **Placeholder.** Chance that an eligible ball-ball contact triggers an upward pop.
+ *
+ * A contact uses the lower of its two per-power chances, so a `heavy` body halves the chance whether it is the caller or
+ * the other body. Two `heavy` bodies still use the half chance, not a quarter chance. Missing or unknown powers use this
+ * default.
+ */
+export const DEFAULT_COLLISION_POP_CHANCE = 0.5;
+
+/** Per-power pop chance overrides; `heavy` pops at exactly half the default chance. */
+export const COLLISION_POP_CHANCE_BY_POWER: Readonly<Partial<Record<string, number>>> = {
+	heavy: DEFAULT_COLLISION_POP_CHANCE / 2,
+};
 
 // #endregion
 

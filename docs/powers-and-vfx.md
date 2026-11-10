@@ -19,8 +19,9 @@ RELATIVE_SPEED = BALL_SPEED - BELT_SPEED        // along the belt's RightVector
 ```
 
 `BALL_SPEED_START` equals `DEFAULT_BELT_SPEED`, so the race starts at exactly zero relative speed and only decay and pickups move
-it. `BALL_SPEED_DECAY_RATE = 0.1` per second, so **one point of `BALL_SPEED` is about ten seconds of ride** — every magnitude in
-[`powers.config.ts`](../src/shared/powers.config.ts) is chosen against that exchange rate. `BALL_SPEED_MIN = 0`,
+it. `BALL_SPEED_DECAY_RATE = 0.1` per second, so **one point of `BALL_SPEED` is about ten seconds of ride** — every transfer
+magnitude in [`powers.config.ts`](../src/shared/powers.config.ts) is chosen against that exchange rate. Pop chances are
+probabilities, not ride-time values. `BALL_SPEED_MIN = 0`,
 `BALL_SPEED_MAX = 20` (a safety net, not a balance guard), `BOOST_TARGET_BALL_SPEED = 12`.
 
 **The rule that must not be broken:** `stepBallSpeeds` is the only writer of the **along-belt** component of
@@ -31,8 +32,12 @@ it. `BALL_SPEED_DECAY_RATE = 0.1` per second, so **one point of `BALL_SPEED` is 
 2. a **direct write to `BALL_SPEED`** from a collision handler — safe only because nothing writes between two ticks;
 3. a change to **the body itself** the model cannot overwrite (collision group, decoy twin, badge, texture).
 
-A force, or a velocity written by a power, is erased within a frame. The one lateral exception is the decorative sway, which the
-same loop writes because a sine wave expressed as velocity has to be written as velocity.
+The model replaces X and the decorative sway sets Z; neither axis can carry a durable **velocity** written by a collision
+handler. Y remains outside `BALL_SPEED` and is preserved by the tick loop, so ball contacts set Y directly for the upward
+pop. Lateral motion is different: a contact leaves an **impulse** in `server/lateral-shove.ts`, and `stepBallSpeeds`
+projects it onto `across`, adds it to the sway's rate and decays it. The sway therefore keeps its single writer, and a
+shove is not a velocity racing the tick. The engine's own lateral separation alone is invisible — one physics step, then
+the sway replaces it.
 
 Read `tuning.ts`'s `BALL_SPEED_*` block and `stepBallSpeeds`' docblock before changing anything here.
 
@@ -141,6 +146,43 @@ behaviour is opt-in per ball. Nothing in `tickDelta` knows about it.
 - Two gates on the visual only: `HIT_EFFECT_MIN_ROUND_AGE_SECONDS` (2 s, the spawn pile-up) and `HIT_EFFECT_COOLDOWN_SECONDS`
   (0.5 s). Item 110 explains why a speed threshold cannot substitute for the age gate.
 
+### The contact pop — `onBallCollision` → `maybePop`
+
+- One lower-serial body rolls once for the pair; a successful roll sets the Y velocity of both bodies to
+  `BALL_COLLISION_POP_UPWARD_SPEED`, preserving each body's X and Z. It does not write `BALL_SPEED`.
+- The contact chance defaults to `DEFAULT_COLLISION_POP_CHANCE`; a contact involving `heavy` uses half, even when both bodies
+  are heavy. Missing/unknown powers use the default. Current decoy spawns are only made by the `decoy` power, so those twins
+  use the default; any future decoy carrying `heavy` would use the half chance.
+- The pop shares the burst's round-age and per-body cooldown gates. It is attempted only when both bodies' absolute Y velocity
+  is below the pop target, so it does not replace a fast engine bounce. A separate pop clock would allow pops while bursts are
+  suppressed.
+
+### The contact shove — `onBallCollision` → `maybeShove`
+
+- On every gated contact (**not** chance-gated, unlike the pop), the lower-serial body records one horizontal impulse of
+  `BALL_COLLISION_SHOVE_SPEED` on each body, opposite directions, along the contact normal. `stepBallSpeeds` projects it
+  onto the belt's `across`, adds it to the sway's lateral rate and decays it by `BALL_COLLISION_SHOVE_DECAY_SECONDS`. At
+  `5` and `0.3` that is roughly **1.5 studs** of sideways movement per hit, settling back as the sway's position
+  correction pulls the ball to its wave.
+- It uses the burst's round-age and cooldown gates, and the same lower-serial election, so one `Touched` pair shoves once.
+  Impulses accumulate up to one impulse's speed, so a pile refreshes the shove rather than multiplying it.
+- The along-belt part of the normal is dropped by the writer, so a dead-on rear-end contact barely shoves sideways — that
+  contact is covered by the pop and the burst instead. The shove direction is the contact normal, so it is not a random
+  flick, and it needs no belt frame in `powers`.
+
+### The shared physical profile
+
+- One `PhysicalProperties` is built at module scope in `BallSpawnerService` — density `0.7`, friction `0.05`, elasticity
+  `0.95` — and assigned to every spawned ball **and** every decoy. The three-argument constructor leaves
+  `FrictionWeight`/`ElasticityWeight` at the engine default, which is what the Roblox docs' own `CustomPhysicalProperties`
+  sample writes as `1`.
+- `heavy` is **not** denser. Separation is symmetric by decision: `heavy`'s identity is the transfer arithmetic and the half
+  pop chance, not a mass advantage.
+- The engine does not use one part's elasticity — the pair value is the weighted average of the two. Ball-ball is therefore
+  exactly `0.95` (equal bodies cancel the weights), and ball-floor is `(0.95 + BELT_SURFACE_ELASTICITY) / 2`. The floor is
+  `0.35` so that pair stays at `0.65`, the value item 173 shipped; raising the ball alone would have raised every landing.
+- The floor's friction stays `0`: it is what keeps `BALL_SPEED` the only along-belt force.
+
 ### The badge
 
 - **Not a client controller.** `updateBadge` in `powers/index.ts` builds a `BillboardGui` named `PowerBadge` and parents it to the
@@ -218,7 +260,8 @@ agent looking for its controller will not find one.
 
 - **hit burst** — the asset is resolved **once at boot** by recursive name; a missing asset warns and disables the effect for the
   session. The burst is gated on two numbers (round age, per-body cooldown) that suppress the *visual* only: the transfer still
-  runs. Do not "fix" the gates by adding a speed threshold — item 110 records why that cannot work.
+  runs. The contact pop shares those gates but is a Y-only physics response, not a `BALL_SPEED` transfer. Do not "fix" the
+  burst gates by adding a speed threshold — item 110 records why that cannot work.
 - **the two trails** — driven by server-written booleans `Boosted` and `TailWind`, and **mutually exclusive at the source**:
   `stepBallSpeeds` writes `Boosted` first and feeds it into `writeTailWind`, so no client can observe both true in one frame. If
   you write either attribute from anywhere else, that guarantee is gone. Both use `vfx-scale.ts`

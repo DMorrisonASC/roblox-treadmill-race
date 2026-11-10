@@ -8,6 +8,7 @@ import {
 	BELT_BOUNCE_COOLDOWN,
 	BELT_BOUNCE_ENABLED,
 	BELT_BOUNCE_IMPULSE,
+	BELT_SURFACE_ELASTICITY,
 	BELT_SURFACE_LIP,
 	BELT_SURFACE_THICKNESS,
 	BELT_TEXTURE_ASSET,
@@ -275,7 +276,15 @@ export class TreadmillService implements OnStart {
 		//
 		// Across the belt, friction would also grip a ball that is drifting sideways, which is the one motion
 		// the model does not own; zero everywhere keeps that honest and makes the surface a pure support.
-		surface.CustomPhysicalProperties = new PhysicalProperties(0.7, 0, 0.5, 1, 1);
+		//
+		// **Elasticity is paired with the ball's, not chosen in isolation.** The engine combines the two bodies'
+		// elasticity as a weighted average, so the floor is half of every ball-floor pair. It was `0.5` against a ball of
+		// `0.8` — a pair of `0.65`; it is `BELT_SURFACE_ELASTICITY` against a ball of `0.95`, which holds that pair at
+		// `0.65` so only ball-ball got bouncier. See the constant for the arithmetic and for why `0.1` was rejected.
+		//
+		// The weights stay explicit `1, 1` here rather than taking the constructor's default, because this call also
+		// states density and friction explicitly and a reader should be able to see the whole profile in one line.
+		surface.CustomPhysicalProperties = new PhysicalProperties(0.7, 0, BELT_SURFACE_ELASTICITY, 1, 1);
 		surface.CFrame = belt.CFrame.mul(new CFrame(startOffset, lift, 0));
 		surface.Parent = belt;
 
@@ -289,7 +298,7 @@ export class TreadmillService implements OnStart {
 		this.attachBounce(surface);
 
 		print(
-			`[Treadmill] floor created on "${belt.GetFullName()}" beltSize=${formatVector(belt.Size)} floorSize=${formatVector(surface.Size)} lip=${formatNumber(BELT_SURFACE_LIP)} anchored=true friction=0`,
+			`[Treadmill] floor created on "${belt.GetFullName()}" beltSize=${formatVector(belt.Size)} floorSize=${formatVector(surface.Size)} lip=${formatNumber(BELT_SURFACE_LIP)} anchored=true friction=0 elasticity=${formatNumber(BELT_SURFACE_ELASTICITY)}`,
 		);
 
 		return state;

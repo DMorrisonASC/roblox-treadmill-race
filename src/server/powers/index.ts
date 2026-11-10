@@ -14,9 +14,9 @@
  *
  * `BallSpawnerService.stepBallSpeeds` rewrites a ball's velocity from `BALL_SPEED` every tick, so it has to remain the only
  * writer of `BALL_SPEED` **inside** a tick. This module therefore returns a **delta** from `tickDelta` and lets that loop do
- * the arithmetic, the clamp and the single `SetAttribute`. Collision powers are the one exception: they write `BALL_SPEED`
- * directly, which is safe only because nothing else writes between two ticks — and a force written there would be erased
- * long before it moved anything.
+ * the arithmetic, the clamp and the single `SetAttribute`. Collision powers write `BALL_SPEED` directly between ticks.
+ * The contact pop is a separate, Y-only velocity write: `stepBallSpeeds` replaces X and sets Z but preserves Y. The contact
+ * shove is not a velocity at all — it is an impulse left in `lateral-shove.ts` for that loop to apply and decay.
  *
  * ## What is deliberately absent
  *
@@ -45,6 +45,8 @@ import {
 	POWER_BADGE_OFFSET_STUDS,
 	POWER_BADGE_TEXT_SIZE,
 	POWER_BADGE_WIDTH,
+	COLLISION_POP_CHANCE_BY_POWER,
+	DEFAULT_COLLISION_POP_CHANCE,
 	HIT_EFFECT_COOLDOWN_SECONDS,
 	HIT_EFFECT_MIN_ROUND_AGE_SECONDS,
 	POWER_COLLISION_COOLDOWN,
@@ -55,7 +57,15 @@ import {
 	SPRINTER_BOOST_SPEED,
 } from "shared/powers.config";
 import { TAGS } from "shared/tags";
-import { BALL_SPEED_DECAY_RATE, BALL_SPEED_MAX, BALL_SPEED_MIN, BOOST_TARGET_BALL_SPEED } from "shared/tuning";
+import {
+	BALL_COLLISION_POP_UPWARD_SPEED,
+	BALL_COLLISION_SHOVE_SPEED,
+	BALL_SPEED_DECAY_RATE,
+	BALL_SPEED_MAX,
+	BALL_SPEED_MIN,
+	BOOST_TARGET_BALL_SPEED,
+} from "shared/tuning";
+import { shoveDirection, shoveLateral } from "server/lateral-shove";
 import { shouldRecordTouch } from "../elimination-sound";
 
 // #region pure rules
@@ -301,6 +311,28 @@ export function pickupDecision(power: string): PickupDecision {
  */
 export function speedAfterPickup(current: number, boost: number): number {
 	return math.max(current, boost);
+}
+
+function popChanceForPower(power: string): number {
+	return COLLISION_POP_CHANCE_BY_POWER[power] ?? DEFAULT_COLLISION_POP_CHANCE;
+}
+
+function popChanceForContact(attackerPower: string, victimPower: string): number {
+	return math.min(popChanceForPower(attackerPower), popChanceForPower(victimPower));
+}
+
+/**
+ * Makes one pure pop decision for the contact owner, which the handler elects by lower serial.
+ *
+ * `serial` is the registered contact-state token; zero is not an eligible body. The caller ensures only the lower-serial
+ * side invokes this, and the decision is then applied to both bodies.
+ */
+export function shouldPop(attackerPower: string, victimPower: string, serial: number, random: () => number): boolean {
+	if (serial <= 0) {
+		return false;
+	}
+
+	return random() < popChanceForContact(attackerPower, victimPower);
 }
 
 /**
@@ -856,6 +888,115 @@ function formatVector(value: Vector3): string {
 	return `(${round(value.X)}, ${round(value.Y)}, ${round(value.Z)})`;
 }
 
+function writePopY(ball: BasePart, currentVelocity: Vector3, y: number): void {
+	// Preserve the model-owned along-belt X and sway-owned Z; only the vertical component is replaced.
+	ball.AssemblyLinearVelocity = new Vector3(currentVelocity.X, y, currentVelocity.Z);
+}
+
+/**
+ * Rolls once for the lower-serial body and applies a successful pop to both bodies.
+ *
+ * This intentionally shares the burst's round-age and per-body cooldown gates. The pop therefore cannot strobe during
+ * the measured spawn pile-up and cannot occur more often than the visual hit gate; a separate clock would let a ball pop
+ * while its burst was suppressed. The vertical-speed threshold avoids replacing an already-fast vertical contact response.
+ */
+function maybePop(ball: BasePart, other: BasePart): void {
+	const now = os.clock();
+
+	if (now - roundStartedAt < HIT_EFFECT_MIN_ROUND_AGE_SECONDS) {
+		return;
+	}
+
+	const mine = contactEffectOf(ball);
+	if (now - mine.lastBurstAt < HIT_EFFECT_COOLDOWN_SECONDS) {
+		return;
+	}
+
+	if (contactEffectOf(other).serial < mine.serial) {
+		return;
+	}
+
+	const ballVelocity = ball.AssemblyLinearVelocity;
+	const otherVelocity = other.AssemblyLinearVelocity;
+	if (
+		math.abs(ballVelocity.Y) >= BALL_COLLISION_POP_UPWARD_SPEED ||
+		math.abs(otherVelocity.Y) >= BALL_COLLISION_POP_UPWARD_SPEED
+	) {
+		return;
+	}
+
+	const attackerPower = powerOf(ball);
+	const victimPower = powerOf(other);
+	const chance = popChanceForContact(attackerPower, victimPower);
+	let roll = 0;
+	if (
+		!shouldPop(attackerPower, victimPower, mine.serial, () => {
+			roll = math.random();
+			return roll;
+		})
+	) {
+		return;
+	}
+
+	writePopY(ball, ballVelocity, BALL_COLLISION_POP_UPWARD_SPEED);
+	writePopY(other, otherVelocity, BALL_COLLISION_POP_UPWARD_SPEED);
+	print(
+		`[Powers] pop: ball=${ball.GetFullName()} other=${other.GetFullName()} chance=${chance} roll=${roll} y=${BALL_COLLISION_POP_UPWARD_SPEED}`,
+	);
+}
+
+/**
+ * Leaves one sideways impulse on each body of a qualifying contact.
+ *
+ * ## Why this exists, given the sway owns Z
+ *
+ * The engine's own lateral separation is real but invisible: `stepBallSpeeds` sets the lateral component every tick, so a
+ * collision moves a ball sideways for one physics step — about `1/60` of a stud — before the sway replaces it. A Studio log
+ * showed `hit` and `pop` lines with no sideways movement, which is that arithmetic rather than a dormant engine. This
+ * records an *impulse* the sway's writer applies and decays, so the axis keeps one writer and the shove cannot race it.
+ *
+ * ## Why it does not roll
+ *
+ * The pop is a flourish and is chance-gated; separation is the physical consequence of a contact and happens on every
+ * gated contact. Tying the shove to the pop's roll would leave half the hits still reading as a nudge.
+ *
+ * ## The gates
+ *
+ * The same three `maybePop` uses, read from the same clock, and it must run before `maybeBurst` stamps that clock: round
+ * age (the spawn pile-up is not a hit), the per-body contact cooldown, and the lower `serial` of the pair, so `Touched`
+ * firing on both parts still produces one shove rather than two.
+ *
+ * ## Why the direction is the contact normal
+ *
+ * Two bodies in adjacent lanes get a normal that is mostly across the belt, which the writer projects onto `across` — the
+ * full shove. Two bodies dead in line get a normal that is mostly along-belt, whose along-belt part the writer drops, so a
+ * pure rear-end contact shoves little. That is deliberate: it is what a real separation would do, and forcing a sideways
+ * kick out of a head-on hit would read as a random flick. The vertical pop covers that contact instead.
+ */
+function maybeShove(ball: BasePart, other: BasePart): void {
+	const now = os.clock();
+
+	if (now - roundStartedAt < HIT_EFFECT_MIN_ROUND_AGE_SECONDS) {
+		return;
+	}
+
+	const mine = contactEffectOf(ball);
+	if (now - mine.lastBurstAt < HIT_EFFECT_COOLDOWN_SECONDS) {
+		return;
+	}
+
+	if (contactEffectOf(other).serial < mine.serial) {
+		return;
+	}
+
+	const direction = shoveDirection(ball.Position, other.Position, mine.serial);
+	shoveLateral(ball, direction.mul(-BALL_COLLISION_SHOVE_SPEED));
+	shoveLateral(other, direction.mul(BALL_COLLISION_SHOVE_SPEED));
+	print(
+		`[Powers] shove: ball=${ball.GetFullName()} other=${other.GetFullName()} speed=${BALL_COLLISION_SHOVE_SPEED} dir=${formatVector(direction)}`,
+	);
+}
+
 /**
  * Decides whether this contact draws a burst, and if so fires it.
  *
@@ -944,8 +1085,9 @@ function broadcastHit(ball: BasePart, other: BasePart): void {
  *
  * `BALL_SPEED` is the model's number, and the tick loop rewrites a ball's *velocity* from it — but nothing writes
  * `BALL_SPEED` itself between two ticks, so a value written here survives to the next tick and is then what the velocity
- * is derived from. A force or an `AssemblyLinearVelocity` written here would be gone in the same frame, which is the one
- * mistake this whole design exists to avoid repeating.
+ * is derived from. A whole-vector write to X/Z would be replaced by the next movement tick. Y is different: that loop
+ * preserves the vertical component, which is why the contact pop below changes only Y and does not touch the `BALL_SPEED`
+ * model.
  *
  * ## Why both handlers firing is right for the transfer and wrong for the effect
  *
@@ -964,8 +1106,8 @@ function broadcastHit(ball: BasePart, other: BasePart): void {
  * `powersActive` (1) → `other` carries the `Ball` tag (2) → this body has state and a colliding power (3) → the
  * per-ball `POWER_COLLISION_COOLDOWN` (4) → the transfer has somewhere to go (5).
  *
- * **The burst is not in that chain any more** (item 111). It is decided by `maybeBurst` above gate (3), on its own clock,
- * for every contact - see there for its gates and for why the two clocks are separate constants.
+ * **Neither contact effect is in that chain any more** (item 111). The pop and burst are decided above gate (3), on their
+ * shared contact-effect clock; see `maybePop` and `maybeBurst` for their eligibility rules.
  *
  * ## The transfer moves a number, not a direction
  *
@@ -976,8 +1118,9 @@ function broadcastHit(ball: BasePart, other: BasePart): void {
  * toward the **front**, where it spawned.
  *
  * So a drain *can* change a ball's direction of travel, but only indirectly: once its `BALL_SPEED` falls below the
- * reference the model turns it around. There is no lateral component and no impulse here — two balls cannot knock each
- * other sideways through this handler, and a `Vector3` written from here would be overwritten on the next tick.
+ * reference the model turns it around. There is no lateral component in the model. X and Z remain owned by the belt model
+ * and the sway respectively: the contact pop writes only Y, and the contact shove is an *impulse* that the sway's writer
+ * projects, applies and decays — never a velocity written from here.
  *
  * **Gate (3) is why a pair with no colliding power produces no burst.** That is now a property of this handler alone: since
  * item 87 every body carries a `Touched` connection (see `setPower`), and the colliding-power check moved from the
@@ -996,10 +1139,14 @@ export function onBallCollision(ball: BasePart, other: BasePart): void {
 	// is a ball". See `rememberTouch` for why it is here and not beside the fire.
 	rememberTouch(ball, other);
 
-	// **The burst is decided here, above every transfer gate.** It used to sit at the fire site below, which made it a
+	// **The pop, the shove and the burst are decided here, above every transfer gate.** All three read the same contact
+	// clock, and the first two must run before `maybeBurst` stamps it. They are contact effects; none changes the transfer
+	// below. The burst used to sit at the fire site below, which made it a
 	// property of `bully` and `heavy` only - so a belt of plain bodies collided in silence. It is now a property of
 	// *contact*: any body touching another draws one, throttled by `HIT_EFFECT_COOLDOWN_SECONDS` rather than by the
 	// transfer's cooldown. Nothing about the transfer moved; it is still gated on a colliding power below.
+	maybePop(ball, other);
+	maybeShove(ball, other);
 	maybeBurst(ball, other);
 
 	const state = states.get(ball);
