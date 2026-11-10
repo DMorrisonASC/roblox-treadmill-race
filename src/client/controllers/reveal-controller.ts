@@ -10,6 +10,7 @@ import { outlineText } from "shared/ui/text";
 import { chunkyDarkTheme, Theme } from "shared/ui/theme";
 import { panelScaleFor } from "shared/ui/ui-scale";
 import { lockControls } from "client/controls-lock";
+import { getConfettiController } from "client/controllers/confetti-controller";
 import { attachClickSound } from "shared/ui/sounds";
 import { attachPressFeedback } from "shared/ui/press";
 
@@ -100,6 +101,18 @@ const FLIP_HALF_SECONDS = 0.12;
 
 /** **Placeholder.** The delay between two cards starting their flip. */
 const FLIP_STAGGER_SECONDS = 0.08;
+
+/**
+ * **Placeholder.** How many confetti pieces the completed reveal throws, in one burst.
+ *
+ * **`80`.** The module's own default is `250` — `if typeof(amount) ~= "number" then amount = 250 end` — and the demo the user watched
+ * shows roughly **60–80** large flat pieces, so `80` is the closest match to the effect they pointed at. `250` would be more faithful
+ * to the module's *default argument* and less faithful to its *demo*; the demo is the target, and both numbers are named here so the
+ * next reader can move this one number in either direction knowingly.
+ *
+ * The tree carried `204` before this: a number typed while the effect was drawing nothing at all, which is neither.
+ */
+const BURST_COUNT = 80;
 
 /** **Placeholder.** The overlay's dim, as the user asked for it. */
 const DIM_TRANSPARENCY = 0.5;
@@ -226,6 +239,39 @@ export class RevealController implements OnStart {
 	/** The dim, while a reveal is up. Its existence *is* the "one overlay at a time" state. */
 	private dim?: Frame;
 
+	/**
+	 * The grid host, while a reveal is up.
+	 *
+	 * Held for one reason: the confetti's emitter is the grid's centre, and the only honest way to find that is to read the host's
+	 * live `AbsolutePosition`/`AbsoluteSize` at the moment the last card flips — recomputing it from the fit scale would be a second
+	 * copy of `buildGrid`'s arithmetic, free to disagree with it.
+	 */
+	private grid?: Frame;
+
+	/**
+	 * The highest `ZIndex` any card reached, so the confetti can be put one above it.
+	 *
+	 * **Read from the cards as they are built, not hard-coded.** `applyChunkyChrome` puts the face at its `zIndex + 1`,
+	 * `addChunkyRing` puts the ring above that, and this file's own card content sits above both — a number this file cannot know by
+	 * arithmetic alone, and one that moves the moment a card gains a layer.
+	 */
+	private cardTopZIndex = 0;
+
+	/**
+	 * Which cards throw confetti, 1-based — computed at open from the card count and printed at open, so the schedule in the log and the
+	 * bursts in the log are the same array rather than two copies of a rule (item 170).
+	 */
+	private confettiAt = new Array<number>();
+
+	/**
+	 * The cards that have already fired, so one card cannot fire twice.
+	 *
+	 * Cleared on every open — including the `Open Again` rebuild — which is what makes a re-opened reveal fire its schedule from card 1
+	 * again. A set that survived would silence the first burst of the next open, and the symptom would be "the second open has no
+	 * confetti at all".
+	 */
+	private readonly confettiFired = new Set<number>();
+
 	private readonly cards = new Array<RevealCard>();
 
 	/**
@@ -288,6 +334,13 @@ export class RevealController implements OnStart {
 
 		this.count = options.count;
 		this.reopen = options.onOpenAgain;
+		// Reset before the cards are built: it is a maximum over this reveal's cards, and carrying the previous reveal's value into a
+		// smaller one would put the confetti one layer too high for no reason.
+		this.cardTopZIndex = 0;
+		// **A new reveal gets a new schedule and an empty fired-set.** The rebuild after `Open Again` goes through here, which is what
+		// makes the second open throw its confetti from card 1 rather than none at all.
+		this.confettiAt = this.confettiCards(ids.size());
+		this.confettiFired.clear();
 
 		const gui = getScreenGui("reveal");
 		const viewport = this.viewport();
@@ -314,6 +367,11 @@ export class RevealController implements OnStart {
 		this.buildFooter(dim);
 
 		print(`[Reveal] open chest=coin count=${options.count} ids=${ids.join(",")}`);
+		// **The schedule, printed once so a report can read it against the `[Confetti] burst` lines.** It is the same array that decides
+		// the bursts, not a second statement of the rule — `at=1` for one card, `at=1,6` for ten, and `at=` for a reply that somehow
+		// carried no cards (which `show` refuses before it gets here, so that branch is a guard rather than a path).
+		print(`[Reveal] confetti schedule cards=${ids.size()} at=${this.confettiAt.join(",")}`);
+
 		this.runSequence(generation);
 	}
 
@@ -351,12 +409,19 @@ export class RevealController implements OnStart {
 		}
 
 		this.dim = undefined;
+		this.grid = undefined;
 		this.generation += 1;
 		this.cards.clear();
 		this.againButton = undefined;
 		this.againPriceLabel = undefined;
 		this.reopen = undefined;
+		// The schedule dies with the reveal: a `task.delay` that survives the close checks the generation *and* finds an empty schedule,
+		// so a torn-down reveal cannot fire a burst whatever order those two arrivals take.
+		this.confettiAt = new Array<number>();
+		this.confettiFired.clear();
 
+		// **This is also the confetti's teardown.** Any burst fired into this frame is a child of it, so `Destroy()` takes the clones
+		// with it — and the confetti controller's own `Destroying` hook drops its books in the same instant rather than a frame later.
 		dim.Destroy();
 
 		if (!keepLock) {
@@ -409,6 +474,7 @@ export class RevealController implements OnStart {
 		host.BorderSizePixel = 0;
 		host.ZIndex = 2;
 		host.Parent = dim;
+		this.grid = host;
 
 		// One `UIScale` for the whole grid, and it is a different object from the per-card drop `UIScale` — the same argument as the
 		// module docblock: one property, one owner. This one is the accepted mobile answer (`panelScaleFor`, item 160), reused rather
@@ -555,6 +621,9 @@ export class RevealController implements OnStart {
 		name.ZIndex = z + 3;
 		name.Parent = face;
 
+		// The card's highest layer, recorded as it is built so the confetti can be one above it. See `cardTopZIndex`.
+		this.cardTopZIndex = math.max(this.cardTopZIndex, name.ZIndex);
+
 		const sizeConstraint = new Instance("UITextSizeConstraint");
 		sizeConstraint.MaxTextSize = PANEL_TYPE.h6.size;
 		sizeConstraint.Parent = name;
@@ -626,6 +695,15 @@ export class RevealController implements OnStart {
 
 	/** One card's turn: collapse, swap faces, expand. See the module docblock for why this is `Size.X` and not `Rotation`. */
 	private flip(generation: number, card: RevealCard, index: number): void {
+		// **The confetti rides the flip's start, not the sequence's end (item 170).** This is the first line of the flip — before the
+		// closing tween is created, so it is the instant the card begins to turn rather than the instant it finishes. `flip` is called
+		// from the staggered `task.delay` above, which is the only "a card has started" event the sequence has: there is no per-card
+		// signal to hook, the stagger *is* the schedule.
+		//
+		// The index is 1-based here because the schedule and its log line are written for a reader — `at=1,6` — and the internal `index`
+		// is 0-based. One conversion, at the only place it is needed.
+		this.fireConfetti(index + 1);
+
 		const closing = TweenService.Create(card.root, FLIP_CLOSE_TWEEN, { Size: UDim2.fromOffset(0, CARD_HEIGHT) });
 
 		closing.Completed.Connect(() => {
@@ -639,10 +717,80 @@ export class RevealController implements OnStart {
 
 			print(`[Reveal] flip card=${index + 1} id=${card.ballId} rarity=${card.rarity}`);
 
-			TweenService.Create(card.root, FLIP_OPEN_TWEEN, { Size: UDim2.fromOffset(CARD_WIDTH, CARD_HEIGHT) }).Play();
+			TweenService.Create(card.root, FLIP_OPEN_TWEEN, {
+				Size: UDim2.fromOffset(CARD_WIDTH, CARD_HEIGHT),
+			}).Play();
 		});
 
 		closing.Play();
+	}
+
+	/**
+	 * The card numbers a reveal throws confetti at — **the two bursts of `Open 10`, and the one of `Open 1`.** 1-based.
+	 *
+	 * The rule is `1`, then the **first card of the second half**: `math.floor(count / 2) + 1`. For ten that is `6`, so the two bursts
+	 * bracket the ten flips into two halves of five; `math.ceil(count / 2)` would give `5`, which is the *last* card of the first half
+	 * and starts the second burst before the first one has finished reading. For one card the second entry does not exist.
+	 *
+	 * It lives here, and is printed at open, so the schedule and the bursts cannot disagree: the same array decides both.
+	 */
+	private confettiCards(count: number): Array<number> {
+		if (count <= 0) {
+			return new Array<number>();
+		}
+
+		if (count === 1) {
+			return [1];
+		}
+
+		return [1, math.floor(count / 2) + 1];
+	}
+
+	/**
+	 * Fires the burst for a card starting its flip, if that card is on the schedule and has not fired already.
+	 *
+	 * ## Why the burst is here and not at the end of the sequence
+	 *
+	 * It used to fire from the last card's expand `Completed` (item 165): every id shown, every card the right way up, then a
+	 * celebration. The effect of that was a reveal that finished and *then* threw confetti at the player — an epilogue, arriving after
+	 * the moment it was celebrating. Fired at a flip's start instead, the confetti is the flourish *of* the turn: it is already in the
+	 * air as the first card shows its face, and the second burst carries the second half.
+	 *
+	 * ## The two guards
+	 *
+	 * - **`confettiFired`** is a per-reveal set of card numbers. `flip` is reached from a `task.delay` per card, and a second call for
+	 *   the same index — a restart, a re-entered sequence — would otherwise throw a second burst for one card. The set is cleared when
+	 *   a reveal opens, which is also what makes `Open Again` correct: the rebuilt reveal starts at card 1 with an empty set.
+	 * - **the generation check** is the same one every deferred step uses: `close` bumps it, so a reveal torn down between the
+	 *   stagger's delay and its flip cannot fire a burst at all.
+	 *
+	 * The `dim`/`grid`/`confetti` presence test stays, because "no confetti" has three causes and only one of them is in the other
+	 * file — a torn-down reveal, or a confetti controller that never booted.
+	 */
+	private fireConfetti(cardNumber: number): void {
+		if (!this.confettiAt.includes(cardNumber) || this.confettiFired.has(cardNumber)) {
+			return;
+		}
+
+		const dim = this.dim;
+		const grid = this.grid;
+		const confetti = getConfettiController();
+
+		if (dim === undefined || grid === undefined || confetti === undefined) {
+			print(
+				`[Reveal] confetti skipped card=${cardNumber} dim=${dim !== undefined} grid=${grid !== undefined} confetti=${confetti !== undefined}`,
+			);
+			return;
+		}
+
+		this.confettiFired.add(cardNumber);
+
+		// The grid's centre in the overlay's own pixels. **The confetti no longer uses it to place anything** — item 169 made the spawn
+		// full-screen, as the module's is — but it is passed anyway: it is what the burst's log line prints, and a report reading
+		// `[Confetti] burst … position=…` should see the reveal's centre rather than a zero.
+		const centre = grid.AbsolutePosition.add(grid.AbsoluteSize.mul(0.5)).sub(dim.AbsolutePosition);
+
+		confetti.burst(dim, centre, BURST_COUNT, this.cardTopZIndex + 1);
 	}
 
 	// #endregion

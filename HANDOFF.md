@@ -4332,3 +4332,173 @@ Until then the coin chest is the whole feature, and that is deliberate: a reveal
 **Audit.** Changed: `src/client/controllers/reveal-controller.ts` (`buildGrid` — host size, anchor, position, the `available` band, and the docblock recording the failure; new `GRID_TOP_INSET`), `UI_STYLE_GUIDE.md` (§4.2 gains "a scaled frame shrinks about its `AnchorPoint`" with the anchor table and the two rules). Build exit 0, lint 0 errors, prettier clean, `\uXXXX` zero, `flamework.build` unchanged at **31 identifiers** — no new controller. **`npm test` not run.** Untouched: the card, the sequence, the footer, the layer numbers, the shop's wiring and every number item 163 recorded.
 
 **Studio-only:** whether `72` clears the topbar on the reporter's phone as well as their desktop; whether the ten-card grid now reads as "top middle" or as "too high", since a landscape screen with a width-limited grid leaves the lower third empty by design.
+
+## 165. The finished reveal throws one burst of 2D confetti — the 2018 module ported, with its three bugs recorded where they lived
+
+**The 2018 Confetti Cannon could not work and could not live here.** Its logic was in a `ModuleScript` that no wrapper ever called `:Update` on, so it drew a still frame; its palette was a module-level variable every `createParticle` overwrote, so a burst was monochrome; and its `paramColors == nil` default was applied one line *after* the index that needed it, so a `nil` palette errored on `nil`. A `LocalScript` in this tree is a Rojo/roblox-ts contract violation anyway (item 84), so the logic moved to `src/shared/ui/confetti.ts` as pure functions and the drawing moved to `client/controllers/confetti-controller.ts` as a `@Controller()` clone-pose-destroy controller — the same shape as `hitEffect`, `windBoost`, `tailWind` and `motionBlur`, in 2D.
+
+**The three bugs are now comments, not code.** `createParticle` takes the palette on its state object and bakes the colour into a `readonly` field, so a later burst cannot reach back into an earlier one (bug 1). `colours` is a **required parameter** of `spawnBurst`, so there is no `nil` path to default late (bug 2). `stepParticle` is pure and `outOfBounds` is one predicate, while the `RenderStepped` loop that calls them lives in the controller — the piece the module was missing (bug 3).
+
+**One burst, at the end, and the completion point did not exist until this round.** The brief assumed the flip sequence already had somewhere to hook. It did not: `flip` played the expand tween and never observed it. So `flip` now holds the expanding tween and, only when `index === cards.size() - 1`, connects to its `Completed` and calls `celebrate()`. **The expand rather than the swap**, because the swap happens at zero width and a burst fired there would open behind a card still turning. The `generation` guard is the race the brief asked about: `close` bumps it, so `OK` between the swap and the expand finishing cannot fire into a destroyed frame.
+
+**`chunky-chrome.ts` exports no `ZIndex` — there is no constant to read.** The brief's "read the value from `chunky-chrome.ts`" describes something that does not exist: the module takes `zIndex` as an *option* and derives the face at `zIndex + 1` and the ring at `face + 1`. On these cards the chrome is called with `3`, so the face is `4`, the ring and art are `5`, the ball `6`, and the name and tier `7`. Rather than hard-code `8`, the reveal records the maximum as it builds (`cardTopZIndex`) and passes `+ 1`. The module's own `20` would have landed *inside* that stack and drawn the confetti behind the cards it was celebrating. The number this round actually used is **8**.
+
+**`ZIndexBehavior` is never set in this tree**, so every gui is on the default `Sibling`, where a child's `ZIndex` competes only with its siblings and a subtree is drawn as one unit. That means the burst — a direct child of the overlay frame at `8` — already outranks the whole grid host at `2` regardless of the cards inside it; the `8` is belt and braces and, unlike the `Sibling` fallback, also correct under `Global`.
+
+**The parenting is the teardown.** The burst goes into the reveal's own overlay frame (`dim`), never into the `ScreenGui`, so `close` destroying `dim` takes every clone with it on all four paths — `ok`, `open-again`, `phase`, `teardown`. The confetti controller also hooks `parent.Destroying` so its particle list is dropped in the same instant rather than a frame later, and each particle additionally has a hard `DEFAULT_LIFETIME_SECONDS` backstop so a cull that misses cannot leave a `PlayerGui` full of labels.
+
+**`PreloadAsync` is logged and ignored.** Item 158 established that its verdict is not evidence in this place — it reports `Asset type does not match requested type` for images and audio that render perfectly — so a burst disabled by it would be disabled for no reason. The check that actually separates a broken asset from broken code is a synchronous property read: an empty `Image` on either template warns by name (`[Confetti] … has no Image set — the confetti will animate and draw nothing`), because that is a clone that moves correctly and draws nothing.
+
+**Reserved identifiers bit twice.** roblox-ts's `isReservedIdentifier` is `hasOwnProperty` on luau-ast's 27 globals — `_G TS assert bit32 coroutine error exports getmetatable ipairs next pairs pcall require script select self setmetatable string super table utf8 math tostring type typeof unpack game`. **`const next = stepParticle(...)` is that list**, and the diagnostic points at a *comment* two lines above because the class transform shifts the reported position. It is now `moved`. (`template` was renamed to `source` and then to `shape` on the way there; it is not reserved — that rename was precautionary.)
+
+**Audit.** Added: `src/shared/ui/confetti.ts` (the pure port, `DEFAULT_CONFETTI_COLORS`, `DEFAULT_GRAVITY`, `spawnBurst`/`createParticle`/`stepParticle`/`outOfBounds`), `src/shared/ui/confetti.spec.ts` (12 assertions), `src/client/controllers/confetti-controller.ts`. Changed: `src/client/controllers/reveal-controller.ts` (import, `grid`/`cardTopZIndex` fields, `BURST_COUNT`, the `outOfBounds`-free `celebrate`, the last flip's `Completed` hook, `this.grid = host`, `close` clearing both fields, `show` resetting `cardTopZIndex`). Build exit 0, lint 0 errors, prettier clean on every touched file (`viewport.ts` still fails at `HEAD`), `\uXXXX` zero, `ConfettiCannon` zero in `src`, `flamework.build` regenerated from scratch at **32 identifiers** with `ConfettiController` present. **`npm test` not run** — the spec is written and type-checked but not executed; its arithmetic was verified by mirroring the formulas in Node (10 particles all at the emitter, 3 distinct colours in one burst, both velocity signs present, burst empty in 24 of the 600 allowed steps). Untouched: the reveal's drop/tease/flip durations, its grid, footer, layers and the shop's wiring, the theme, the chunky builders, the store, the picker, the economy and the phase machine.
+
+**Placeholders:** `BURST_COUNT = 24` (reveal-controller), `CONFETTI_ROOT_NAME = "confetti"`, `GRAVITY_PER_SECOND = 1200`, `DEFAULT_LIFETIME_SECONDS = 2.2`, `EMITTER_JITTER = 6`, `BURST_FORCE = (0, -180)` (confetti-controller), `MAX_PARTICLE_SIZE = 18`, `MIN_PARTICLE_SIZE = 9`, `SPREAD_SPEED = 220`, `CULL_MARGIN = 40` (confetti).
+
+**Studio-only, and one action this repo cannot take:** the 2018 `ModuleScript`, its `LocalScript` and the `ScreenGui > Frame` wrapper have to be **deleted in Studio** — nothing in the repository can reach them, and leaving them means two systems with the same name. Also unverified: whether `ReplicatedStorage/assets/ui/confetti` exists at all (the boot warns and disables if not — `default.project.json` maps only `rbxts_include` and `TS` into `ReplicatedStorage`, so this folder is place-authored, not repo-authored); whether the two `Image` ids resolve; whether `Rotation` at up to 360° reads as confetti or as scattered cards; whether one 24-particle burst reads as a celebration or a puff; whether the module's five colours sit acceptably beside the chunky charcoal cards; and whether the burst has finished by the time a player presses `OK` on a slow click, or is still falling behind the footer.
+
+## 166. The confetti resolved to its own compiled module, then found no assets — so it now draws from shapes when there is nothing to clone
+
+**The first run drew nothing, and the log said why in one line:**
+
+```
+19:04:00.539  [Confetti] found ReplicatedStorage.TS.ui.confetti but not both templates — circular=false square=false
+```
+
+**That is this round's own module.** `src/shared/ui/confetti.ts` compiles to `ReplicatedStorage.TS.ui.confetti`, so a recursive name search for `"confetti"` is **permanently ambiguous in this tree** — the code folder contains a `ModuleScript` with exactly the name the asset folder wants. The search stopped at the first match, which was the module, which has no children, which means "found the folder but it holds nothing". The `assets.vfx.*` controllers (`hitEffect`, `windBoost`, `tailWind`, `motionBlur`) do not have this problem because their names do not collide with a module name; this one does.
+
+**Three faults, and the first one was hiding the other two.**
+
+1. **The name match was not a folder.** Strategy one now requires an `Instance` named `confetti` that is a `Folder` **and holds both templates as `ImageLabel`s** — a test a compiled module cannot pass. The canonical `ReplicatedStorage.assets.ui.confetti` is probed by walking the path and wins when several folders qualify.
+2. **Nothing to clone existed anyway.** The place has `ReplicatedStorage.assets.vfx.{hitEffect,windBoost,tailWind,motionBlur}` and no confetti pair, so even a correct lookup would have found an empty folder. Strategy two accepts both names loose anywhere under `ReplicatedStorage`, which is how an author who drops them in `assets/vfx` and calls the folder something else still gets confetti.
+3. **The controller disabled itself and said nothing at burst time.** A reveal that finished, no burst, and no line in between is the report this round came back with. `burst()` no longer has a silent path: it always prints `[Confetti] burst …` or the reason it cannot, and `celebrate()` prints `[Reveal] celebrate skipped dim=… grid=… confetti=…` when **it** is the one that bailed.
+
+**The burst now draws with no assets at all.** A `Frame` with a `UICorner` is a confetto: `UDim(1, 0)` for the circular half (a dot, whose rotation is invisible — colour and size carry the variety) and `UDim(0, 2)` for the square half (a rounded rectangle, whose rotation *is* the confetti motion). The Studio templates are still preferred when they resolve, and the boot line says which renderer is live (`mounted folder=…` versus `no templates found — drawing … from plain 2D shapes`). **This place makes an image-based burst the least reliable thing to depend on**: the same log reports `[Coin] icon did not load … status=Enum.AssetFetchStatus.Failure` and `[PickupSprite] image did not load … status=Enum.AssetFetchStatus.Failure`, so two decals already fail to fetch here. A design that only draws with hand-authored assets draws nothing until somebody opens Studio, and this round shipped exactly that.
+
+**`Image` checks gained the placeholder case.** `reportImage` now also warns on `rbxassetid://123456789` / `…788` — the two ids the store's rail tabs carry — because a template with a placeholder fetches "successfully" and draws a grey box, which reads as a confetti bug rather than as an unfinished asset.
+
+**Audit.** Changed: `src/client/controllers/confetti-controller.ts` (`resolveTemplates` with three strategies and a candidate listing, `canonicalFolder`/`holdsBoth`/`containsTemplate`/`findAnywhere`, `buildParticle` with the clone-or-shape branch, `LiveParticle.label` widened to `GuiObject`, the `disabled` field removed, `reportImage`'s placeholder check), `src/client/controllers/reveal-controller.ts` (`celebrate`'s skip line). Build exit 0, lint 0 errors, prettier clean on every touched file, `\uXXXX` zero, `flamework.build` unchanged at **32 identifiers**. **`npm test` not run.** Untouched: the pure port and its spec, the reveal's sequence and durations, its grid, footer, layers, and the shop.
+
+**Placeholders:** unchanged from item 165.
+
+**Still a Studio task, and now optional:** authoring `ReplicatedStorage.assets.ui.confetti` with `CircularConfetti` and `SquareConfetti` `ImageLabel`s upgrades the burst from plain shapes to decals. It is no longer required for the effect to appear. Deleting the 2018 `ModuleScript`/`LocalScript`/`ScreenGui` wrapper is also still a Studio task.
+
+## 167. The confetti drew 24 particles and nobody could see them — the template's size was being thrown away
+
+**The second run resolved the assets and fired the burst, and still showed nothing:**
+
+```
+[Confetti] mounted folder=ReplicatedStorage.assets.ui.confetti circular=CircularConfetti square=SquareConfetti colours=5
+[Confetti] burst parent=Players.prospeed1.PlayerGui.RevealGui.RevealOverlay count=24 position=530.4000244140625,202
+[Confetti] burst done count=0 lifetime=1.16s
+```
+
+Every line in that sequence is a success line. The burst fired, 24 particles existed, they were parented into the right overlay, and the last one was culled after **1.16 s**. So the fault was not resolution, not the hook and not the parenting — it was that the particles were too small to see for too short a time, and **the cause of the size was a rule this round had already written down and then broken**: "nothing is left at the template's authored value except `Image` and the base `Size`".
+
+**The port was overriding the authored size.** `buildParticle` wrote `Size = UDim2.fromOffset(9..18, 9..18)` on every clone, so an `ImageLabel` authored at 48 pixels rendered at a quarter of the size the author chose, for one second, at the exact centre of the card the player was looking at. On a 1060-pixel-wide screen that is a handful of specks behind a bright card.
+
+**Three fixes, all of them measured rather than guessed:**
+
+- **`Size` is now the template's own, varied by a multiplier.** `SIZE_SCALE_MIN`/`SIZE_SCALE_MAX` = `0.7`/`1.2` of the authored axis, read once at boot from `Size.X.Offset` (a template in `ReplicatedStorage` has no resolved `AbsoluteSize`). `baseAspect` keeps a non-square asset un-squashed. A 48-pixel template therefore draws at **34–58 px** instead of 9–18. The shape fallback gets `DEFAULT_PARTICLE_SIZE = 26` for the same reason.
+- **Gravity `1200` → `700` and muzzle velocity `-180` → `-300`.** At `1200` the whole burst left the bottom edge in **1.16 s** — the number in the log — on a viewport about 520 px tall. The retune gives a mean life of **1.50 s** and a longest of **1.67 s** with the plume opening ~90 px above the emitter, which is the difference between "a puff nobody noticed" and a burst.
+- **`Visible` and `ImageTransparency` are forced on every clone.** A template authored `Visible = false` (the normal way to park one) and an `ImageTransparency` above zero are the two properties that make a clone animate perfectly and draw nothing — both fail identically to broken code.
+
+**One new line per burst, because the log could not answer the question it was being asked.** The previous run printed a burst, a count, a lifetime and no visible confetti — every fact except whether a clone had a non-zero rect and was in front of anything:
+
+```
+[Confetti] sample absolute=<x>,<y> size=<w>,<h> visible=<bool> zIndex=<n> transparency=<n> parent=<bool>
+```
+
+`task.defer` waits one resume so the layout has resolved `AbsoluteSize`. **If the next report still says "nothing", that line is the answer**: a `size` of 0 means the authored size is scale-based, `visible=false` means something is hiding them, and a `zIndex` below the cards means the draw order is wrong after all.
+
+**Audit.** Changed: `src/shared/ui/confetti.ts` (`DEFAULT_PARTICLE_SIZE`, `SIZE_SCALE_MIN`/`SIZE_SCALE_MAX` replacing `MAX`/`MIN_PARTICLE_SIZE`, `BurstState.baseSize`, `spawnBurst`'s sixth parameter), `src/client/controllers/confetti-controller.ts` (`baseSize`/`baseAspect` read at boot, `buildParticle` size and the forced properties, `GRAVITY_PER_SECOND` 700, `BURST_FORCE` -300, the `sample` line, `baseSize` in the mounted line). Build exit 0, lint 0 errors, prettier clean on every touched file, `\uXXXX` zero, `flamework.build` unchanged at **32 identifiers**. **`npm test` not run** — the spec's calls pass five arguments and take the `DEFAULT_PARTICLE_SIZE` base, so no assertion changed; the retuned trajectory was checked with a mirror of the formulas in Node (mean 1.50 s, longest 1.67 s, plume apex ~90 px above the emitter).
+
+**Placeholders:** `DEFAULT_PARTICLE_SIZE = 26`, `SIZE_SCALE_MIN = 0.7`, `SIZE_SCALE_MAX = 1.2`, `GRAVITY_PER_SECOND = 700`, `BURST_FORCE = (0, -300)`, `SPREAD_SPEED = 220`, `CULL_MARGIN = 40`, `DEFAULT_LIFETIME_SECONDS = 2.2`, `EMITTER_JITTER = 6`, `BURST_COUNT = 24`.
+
+**Studio-only:** whether the authored `CircularConfetti`/`SquareConfetti` have offset sizes (the `sample` line reports the drawn size, which settles it); whether a burst at the card's centre reads as a celebration or as debris over the item; and whether 1.5 s is long enough to register on a phone, since the lifetime cap was never the limiter — the cull was.
+
+## 168. The confetti is the 2024 module: `Frame` pieces, six colours, three shapes, continuous spin — and no asset to delete
+
+**The previous port was ported from the wrong module.** Items 165 and 167 were two rounds of diagnosis on a port of a 2018 `ModuleScript` that drew `ImageLabel`s resolved by name out of `ReplicatedStorage`: first the name search matched this tree's own compiled module (`ReplicatedStorage.TS.ui.confetti`), then the resolved templates were drawn at a quarter of their authored size and the whole burst was gone in 1.16 s. **Neither fault exists in the module the user actually meant**: it is `Frame`s created in code — no `Image`, no folder, no `PreloadAsync`, nothing for anybody to delete. Both rounds are superseded, and a reader looking for which confetti port is live should land here.
+
+**What the old port got right, and this keeps**: the shape (pure rules in `shared/ui/confetti.ts`, plumbing in a `@Controller()`), one `RenderStepped` for the whole system rather than one per piece, a `ZIndex` derived from the caller's card stack rather than a literal, and the `[Confetti] sample` line — which is the only reason two failures were diagnosable at all.
+
+**What this drops**: the asset resolution, the size override, the fixed 9–18 px pixels, and the gravity/force retune that was treating the symptom.
+
+**The module's four problems and what the port does with each:**
+
+1. **The `ScreenGui` name mismatch.** It looked for `ConfettiScreenGui` and created `ConfettiGui`, so the lookup never matched and **every `Emit` added another `ScreenGui` to `PlayerGui`**. The port creates **one overlay frame in `onStart`** and never inside `burst`, so two `Open Again` reveals reuse the same one.
+2. **`repeat task.wait() until bonusSound.IsLoaded`.** An unbounded wait, in the emit path, before a single piece existed. **The sound is not ported at all** (the user dropped it), so the wait has nothing left to guard. `grep "rbxassetid://2789427964" src` is zero.
+3. **The `UIGradient` covering the palette.** The module sets six `baseColors` and then parents a `UIGradient` with two **random** endpoint colours over every piece, so the six colours were never visible. **The gradient is not ported**; the six are the visible colour, with the module's own `0.95`–`1.05` brightness jitter kept for variety. This is the change a reader is most likely to "restore", and restoring it hides the palette again.
+4. **`Triangle` never drew a triangle** — the branch only resized the piece and gave it the same `UICorner` as everything else. **The shape cycle is three**: `square`, `circle` (`UICorner` at `UDim(1, 0)`) and `diamond` (a square at `45` degrees, which the spin then carries around its own centre). A triangle on a `Frame` needs a gradient wedge or an image, and the user dropped the asset path in the same breath.
+
+**The overlay is the controller's, not the reveal's frame.** One `Frame` named `ConfettiOverlay` in the `reveal` layer's `ScreenGui` (`getScreenGui("reveal")`, so no second gui for the same rank), created once in `onStart`, `Active = false` so it passes touches through to the reveal's `OK`. The previous port parented pieces into the reveal's own frame, which works but makes a burst's lifetime a property of a frame the reveal destroys on four different paths — so a piece could race a `Destroy()`. Out here there is no race, and a burst still falling when the player presses `OK` keeps falling, which is right: it was already drawn.
+
+**The physics is the module's, including the part that is not physics.** `position.x += velocity.x * dt / 400`, `position.y += velocity.y * dt / 3000 + 0.5 * gravity * age² / 3000`, `rotation += rotationSpeed * dt + sin(age * 2) * 0.5`, destroyed at `y > 1.3`. The gravity term is a running sum of a growing quadratic rather than an integrated acceleration — it double-counts, and it is what the effect was tuned against, so it is reproduced rather than "fixed". `X_SCALE_DIVISOR` and `Y_SCALE_DIVISOR` are named separately because they are different numbers and nothing suggests they were meant to be one. Mirrored in Node: a piece from the grid centre lives **1.60–1.65 s** and crosses the screen in **0.68–1.47 s**, and — contrary to what the module's upward `velocityY` suggests — **none of them leave through the top**, because the accumulating quadratic turns them.
+
+**The spin is the animation the previous port did not have.** The module randomises `rotationSpeed` (`-300..300` degrees per second) and never the spawn angle, so a piece starts square-on and turns, with `sin(age * 2) * 0.5` as a slow wobble on top — the wobble is why it does not look like a wheel on an axle, and it is the cheapest part of the effect to lose in a port.
+
+**`BURST_COUNT` is 204, not the `24` the round's brief said.** The tree had 204 — raised while the effect was drawing nothing — and it is kept: 24–36 px `Frame`s need more of them than the decals did to read as a celebration. The comment beside it now says so instead of contradicting it.
+
+**Audit.** Replaced: `src/shared/ui/confetti.ts` (pure — `ConfettiPiece`, `createPiece`, `spawnBurst`, `stepPiece`, `pieceGone`, `defaultSpawn`, the six colours and every module constant), `src/shared/ui/confetti.spec.ts` (12 assertions), `src/client/controllers/confetti-controller.ts` (`@Controller()`, one overlay, one `RenderStepped`, `buildPiece`, the `sample` line). Changed: `src/client/controllers/reveal-controller.ts` (only the `BURST_COUNT` docblock, which said 24 over a value of 204). Build exit 0, lint 0 errors, prettier clean on every touched file (`viewport.ts` still fails at `HEAD`), `\uXXXX` zero, `flamework.build` regenerated from scratch at **32 identifiers** with `ConfettiController`. **`npm test` not run** — the spec is written and type-checked; its arithmetic was mirrored in Node rather than executed. Untouched: the reveal's sequence, timings, grid, footer, layers and the shop's wiring (the call site is `confetti.burst(dim, centre, BURST_COUNT, cardTopZIndex + 1)` unchanged), the theme, the chunky builders, the store, the picker, the economy and the phase machine.
+
+**Placeholders:** `BASE_PIECE_SIZE = 30` (`30 x 0.8 = 24`, `30 x 1.2 = 36` — exactly the module's range), `SIZE_SCALE_MIN = 0.8`, `SIZE_SCALE_MAX = 1.2`, `GRAVITY = 75`, `X_SCALE_DIVISOR = 400`, `Y_SCALE_DIVISOR = 3000`, `CONF_CEILING = 1.3`, `VELOCITY_X_MIN/MAX = -300/300`, `VELOCITY_Y_MIN/MAX = -350/-200`, `SPIN_MIN/MAX = -300/300`, `BRIGHTNESS_MIN/MAX = 0.95/1.05`, all untuned from the module; `BURST_COUNT = 204` in the reveal.
+
+**Studio-only:** whether 204 pieces at 24–36 px read as a celebration or as debris over the card; whether the six colours beside the chunky charcoal cards are too loud; whether a diamond reads as a diamond once it has spun past 45 degrees (it will look like a spinning square for most of its life — that is the module's behaviour too); whether the pieces draw over the reveal's `OK` button in a way that annoys (they are `Active = false`, so they do not block it); and whether one `RenderStepped` over 204 frames is meaningfully cheaper than the module's 204 connections.
+
+## 169. The confetti is now the module, not an improvement on it — full-screen spawn, four shapes, 80 pieces, the fade-in back
+
+**Third pass on the same module, and the first two were the reason for it.** Items 165/167 ported a *different* module (2018, `ImageLabel`s out of `ReplicatedStorage`); item 168 ported the right one and then deviated from it in four places, each with a reason that sounded better than the module did. The user has since watched the module's own demo, and the deviations are exactly why the port did not look like it. This round removes them.
+
+**What item 168 got right and this keeps**: the split between pure rules and plumbing, one `RenderStepped` for the whole system, a `ZIndex` derived from the caller's card stack, the `[Confetti] sample` diagnostic, the six colours, the module's integration, and the spin.
+
+**The four deviations, removed:**
+
+| deviation | why it was made | now |
+| --- | --- | --- |
+| pieces spawned at the reveal's grid centre | the reveal had a centre to aim at | **`defaultSpawn` for every piece** — `math.random(0,100)/100, math.random(-25,125)/100`, the module's no-`spawnPos` branch, integer draws and all |
+| `Triangle` dropped | it never draws a triangle | **restored** — it resizes to `28..38 × 18..28`, a **wide rounded rectangle**, which is where the demo's size variety comes from |
+| size as `BASE_PIECE_SIZE × SIZE_SCALE` | one constant instead of two ranges | **the module's literal ranges** (`24..36` square, the triangle's two), because a wide piece has two independent axes |
+| no fade-in | simpler | **`BackgroundTransparency` 1 → 0 over `0.5 s`, `Quart`/`InOut`** — 80 pieces appearing in one frame bloom rather than flash |
+
+**`position` on `burst` is now accepted and unused.** The module has no emitter concept, so the reveal's `centre` no longer places anything — it is read into the log line and nowhere else, and the method's docblock says so. The signature is unchanged because the reveal's call site is not this round's business; if a centred burst is ever wanted it is a second method, not a flag, because the module's default has to be the default.
+
+**`BURST_COUNT` is 80.** The module's own default is `250` (`if typeof(amount) ~= "number" then amount = 250 end`), and the demo shows roughly 60–80; 80 is the closest match to the effect the user pointed at, and the docblock names both numbers so the next reader can move the one constant knowingly. The tree carried `204` — typed while the effect was drawing nothing — which was neither.
+
+**The one deliberate non-fidelity: one overlay, not one per `Emit`.** The module looks for `ConfettiScreenGui` and creates `ConfettiGui`, so the lookup can never match and **every `Emit` adds another `ScreenGui` to `PlayerGui`**, none of them findable again. That is a leak, not a behaviour, and it is not reproduced: the controller creates **one** overlay frame in `onStart`, in the `reveal` layer's `ScreenGui`, and every burst reuses it.
+
+**The mirrored physics, re-run with the restored spawn, does not match item 168's numbers — and the reason is the spawn.** Item 168 recorded "1.60–1.65 s, none leaves through the top" for pieces fired from one point at `y = 0.4`. With the module's full-screen spawn, 200 mirrored pieces give **0.77–1.92 s** and **40 of 200 pass above the top** before the accumulating quadratic turns them — a piece spawning at `y = 1.25` has almost no distance to fall, and one spawning near the top crosses it. Both facts are the module's: no top cull exists, and a piece that leaves is left alive until the ceiling test catches it. The prompt asserted the old numbers still held; they do not, and the spawn is why.
+
+**Audit.** Rewritten: `src/shared/ui/confetti.ts` (`ConfettiShape` gains `triangle`; `ConfettiPiece.size` is a `Vector2` of pixels, replacing `sizeScale`; `spawnBurst(count, random)` loses its emitter; `defaultSpawn` uses the module's integer draws; the shape table is four entries in the module's order; `FADE_IN_SECONDS`), `src/shared/ui/confetti.spec.ts` (the distribution assertions moved to a seeded LCG because a cycling list gave twelve identical shapes in a mirror run), `src/client/controllers/confetti-controller.ts` (`buildPiece` uses the piece's own width and height, the triangle branch draws wide, the fade tween; `burst` no longer converts pixels to scale). Changed: `src/client/controllers/reveal-controller.ts` (`BURST_COUNT` 204 → 80 with the docblock naming 250 and 60–80). Build exit 0, lint 0 errors, prettier clean on every touched file (`viewport.ts` still fails at `HEAD`), `\uXXXX` zero, `flamework.build` unchanged at **32 identifiers** — no controller was added. **`npm test` not run** — the spec is written and type-checked, and the draw arithmetic was mirrored in Node rather than executed. Untouched: the reveal's sequence, grid, footer, layers, the shop's wiring, the theme, the chunky builders, the store, the picker, the economy and the phase machine.
+
+**Placeholders:** `PIECE_SIZE_MIN/MAX = 24/36`, `TRIANGLE_WIDTH_MIN/MAX = 28/38`, `TRIANGLE_HEIGHT_MIN/MAX = 18/28`, `GRAVITY = 75`, `X_SCALE_DIVISOR = 400`, `Y_SCALE_DIVISOR = 3000`, `CONF_CEILING = 1.3`, `VELOCITY_X_MIN/MAX = -300/300`, `VELOCITY_Y_MIN/MAX = -350/-200`, `SPIN_MIN/MAX = -300/300`, `BRIGHTNESS_MIN/MAX = 0.95/1.05`, `FADE_IN_SECONDS = 0.5` — all the module's, none tuned; `BURST_COUNT = 80` in the reveal.
+
+**Studio-only:** whether 80 full-screen pieces read like the demo or like a sparse sprinkle on a phone; whether the wide `triangle` pieces are distinguishable from the squares at this size; whether the `0.5 s` bloom still reads as confetti at 80 pieces or as a slow fade; whether a piece passing above the top is visible leaving and returning; and whether `CONF_CEILING = 1.3` is long enough on a tall phone, since the ceiling is a share of the parent's height and the parent is the whole screen.
+
+## 170. The confetti fires as the first card turns, and again at the first card of the second half — not at the end
+
+**It used to fire from the last card's expand `Completed`** (item 165): every id shown, every card the right way up, then a burst. The effect was a reveal that finished and *then* threw confetti at the player — the epilogue of a moment rather than its flourish. The burst now rides each scheduled card's **flip start**, inside `flip`'s first line, before the closing tween is even created.
+
+**The schedule is one array, and the log prints that array.**
+
+```
+[Reveal] confetti schedule cards=<n> at=<i1>[,<i2>]
+```
+
+`at=1` for one card, `at=1,6` for ten. It is built at open by `confettiCards(count)` and stored on `confettiAt`; `fireConfetti` fires only when the card number is in it, so the log and the bursts cannot drift — they are the same data, not a rule written twice.
+
+**The index rule is `math.floor(count / 2) + 1`** — the *first card of the second half*. Ten gives `6`, and the two bursts then bracket two halves of five flips. `math.ceil(count / 2)` gives `5`, the last card of the first half, which starts the second burst before the first has finished reading. One card is one entry; two cards are `at=1,2`; five are `at=1,3`.
+
+**The flip start is the staggered `task.delay`'s landing**, which is the only "a card has started" event the sequence has: there is no per-card signal to hook, so `flip` itself is the event and the confetti is its first statement. The `[Reveal] flip card=<n>` line stays where it was — at the swap, `FLIP_HALF_SECONDS` later — because the prompt froze that line; the pair is therefore one line apart in a quiet log but **not in the same frame**, which is worth knowing when reading a run.
+
+**Two guards, and they answer different failures.** `confettiFired` is a per-reveal `Set<number>` of card numbers, so a second call for one index — a restart, a re-entered sequence — cannot throw a second burst. The **generation** check is the same one every deferred step uses, so a reveal closed between the stagger's delay and its flip fires nothing at all. `close` also empties `confettiAt`, so both orders of arrival are safe.
+
+**`Open Again` gets a fresh schedule and an empty set**, because the rebuild goes through `show`, which is where both are reset. A set that survived would silence the first burst of the next open, and the symptom would be "the second open has no confetti at all" — the class of bug item 168's overlay work was already about.
+
+**`position` is still passed and still unused for placement.** Item 169 made the confetti spawn full-screen, as the module does; the reveal's grid centre goes into the `[Confetti] burst … position=…` line so a report reads the reveal's centre rather than a zero. That is the only thing it is for, and it is said in the code.
+
+**Audit.** Changed: `src/client/controllers/reveal-controller.ts` only — `confettiAt` and `confettiFired` fields, `confettiCards()`, `fireConfetti(cardNumber)` replacing `celebrate()`, the end-of-sequence `Completed` hook removed, one call at the top of `flip`, the schedule line at open, and the resets in `show` and `close`. **`BURST_COUNT` is unchanged at 80 and neither confetti file was touched.** Build exit 0, lint 0 errors, prettier clean on every touched file (`viewport.ts` still fails at `HEAD`), `\uXXXX` zero, `flamework.build` unchanged at **32 identifiers**. **`npm test` not run.** Untouched: the confetti's physics, spawn, shapes, overlay and `ZIndex`; the reveal's drop, tease, flip durations, stagger, grid, footer, layer numbers and close paths; the store, the picker, the economy and the phase machine.
+
+**Placeholders:** none invented this round. The schedule is arithmetic, not a tunable.
+
+**Studio-only:** whether a burst under card 1's flip is a flourish or a distraction from the card itself; whether two bursts of 80 pieces read as two beats or one dense cloud; whether the card-6 burst lands as a second beat rather than a repeat; and whether the log's burst-then-flip ordering is what a run actually prints, since the two lines are `0.12 s` apart and a reader may expect them adjacent.
