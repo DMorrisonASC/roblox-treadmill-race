@@ -71,6 +71,7 @@ asks for is a Studio edit, not a code change.
 
 ## 9. Not done, by design
 
+**Pointer (added by item 171):** superseded by **item 26** — rounds, elimination and the game loop exist now; the list of what was absent then is history.
 No rounds, elimination, survivor tracking or win condition. No UI/Fusion/big-ui in use — the packages
 are installed because the working-game dependency list requires them, and nothing imports them. No
 ball randomisation, no belt ramp, no mesh support, no client prediction.
@@ -244,6 +245,7 @@ bounce, shape pool, textures. `TAGS` gained `ballDecoration`.
 
 ## 16. One-shot spawn on Play replaces the timed stream
 
+**Pointer (added by item 171):** superseded by **item 36** — the one-shot spawn was replaced by spawn-then-enter, one competitor per player.
 Spawned bodies now come from exactly one automatic spawn per bound `BallSpawner`, at server start.
 No timer, no second body. `spawnOnePerSpawner` calls the existing `spawnBall` once per spawner from
 `onStart`, after every spawner is bound, with per-spawner failure containment.
@@ -307,6 +309,7 @@ Sentinel line for item 23. Per-wall `Touched` connection in `TreadmillService` (
 The `VectorForce` mechanism from item 24 produced no observable acceleration in Studio, so it is deleted entirely — `startWallPush`/`stopWallPush`, the `Touched`/`TouchEnded` connections on wall parts, `wallForces`, the attachment, and `WALL_ASSIST_ACCELERATION`; `TreadmillService` no longer binds `TreadmillWall` at all. Replaced by `attachWallAssist`/`applyWallAssist` in `ball-spawner-service.ts`, a near-copy of the working `applyBackspin`: one `Touched` per ball, `HasTag(TAGS.treadmillWall)` filter, `nearestBeltTo` for the belt (the same per-event lookup backspin uses), then `delta = min(WALL_ASSIST_IMPULSE, WALL_ASSIST_TARGET_SPEED - v)` along `+RightVector`. No cooldown, no timestamp, no force — the convergence check is the gate. `WALL_ASSIST_IMPULSE = 1` added; `WALL_ASSIST_TARGET_SPEED = 8` kept. **Unverified in Studio.**
 ## 26. RoundService: four-phase machine, belt ramp, positional elimination
 
+**Pointer (added by item 171):** superseded by **item 34** — the phase names and the `start()` API were replaced by the autonomous loop.
 New `src/server/services/round-service.ts` (`Idle → Countdown → Running → Ended → Idle`) plus `StartRoundController` on key `2`. Balls now exist only inside a round: the spawner's automatic one-shot at server start is **removed**, and `1` is gated on `Running`. The two surfaces future powers use are `onTick(cb): () => void` (1 Hz, `Running` only) and `getElapsedSeconds()` (frozen during `Ended`). Elimination is **positional only** — `EliminationZone` bounding box with each axis shrunk by the body radius, checked on the 1 Hz tick; `TreadmillWall` is never consulted and no wall `Touched` signal is involved. `Instance.Destroying` on every tracked body is what lets the end condition notice deaths the round did not cause (cap, `KillY`). Belt is stopped outside `Running` and ramps linearly on a **separate Heartbeat** connection, via a new `TreadmillService.setBeltSpeed(n)` override. `SHAPE_POOL` gained an unread `power?: string` seam. **Unverified in Studio.**
 ## 27. Backspin gated on effective belt speed
 
@@ -398,6 +401,7 @@ Also repaired three `U+FFFD` replacement characters in `tuning.ts` (em dashes lo
 
 ## 35. Owners on every body, last-standing winner, debug keys 1/2/3
 
+**Pointer (added by item 171):** superseded by **item 36** — the spawn site moved out of `enterWaiting`.
 **Supersedes item 34's `2` = "advance to next phase" and its `AdvancePhase` remote.** Keys are now `1` -> force `Waiting`, `2` -> force `Playing` (refused while already `Playing`), `3` -> spawn four competitors during `Playing`. `AdvancePhaseController` and `SpawnTriggerController` are **deleted**, replaced by one `DebugKeysController` firing `DebugWaiting` / `DebugPlaying` / `DebugSpawn` (three remotes, no arguments, per-action pattern). `RoundService.advancePhase` became `forceWaiting` / `forcePlaying` / `debugSpawnCompetitors`.
 
 **Every body carries an owner.** `BallSpawnerService.spawnBall(spawner, owner)` writes `OwnerUserId` (number, negative for synthetic) and `OwnerDisplayName` on the body **before `Parent`**, so a body never exists ownerless even for a frame. `spawnForRound(count)` became `spawnForRound(owners: BallOwner[])` ? owners rather than a count, so a failed spawn cannot shift every later owner onto the wrong body. A body with no `OwnerUserId` is an **orphan**: not counted, not a candidate, cannot win.
@@ -2059,6 +2063,7 @@ one-competitor round cannot save it from the immediate-win rule (item 72).
 
 ## 74. Ball powers: ten kinds, one table, a module rather than a service, and a badge
 
+**Pointer (added by item 171):** superseded by **item 78** — two powers were renamed since (`split` to `decoy`, `prism` to `recycle`); the table and the badge still stand.
 **The picker was a choice with no consequence.** Nine ball ids behaved identically and `SHAPE_POOL`'s `power?: string` was
 read by nothing. This round gives each ball one power, fixed, and deletes the dead seam: a body's power comes from
 `ChosenBallId` through `powers.config.ts`, because the pool describes a *shape* and two balls of the same shape race as
@@ -2196,6 +2201,7 @@ instrument for the first of those.
 
 ## 76. Every ball consumes its pickup; the debug `3` press draws a ball
 
+**Pointer (added by item 171):** superseded by **item 80** — `recycle` was made the one exception, so consumption is no longer universal.
 **A pickup that survives its collection is a ball that cannot die.** `pickupDecision` returned `consume: false` for every
 ball except `prism`, so the triangle stayed under the ball that took it, `Touched` re-fired while the ball rested on it, and
 `BALL_SPEED` was reset to the boost value every frame. The run showed one ball held on the belt for 71 seconds and a round
@@ -2248,6 +2254,7 @@ that a `3` press puts powered, badged bodies on the belt.
 
 ## 77. The `split` decoy is now indistinguishable from its parent
 
+**Pointer (added by item 171):** superseded by **item 78** — the ball and the power were both renamed with it.
 **"There's an empty ball still?" - it was the decoy, and it was nearly empty.** Item 74 shipped a decoy with no `Power`
 attribute, no badge, **no face textures and no markers** - checked against `spawnDecoy`, which called none of the four
 attach helpers. The Studio run proves which body it was: `[Round] debug spawn: ... balls=split_ball,eclipse_ball,...` gave
@@ -2781,6 +2788,7 @@ The `Size` sequence is written as two explicit `NumberSequenceKeypoint`s with en
 **Build, lint, prettier and tests green at 283 tests**, `grep -ri "wallassist\|WALL_ASSIST\|TreadmillWall" src/` is zero, and `flamework.build` is unchanged (no controller or service added or removed). **Studio-only:** that a wall part still stops a ball with no tag on it — which is the one behaviour claim this round makes without a source read behind it, and it rests on the collision-group table rather than on a run.
 ## 95. The wind trail is driven by a `Boosted` attribute, and the spawn draw is now one-sided
 
+**Pointer (added by item 171):** superseded by **item 96** — the trail follows the ball by `CFrame` rather than by a weld.
 **A `Boosted` boolean now rides on every ball, and a client controller renders it as a persistent `windBoost` clone welded to the body.** The attribute is written by `BallSpawnerService.writeBoosted`, called from `stepBallSpeeds` — the one place that reads `BALL_SPEED` after every contributor (decay, a power's delta, the clamp) has landed — and also from the round-end loop that zeroes `BALL_SPEED`, because the loop that normally settles it stops the moment the round does. **One `SetAttribute(BOOSTED_ATTRIBUTE, …)` in the tree, two callers.**
 
 **Two thresholds, not one.** `true` at `BALL_SPEED >= BELT_SPEED`, `false` below `BELT_SPEED - BOOST_HYSTERESIS` (0.5, `**Placeholder.**`), unchanged in the band. A single threshold would flip the flag on consecutive frames as a ball decayed *through* the reference — at `0.1` studs/s that band is a fifth of a second wide, long enough to strobe the effect. The write happens **only when the value changes**: the attribute replicates, and re-asserting the same boolean sixty times a second per ball is traffic carrying no information. It is written in the same tick as the velocity, so a client reading both in one frame cannot see them disagree.
@@ -2854,6 +2862,7 @@ The `Size` sequence is written as two explicit `NumberSequenceKeypoint`s with en
 **Studio-only:** that the square is gone. If a square survives, the next candidate is not another texture: the two remaining parts of this picture are the phantom's own cloned `Texture`s (which would then be the *only* thing drawing, so a square there would be an asset/tiling question) and the equatorial ring marker, which is deliberately larger than the ball (`MARKER_RING_OVERSIZE`). Worth naming both in the next report rather than guessing again.
 ## 100. A `TailWind` trail for a ball in regular motion, and two corrections to the brief
 
+**Pointer (added by item 171):** superseded by **item 101** — the giant effect was a copied scale constant that had drifted tenfold.
 **The state.** `TailWind` is a per-ball boolean written by `BallSpawnerService.writeTailWind`, called from `stepBallSpeeds` on the same tick as `Boosted` and **fed the `Boosted` value that write just settled** rather than reading the attribute back:
 
 ```ts
@@ -2934,6 +2943,7 @@ Both controllers now call `scaleEffect(clone, effectScaleFor(ball))` and their l
 **Studio-only, still:** that the direction now matches. If it is still wrong, the reading is that the balls' visual drift and the surface are being compared on different axes rather than that this constant has a third value - `BELT_TEXTURE_SCROLL_SIGN` only has two.
 ## 104. The belt's visual scroll got its own multiplier, so the tread can be retimed without touching the race
 
+**Pointer (added by item 171):** superseded by **item 105** — the tile split into U and V, so one multiplier became two.
 **Reported: the tread wants to read faster, but the only way to make it is `BeltSpeed`, which also changes the game.** That was true, and it was a coupling rather than a design: `BeltScrollController` advanced `OffsetStudsU` at `BeltSpeedActual` because the obvious reading of a treadmill is "the surface moves at the belt's speed", so the picture and the physics shared one number. They should not. `BeltSpeed` is the *reference* the `BALL_SPEED` model compares against, so raising it moves `RELATIVE_SPEED`, the decay arithmetic and the elimination threshold - the whole race - to change how a texture slides.
 
 **`BELT_TEXTURE_SCROLL_MULTIPLIER = 1`** sits directly above `BELT_TEXTURE_SCROLL_SIGN` in [tuning.ts](/C:/Users/morri/Documents/Coding/roblox-treadmill-race/src/shared/tuning.ts:90) and multiplies the scroll rate on its own. Above, not below, because the update now reads as the sentence it is - **rate, then speed scale, then direction** - and a reader who scans `speed * MULTIPLIER * SIGN * dt` gets magnitude before handiness. `1` is "scroll at belt speed", which is exactly what shipped before this constant existed; `2` is twice as fast; `0.5` is half. It is the same shape item 103 established for the sign: one named number, one client, all belts, and no second place that has to be kept in step.
@@ -3052,6 +3062,7 @@ So the client was not ignoring the constant; it was reporting the value it had l
 
 ## 109. The hit effect cannot collide; it was drawing twice per contact, and the spawn bursts are a pile-up
 
+**Pointer (added by item 171):** superseded by **item 111** — the burst's gating moved from a power to contact.
 **Reported: "why are there collisions within the `hitEffect`?"** There are none, and there cannot be. `makeInert` gives the carrier, the cloned Part and **every** `BasePart` descendant `Anchored = true`, `CanCollide = false`, `CanTouch = false`, `CanQuery = false`, `Transparency = 1`, `CastShadow = false`, `Massless = true`; and the whole tree is built on the **client**, in a locally created `Workspace.SpawnedHitEffects`, so the server's `Touched` handler never has the instances to see. The causality in the log is the other way round: each `[HitEffect] burst` follows a `[Powers] hit` by 16-33 ms at *bit-identical* coordinates (`midpoint=(108.865, 1.624, 138.696)` at `56.568` -> `burst at 108.86503601074219, 1.6240980625152588, 138.69573974609375` at `56.597`). The client draws the midpoint the server sent.
 
 **Two real findings came out of it.**
@@ -3068,6 +3079,7 @@ So the client was not ignoring the constant; it was reporting the value it had l
 
 ## 110. The burst now waits 2 seconds for the field to settle - the age gate item 109 left as a decision
 
+**Pointer (added by item 171):** superseded by **item 111** — the age gate survived; the gating it was attached to did not.
 **The choice, made:** suppress the hit burst for the first `HIT_EFFECT_MIN_ROUND_AGE_SECONDS = 2` seconds of a body's round. Item 109 established that a **speed** threshold cannot separate the spawn pile-up from a real slow contact - a fresh body already carries up to 2 studs/s of world speed from the spawn jitter, the same number a genuine contact produces - and offered this gate or spaced spawns instead.
 
 **The gate is on the effect, not the game.** It sits at the fire site in `onBallCollision`, after the cooldown stamp and after `transferAmounts`, so both transfers still happen at the same rate they always did; only `broadcastHit` is skipped. Nothing about `POWER_COLLISION_COOLDOWN`, the transfer amounts, or either power's arithmetic changed.
@@ -3338,6 +3350,7 @@ Neither works alone: a square container leaks, and a rounded shadow still cuts *
 
 ## 124. Leaderboard: standings broadcast from the server, and a two-phase flip on the client
 
+**Pointer (added by item 171):** superseded by **item 125** — the leaderboard's number changed from ground gained to ground lost.
 **A new `LeaderboardService` (server) and `LeaderboardController` (client), plus `shared/leaderboard.ts` and one remote name.** `flamework.build` regenerated: **23 identifiers**, including `client/controllers/leaderboard-controller@LeaderboardController` and `server/services/leaderboard-service@LeaderboardService`.
 
 **The race direction in the brief was inverted, and that is the one substantive correction.** It said "the further along `+X`, the further ahead in the race". Source says the opposite, twice: `stepBallSpeeds` documents **"`+X` is toward the back - the exit end, where a ball is eliminated - and `-X` is toward the front"**, and a pickup is what "drifts the ball back toward the front edge, away from elimination". So moving toward `+X` is *losing*. Ranking by `+X` would put the body about to be eliminated in first place. The service ranks by **distance from the exit**, which is the same number a spectator is watching, and the choice is a single named constant (`LEADER_IS_FURTHEST_FROM_THE_EXIT`) that flips with one character if the other reading is wanted.
@@ -3360,6 +3373,7 @@ Neither works alone: a square container leaks, and a rounded shadow still cuts *
 
 ## 125. The leaderboard now publishes ground *lost*, ascending - the number changed even though the order already matched
 
+**Pointer (added by item 171):** superseded by **item 127** — the publisher was found to be dead rather than empty.
 **The corrected brief agreed with the code's ordering and disagreed with its number, and both halves mattered.** Item 124 ranked by distance *from the exit* (`-localX`, descending), which puts the same body first as ascending-from-spawn does - the two orderings are the same relation seen from opposite ends. But the *published number* was different: `23` counting down to `-28` rather than `0` counting up. A HUD column is read as a score, so a score that shrinks as a racer holds its ground is unreadable however correct the order is.
 
 **`distance` is now studs from the belt's spawn edge: `0` at the edge a body is placed on, growing toward the exit at `+X`, sorted ascending.** Three details in that sentence are deliberate:
@@ -4502,3 +4516,25 @@ Every line in that sequence is a success line. The burst fired, 24 particles exi
 **Placeholders:** none invented this round. The schedule is arithmetic, not a tunable.
 
 **Studio-only:** whether a burst under card 1's flip is a flourish or a distraction from the card itself; whether two bursts of 80 pieces read as two beats or one dense cloud; whether the card-6 burst lands as a second beat rather than a repeat; and whether the log's burst-then-flip ordering is what a run actually prints, since the two lines are `0.12 s` apart and a reader may expect them adjacent.
+
+## 171. A briefing for the powers and the VFX, and the drift the audit found around them
+
+**`docs/powers-and-vfx.md` is the new first read.** Ten sections: orientation and the `BALL_SPEED` reference model; the ten balls; the per-power rules with the one thing that breaks each if edited wrong; the collision groups and the cost of balls not being in `Default`; the pickup and the one `consume: false` exception; the VFX inventory with a trap per effect; the eight layers; what is deliberately absent; open items with the item that deferred each; and doc currency. Everything in it was read from source this round, at commit `642580b`.
+
+**The audit found three real README defects, all corrected in place:**
+
+1. **`src/server/services/` said "Six services"** and omitted `leaderboard`. There are **seven**.
+2. **`src/client/controllers/` said "Twenty-three controllers"** and its list stopped before the chest reveal. There are **twenty-five** `@Controller()` files; `reveal` and `confetti` were missing from the list.
+3. **"The VFX are five"** — a paragraph that then listed six things and omitted three more. It is now "five families", names the ball phantom and the pickup sprite/ring, gives the correct asset path for the hit burst (`assets.vfx.hitEffect`, resolved by recursive name — the old text said `ReplicatedStorage.hitEffect`), and says that **two of those families are not controllers at all**: the badge is built server-side in `powers/index.ts` and the burst's remote is created by `RoundService`. Both sections now point at the briefing.
+
+**`UI_STYLE_GUIDE.md` needed nothing**: its layer table already has all eight entries and matches `layers.ts` exactly.
+
+**No source docblock argued against the code**, so `git diff src/` is empty rather than comments-only. That is a finding, not an omission: the powers module, both trails, the hit effect, the ball phantom and the pickup sprite were each checked against the claims in their docblocks (the badge being the only server-made instance, `Debris` as the only cleanup, the `BillboardGui`-not-`ParticleEmitter` rejection, the mutual exclusivity of `Boosted`/`TailWind`) and every one still holds. The drift in this repo is in `README.md` and in `HANDOFF.md`'s pointer convention, not in `src/`.
+
+**Fourteen `HANDOFF` items got a one-line pointer** under the heading, body untouched: 9→26, 16→36, 26→34, 35→36, 74→78, 76→80, 77→78, 95→96, 100→101, 104→105, 109→111, 110→111, 124→125, 125→127. Item 81 flagged four of these; the other ten are the audit's. The pointers are the convention the log's own preamble asks for, not a rewrite.
+
+**Item 168's `BURST_COUNT` of 204 survived one round as a snapshot** and is recorded in the briefing's §10 as stale rather than edited in place, together with 163's `24` and 165/167's asset-based port. **`SWAY_FREQUENCY_JITTER` is 0.3 and has been since item 153** — the brief for this round expected it to be stale; it is not, and the briefing's §9 records the sway's *pitch* as an open playtest question instead.
+
+**Audit.** Added: `docs/powers-and-vfx.md`. Changed: `README.md` (services count and list, controller count and list, the VFX paragraph, and a pointer from both the powers and the absent sections), `HANDOFF.md` (fourteen pointers plus this item). **`git diff -- src/` is empty and `git status --short` is `HANDOFF.md`, `README.md`, `docs/` — no source, config, lockfile or generated file.** Build exit 0, lint 0 errors, prettier clean on every touched file (`viewport.ts` still fails at `HEAD`), `\uXXXX` zero, `flamework.build` unchanged at **32 identifiers**. **`npm test` not run.**
+
+**A fresh chat should read `docs/powers-and-vfx.md` before any other file** — before `README.md`, before `HANDOFF.md`, and before opening `src/`. It is the current state; the log is the reason.

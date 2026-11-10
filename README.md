@@ -19,8 +19,8 @@ repo describes it as one, that document is describing a previous version of the 
 
 | Path                                                                                      | What it is                                                                                                                                                                                   |
 | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/server/services/`                                                                    | Six services: `treadmill`, `ball-spawner`, `pickup`, `round`, `economy`, `player-data-store`                                                                                                 |
-| `src/client/controllers/`                                                                 | Twenty-three controllers: belt scroll, marker spin, ball render, wind boost, tail wind, motion blur, pickup sprite, pickup sound, hit effect, elimination splash, decoy outline, round state, phase banner, transition wipe, picker, countdown, shop, leaderboard, payout, reward toast, round song, lobby song, debug keys |
+| `src/server/services/`                                                                    | Seven services: `treadmill`, `ball-spawner`, `pickup`, `round`, `economy`, `leaderboard`, `player-data-store`                                                                                 |
+| `src/client/controllers/`                                                                 | Twenty-five controllers: belt scroll, marker spin, ball render, wind boost, tail wind, motion blur, pickup sprite, pickup sound, hit effect, elimination splash, decoy outline, round state, phase banner, transition wipe, picker, countdown, shop, leaderboard, payout, reward toast, chest reveal, confetti, round song, lobby song, debug keys |
 | `src/server/powers/`                                                                      | The ten powers — pure rules plus one instance-level wrapper, deliberately a module rather than a service                                                                                     |
 | `src/server/{round-outcome,debug-balls,decoy-outline,elimination-signal,picker,admin}.ts` | Plain modules with specs beside the code; no Flamework, so a spec can import them                                                                                                            |
 | `src/shared/`                                                                             | Tag names, attribute names + defaults, remote names, gameplay constants, the economy / powers / models configs and the UI theme                                                              |
@@ -215,6 +215,10 @@ plus the theme tokens; there is no component library underneath the rest.
 
 ## Ball powers
 
+**The current shape of all ten powers — the table, the rule that owns each one, the collision groups and the pickup exception —
+is [`docs/powers-and-vfx.md`](docs/powers-and-vfx.md).** That document is the briefing a new chat should read first; this section
+is the short version.
+
 Every ball races with **exactly one power, fixed**. The table is [`src/shared/powers.config.ts`](src/shared/powers.config.ts) —
 one entry per ball id, naming the power and its kind — and the rules are [`src/server/powers/`](src/server/powers/index.ts).
 
@@ -407,6 +411,9 @@ place with your own parts:
 
 ## Deliberately absent
 
+**This list is the short version; [`docs/powers-and-vfx.md`](docs/powers-and-vfx.md) §8 is the one read from source.** Each line
+below was rejected or deferred on purpose, not forgotten — do not offer to add it.
+
 No mesh or model support — every `model` in [`src/shared/models.config.ts`](src/shared/models.config.ts)
 is `undefined`, and a test fails if a ball id has no entry, so the swap fails the suite rather than
 drawing the same sphere. No client prediction: the server owns the velocity and every client sees the
@@ -431,12 +438,20 @@ every time.
 Volume and pitch are per sound in `SOUND_TUNING` next to the ids — the hit is deliberately the quietest, the pickup sits
 just above it, and the three songs are quieter still because they are beds — and they are applied when each `Sound` is built, not per
 play. A song's row is also the level its fade ramps _to_, which is why a missing row would make it ramp to `1`. No camera work.
-**The VFX are five, and none of them is a world aura:** the power badge, the decoy owner's outline, a ball-ball hit burst —
-one clone of the Studio asset `ReplicatedStorage.hitEffect`, built on each client at the contact midpoint and destroyed by
-`Debris` — two per-ball trails (`windBoost` while a ball is at or above belt speed, `tailWind` while it is in regular
-motion), and one arena-wide `motionBlur` overlay: a single clone of `ReplicatedStorage.assets.vfx.motionBlur` placed at the
-`EliminationZone`, alive only during `Playing`, with every emitter's `Rate` ramped from 0 to its authored value over half a
-second and back down again when the phase leaves. No per-power aura, because a `magnet` or `eclipse` aura is a radius in a
-server-side registry and draws nothing — and no periodic `ghost` toggle. No in-round coin
+**The VFX are five families, and none of them is a world aura:** the power badge, the decoy owner's outline, a ball-ball hit
+burst — one clone of the Studio asset `ReplicatedStorage.assets.vfx.hitEffect`, resolved by recursive name, built on each client
+at the contact midpoint and destroyed by `Debris` — two per-ball trails (`windBoost` while a ball is at or above belt speed,
+`tailWind` while it is in regular motion), the ball phantom that draws each body's spinning texture (with a pickup sprite and ring
+per pad, both built per client), and one arena-wide `motionBlur` overlay: a single clone of
+`ReplicatedStorage.assets.vfx.motionBlur` placed at the `EliminationZone`, alive only during `Playing`, with every emitter's `Rate`
+ramped from 0 to its authored value over half a second and back down again when the phase leaves. **Two of those families are not
+controllers at all** — the badge is built server-side in
+[`src/server/powers/index.ts`](src/server/powers/index.ts) and parented to the ball, and the hit burst's *remote* is created by
+`RoundService`. The 2D overlays (elimination splash, countdown, payout, reward toast, chest reveal and its confetti, banner,
+leaderboard, picker, wipe) are a separate family: they are `ScreenGui` content, positioned by
+[`src/shared/ui/layers.ts`](src/shared/ui/layers.ts), and none of them is in `Workspace`. No per-power aura, because a `magnet` or
+`eclipse` aura is a radius in a server-side registry and draws nothing — and no periodic `ghost` toggle. **The full inventory, with
+each effect's trigger, asset, home, lifecycle and the trap that breaks it, is
+[`docs/powers-and-vfx.md`](docs/powers-and-vfx.md) §6.** No in-round coin
 earn path: coins start at 500, are spent by a chest or the picker's re-roll, and are granted only
 through `/dev`.
