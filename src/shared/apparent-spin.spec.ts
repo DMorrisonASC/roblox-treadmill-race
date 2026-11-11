@@ -34,14 +34,26 @@ describe("apparentSpinRate", () => {
 		expect(SPIN_BASE_RAD_PER_SEC > 0).toBe(true);
 	});
 
-	it("totals the approved rate at the spawn speed", () => {
-		// The anchor: **`20 rad/s` at `BALL_SPEED = 10`**, which is the rate earlier rounds established as legible (about
-		// `3.2` rev/s, `19` degrees a frame at 60 Hz). Derived from the two constants rather than pinned, so a retune of the
-		// split is a one-line change and this case still describes the rule.
-		const expected = SPIN_BASE_RAD_PER_SEC + (APPARENT_SPIN_GAIN * 10) / BASE_BALL_RADIUS;
+	it("totals base plus speed at the spawn speed", () => {
+		// **The `20 rad/s` anchor is gone, and the designer removed it, not this round (item 202).** This case used to assert
+		// that `BALL_SPEED = 10` totalled `20 rad/s` -- the split item 196 chose, `10` base plus `0.5` gain. The tree now runs a
+		// `30` base against a `31` ceiling, so the speed term is worth one stud/second before the clamp and **no speed totals
+		// `20` any more**. The assertion was failing at `HEAD`, so it was noise rather than a guard. What survives a retune is
+		// the shape, so the shape is what is asserted here: the base at `0`, base plus `GAIN x speed / BASE_BALL_RADIUS` above,
+		// clamped by the ceiling.
+		const unclamped = (speed: number) => SPIN_BASE_RAD_PER_SEC + (APPARENT_SPIN_GAIN * speed) / BASE_BALL_RADIUS;
 
-		expect(apparentSpinRate(10)).toBeCloseTo(expected, 5);
-		expect(expected).toBeCloseTo(20, 5);
+		expect(apparentSpinRate(0)).toBeCloseTo(SPIN_BASE_RAD_PER_SEC, 5);
+		expect(apparentSpinRate(10)).toBeCloseTo(math.min(APPARENT_SPIN_MAX_RAD_PER_SEC, unclamped(10)), 5);
+
+		// Speed still has to *buy* something, and only below the clamp can it: the speed at which the total reaches the ceiling
+		// is derived from the three constants so this holds whatever the split is retuned to.
+		const ceilingSpeed =
+			((APPARENT_SPIN_MAX_RAD_PER_SEC - SPIN_BASE_RAD_PER_SEC) * BASE_BALL_RADIUS) / APPARENT_SPIN_GAIN;
+
+		expect(ceilingSpeed > 0).toBe(true);
+		expect(apparentSpinRate(ceilingSpeed / 2)).toBeCloseTo(unclamped(ceilingSpeed / 2), 5);
+		expect(apparentSpinRate(ceilingSpeed / 2) > SPIN_BASE_RAD_PER_SEC).toBe(true);
 	});
 
 	it("is monotone below the clamp, and clamps above it", () => {
@@ -49,14 +61,22 @@ describe("apparentSpinRate", () => {
 		// **An earlier version asserted the unclamped expression at `BALL_SPEED_MAX` and broke when the designer raised that
 		// ceiling to `100`** -- at which point the rate is `110` before the clamp and `90` after it. Restating a tuned number in
 		// a test is testing the tuning; comparing against the definition tests the rule.
+		//
+		// **The two speeds are derived from the clamp now (item 202).** They used to be `10` and `20`, which against a `30` base
+		// and a `31` ceiling both saturate -- so the comparison was `31 > 31` and the case was failing at `HEAD`. Strict
+		// monotonicity exists only below the speed at which the total reaches the ceiling, so that is where the pair is taken.
 		const expected = (speed: number) =>
 			math.min(
 				APPARENT_SPIN_MAX_RAD_PER_SEC,
 				SPIN_BASE_RAD_PER_SEC + (APPARENT_SPIN_GAIN * speed) / BASE_BALL_RADIUS,
 			);
+		const ceilingSpeed =
+			((APPARENT_SPIN_MAX_RAD_PER_SEC - SPIN_BASE_RAD_PER_SEC) * BASE_BALL_RADIUS) / APPARENT_SPIN_GAIN;
 
-		expect(apparentSpinRate(20) > apparentSpinRate(10)).toBe(true);
-		expect(apparentSpinRate(10) > apparentSpinRate(0)).toBe(true);
+		expect(ceilingSpeed > 0).toBe(true);
+		expect(apparentSpinRate(ceilingSpeed / 2) > apparentSpinRate(ceilingSpeed / 4)).toBe(true);
+		expect(apparentSpinRate(ceilingSpeed / 4) > apparentSpinRate(0)).toBe(true);
+		expect(apparentSpinRate(ceilingSpeed * 2)).toBeCloseTo(APPARENT_SPIN_MAX_RAD_PER_SEC, 5);
 		expect(apparentSpinRate(BALL_SPEED_MAX)).toBeCloseTo(expected(BALL_SPEED_MAX), 5);
 
 		// And the base is a floor, not a spike: the rate never falls below it however the gain is retuned.
@@ -64,11 +84,15 @@ describe("apparentSpinRate", () => {
 	});
 
 	it("holds every drawn rate inside the legible band, at any speed (item 200)", () => {
-		// **The assertion that would have caught the "balls do not spin" report.** The rate is `10 + BALL_SPEED`, so an
-		// unclamped ball at `BOOST_TARGET_BALL_SPEED = 80` is drawn at `90 rad/s` -- 86 degrees of rotation per frame at 60 Hz,
-		// past the 45-degree half-period of a six-textured sphere, which the eye resolves as *no rotation at all*. The ceiling
-		// is what keeps it readable, so it has to hold for every speed the model can produce, including `BALL_SPEED_MAX`.
-		expect(apparentSpinRate(BALL_SPEED_START)).toBeLessThan(APPARENT_SPIN_MAX_RAD_PER_SEC);
+		// **The assertion that would have caught the "balls do not spin" report.** An unclamped ball at
+		// `BOOST_TARGET_BALL_SPEED = 80` would be drawn at `90 rad/s` -- 86 degrees of rotation per frame at 60 Hz, past the
+		// 45-degree half-period of a six-textured sphere, which the eye resolves as *no rotation at all*. The ceiling is what
+		// keeps it readable, so it has to hold for every speed the model can produce, including `BALL_SPEED_MAX`.
+		//
+		// **`<=` at the spawn speed rather than `<` (item 202).** This asserted the spawn speed sat *below* the ceiling; with a
+		// `30` base against a `31` ceiling it sits *at* it, and "the whole field is drawn at the maximum legible rate" is the
+		// designer's tuning rather than a defect. The ceiling itself is unchanged and still binds everything above it.
+		expect(apparentSpinRate(BALL_SPEED_START) <= APPARENT_SPIN_MAX_RAD_PER_SEC).toBe(true);
 		expect(apparentSpinRate(SPRINTER_BOOST_SPEED)).toBe(APPARENT_SPIN_MAX_RAD_PER_SEC);
 		expect(apparentSpinRate(BALL_SPEED_MAX)).toBe(APPARENT_SPIN_MAX_RAD_PER_SEC);
 		expect(apparentSpinRate(1000)).toBe(APPARENT_SPIN_MAX_RAD_PER_SEC);

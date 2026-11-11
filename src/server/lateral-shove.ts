@@ -1,17 +1,23 @@
 /**
- * The sideways shove a ball contact leaves behind.
+ * The contact shove a ball contact leaves behind.
  *
  * ## Why an impulse here and not a velocity write in the handler
  *
  * `stepBallSpeeds` sets the lateral (world Z) component of a ball's velocity **every tick** — the decorative sway owns that
- * axis (item 151). A velocity written from a collision handler is therefore erased before it moves anything: the ball is
- * displaced for exactly one physics step, about `1/60` of a stud, which is the "no sideways push" a Studio log reported
- * while hits and pops were both firing. The engine's own lateral separation is erased the same way, so "let physics do it"
- * is not an option either.
+ * axis (item 151) — and replaces the along-belt component every tick as well. A velocity written from a collision handler is
+ * therefore erased before it moves anything: the ball is displaced for exactly one physics step, about `1/60` of a stud,
+ * which is the "no sideways push" a Studio log reported while hits and pops were both firing. The engine's own separation is
+ * erased the same way, so "let physics do it" is not an option either.
  *
  * An **impulse** survives instead, because it is not a velocity — it is a number the one writer is handed. The collision
- * handler records a shove per body here; `stepBallSpeeds` projects it onto the belt's lateral axis, adds it to the sway's
- * own rate, and decays it. The axis still has exactly one writer, and the shove cannot race it.
+ * handler records a shove per body here; `stepBallSpeeds` resolves it onto the belt's two model axes — the along-belt one
+ * (`right`) and the lateral one (`across = right:Cross(up)`) — adds each to the term that already owns that axis, and
+ * decays it. Both axes still have exactly one writer, and the shove cannot race either of them.
+ *
+ * **Both axes, since item 203.** The writer used to project the stored normal onto `across` alone, so the along-belt part
+ * of every contact was discarded and all shoves read as sideways. Storing the **raw horizontal normal** here — rather than a
+ * lateral value — is what makes the two-axis write possible at all; a module that had already decided the axis could not
+ * have been fixed in the writer.
  *
  * ## Why a separate module
  *
@@ -38,11 +44,16 @@ const shoves = new Map<BasePart, Vector3>();
 /**
  * The horizontal unit vector from one body to another: the contact normal, flattened onto the belt's plane.
  *
- * ## Why the caller's axis is not resolved here
+ * ## Why the belt's frame is not resolved here
  *
- * The sign that matters is the one along the belt's `across` vector, and only `BallSpawnerService` holds the belt frame.
- * Storing the full horizontal normal and letting the writer project it keeps this module free of any assumption that the
- * belt is axis-aligned — the same reason the sway computes `across` from the frame instead of using world Z.
+ * Only `BallSpawnerService` holds the belt frame, so the two model axes are resolved there. Storing the full horizontal
+ * normal and letting the writer resolve it keeps this module free of any assumption that the belt is axis-aligned — the same
+ * reason the sway computes `across` from the frame instead of using world Z.
+ *
+ * **This is also what makes a two-axis shove possible (item 203).** The writer consumes *both* components: the along-belt
+ * projection is added to the `-relative` term and the lateral one to the sway's rate. A version of this function that
+ * projected onto `across` before returning would have destroyed the along-belt half of every contact before the writer ever
+ * saw it, and no change in `stepBallSpeeds` could have recovered it.
  *
  * ## Why a tie break is needed
  *

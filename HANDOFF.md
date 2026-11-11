@@ -6031,3 +6031,137 @@ const bounds = pickupBounds(belt.Size, PICKUP_SIZE, drawRadius + PICKUP_EDGE_MAR
 **Validation:** `npm run build` exit 0; **`npm test` = 500 passed in 36 files** (one new case: the margin holds on both axes and the shrunken region still fits twelve pads); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; touched files pass `prettier --check`; `\uXXXX` search under `src/` is zero; `flamework.build` unchanged.
 
 **Studio-only:** that every pad now reads as clearly on the belt with belt visible around its disc, and that `minEdge=` on the spawn line is `>= 12` for every pad. **If pads still look off the belt, the remaining candidates are both visual and neither is placement:** the sprite floats `11.2` studs above the pad and can project past the belt's far edge at a shallow camera angle, and a failed asset load (`AssetFetchStatus.Failure`) would draw the ring without its image.
+
+---
+
+## 202 - The pickup ring's SurfaceGui had a finite render distance, and three docblocks that had been lying since a retune
+
+**Reported:** the pickup ring is not visible at the camera's distance, and appears when the camera is moved closer. The sprite on the same pad was not reported missing.
+
+### The engine fact, read rather than recalled
+
+From the Roblox documentation for `SurfaceGui.MaxDistance`:
+
+> This property controls how far from the camera the SurfaceGui will be displayed before it stops rendering. A value of `0` means there is no limit and it will render infinitely far away. The default value of `1000` works fine for most cases.
+
+So **the default is finite (`1000`)** and the cut is a **pop**, not a fade -- the docs go on to recommend keeping the limit high enough that the pop happens when the UI is already small on screen. That is the reported symptom's shape.
+
+### The change
+
+One property, in `buildFootprint`:
+
+```ts
+surface.MaxDistance = PICKUP_RING_MAX_DISTANCE;   // 1e6
+```
+
+`1e6` rather than the documented `0`: both mean "no limit", but `0` reads to the next person as "cull at zero distance" -- one careless fix away from switching the ring off. A million studs is past any camera this place can have and needs no documentation to be understood. The constant's docblock quotes the doc above.
+
+**`AlwaysOnTop` was left `false`.** It cannot produce a distance cut -- it decides occlusion -- and the disc sits `2.22` studs above the belt with nothing between it and a camera looking down at the pad. Turning it on would buy nothing and would cost the "painted on the floor" read by drawing the disc over every ball that touches a pad.
+
+**Property audit, so the next reader does not have to repeat it:** `MaxDistance` is the **only** distance-dependent property on a `SurfaceGui`. `PixelsPerStud` and `SizingMode` decide resolution, `ZOffset` decides depth, `ClipsDescendants` decides cropping, `AlwaysOnTop` decides occlusion, `Brightness` and `LightInfluence` decide shading. Nothing else in `buildFootprint` can switch the ring off with range.
+
+### The line that makes the next review cheap
+
+```
+[PickupSprite] ring surface maxDistance=1000000 alwaysOnTop=false brightness=1 pixelsPerStud=200 canvas=4000x4000 parent=Workspace....
+```
+
+Once per session, on the first ring built, **every field read back off the instance** rather than printed from the constant that set it, and two frames in because `CanvasSize` is the rasteriser's answer. The round before this one measured the ring at `19.2 px` and could not say whether that was a small disc or a culled one; `maxDistance` is the field that tells them apart.
+
+### Three docblocks corrected, values untouched
+
+| constant | value | the docblock claimed | now says |
+|---|---|---|---|
+| `RING_THICKNESS_STUDS` | `2` | "`0.05` ... a twentieth of a stud" | the real value, and that with `BELT_SURFACE_THICKNESS = 0.1` and a `0.12` lift the painted face sits **`2.22` studs** above the belt -- so it is a plate, not paint |
+| `RING_LIFT_STUDS` | `0.12` | "`0.02` studs" | the real value, and that the thickness, not the lift, is what clears the floor |
+| `RING_PIXELS_PER_STUD` | `200` | "`400 x 400` canvas" | **`4000 x 4000`** -- the `400` was true of the 2-stud ring the old annulus drew, and the disc is `20` studs across. A memory cost, deliberately not changed here |
+
+### A pre-existing failure, fixed because it blocked the signal
+
+`npm test` was **red at `HEAD`**, not from this round: the tree runs `SPIN_BASE_RAD_PER_SEC = 30` against `APPARENT_SPIN_MAX_RAD_PER_SEC = 31`, so every speed from `0.83` studs/second up clamps, and three cases in `apparent-spin.spec.ts` still encoded item 196's superseded `20 rad/s` anchor -- including `31 > 31` for monotonicity and `toBeLessThan(31)` against a rate of exactly `31`. They were un-pinned to assert the *shape* (base at `0`, base plus gain clamped above, monotone only below the derived ceiling speed) instead of the retired tuning.
+
+### The caveat this round cannot close
+
+The default is `1000`, and the camera back-solves to roughly **260-390 studs** from a pad using the sprite's own `drawn=20.8px` for a `10.4`-stud sprite. **So `MaxDistance` may not have been culling anything**, and if the ring still does not read, the next candidate is apparent size and contrast: a 20-stud disc is about **38 px** at that range, filled at `RING_TRANSPARENCY = 0.6`, unlit, on a dark belt. That is a *legibility* problem, and its fixes are `RING_TRANSPARENCY` and the disc's screen-space size -- both deliberately out of scope here.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 500 passed in 36 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all three touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged; the controller's diff is **44 insertions, 0 deletions**, so the sprite and every other ring property are byte-identical to `HEAD`.
+
+**Studio-only:** that the ring now draws at the game camera's distance (or that it does not, which would move the cause to legibility); and whether `maxDistance=1000000` prints as `1000000` on the new line.
+---
+
+## 203 - The contact shove is a push in the belt plane, not a sideways nudge
+
+**Reported:** "Right now, shoves are exclusively side to side. Let's make it 360."
+
+### Shape (a), and the exact line that caused it
+
+`shoveDirection` in `src/server/lateral-shove.ts` was **already correct**:
+
+```ts
+const delta = new Vector3(to.X - from.X, 0, to.Z - from.Z);
+...
+return delta.Unit;
+```
+
+That is the full horizontal normal, flattened by dropping `Y` -- not a projection onto `across`. The collapse happened in `stepBallSpeeds`:
+
+```ts
+const lateralShove = across.mul(shoveImpulse.Dot(across));   // <- the along-belt part dies here
+...
+.add(lateralShove);
+```
+
+So the module stored a 2D vector and the writer kept one component of it. `[Powers] shove: ... dir=(...)` printed the **raw** `shoveDirection` vector all along (`dir=${formatVector(direction)}` in `maybeShove`), which is why the log could show `dir=(-0.946, 0, 0.324)` -- 95% along the belt -- while the shove felt purely sideways. The field was never lying; the writer was ignoring it.
+
+### The change
+
+`stepBallSpeeds`, one term added and one projection widened:
+
+```ts
+const shoveImpulse = lateralShoveFor(ball, dt);
+const lateralShove = across.mul(shoveImpulse.Dot(across));
+const alongShove = right.mul(shoveImpulse.Dot(right));      // NEW
+ball.AssemblyLinearVelocity = velocity
+    .sub(right.mul(along))
+    .sub(across.mul(carriedLateral))
+    .add(right.mul(-relative))
+    .add(lateral)
+    .add(lateralShove)
+    .add(alongShove);                                        // NEW
+```
+
+`right` and `across` are orthogonal and horizontal for this belt, so the two dot products reconstruct the impulse and nothing is dropped. The along-belt shove adds to the `-relative` term, the lateral one to the sway's rate -- both axes keep one writer.
+
+**`carriedLateral` still has to be zeroed, and still is.** The `sub(across.mul(carriedLateral))` removes the ball's *actual* lateral velocity so the model's rate replaces it; that is item 151's fix for the driven-oscillator resonance, and it is independent of where the rate came from. The shove is part of the model's rate, not carried velocity, so nothing changes about the ordering.
+
+### The sign convention, quoted
+
+```ts
+shoveLateral(ball, direction.mul(-BALL_COLLISION_SHOVE_SPEED));
+shoveLateral(other, direction.mul(BALL_COLLISION_SHOVE_SPEED));
+```
+
+`direction` points **from `ball` to `other`**, so `ball` receives `-direction` (away from `other`) and `other` receives `+direction` (away from `ball`). Repulsive, equal and opposite, already correct -- **no sign change was needed**, and that is the thing a 2D rewrite was most likely to break. It is now pinned by a spec case asserting the pair sums to zero.
+
+### Decisions
+
+1. **Shape (a).** The sideways-only behaviour was introduced in `stepBallSpeeds`; `shoveDirection` was already full-plane.
+2. **`dir=` is the raw `shoveDirection` vector** -- `dir=${formatVector(direction)}`, where `direction = shoveDirection(ball.Position, other.Position, mine.serial)`. Never the projected value, so **no log change was needed** and the line's shape is preserved.
+3. **Same sign to both bodies?** No -- see above, the pair was already `-d` / `+d`.
+4. **The axis mapping:** `right` is `RightVector`, which in this scene is the **along-belt** axis (world `-Z`), and `across = right:Cross(up)` is lateral (world `+X`). A pair separated in world `Z` is head-on; separated in world `X` is side by side. Both facts are now asserted in the spec so the next reader cannot invert them.
+5. **Boundedness:** `clampShove` caps the **vector** magnitude at `BALL_COLLISION_SHOVE_SPEED`, so a 2D shove has the same peak as the 1D one -- a dead-on contact is one full shove along the belt, not half on each axis. Duplicate `Touched` fires are still prevented by the lower-`serial` election plus the shared contact cooldown, and even a doubled record would be clamped rather than summed.
+6. **No retune.** `BALL_COLLISION_SHOVE_SPEED` and `BALL_COLLISION_SHOVE_DECAY_SECONDS` are untouched.
+
+### What this changes about the feel, which the next round must judge
+
+The projection was acting as an unlabelled scale factor. A contact whose normal was 30% lateral applied 30 studs/second; that same contact now applies 100, and a rear-end contact that applied almost nothing now applies the full 100 **along the belt**, where no sway correction pulls it back. `BALL_COLLISION_SHOVE_SPEED = 100` with a `1`-second time constant is `s * T` = **100 studs** of displacement (`5 * 0.3 = 1.5` when it shipped, `10` when the docblock was last correct). Along the belt that is a third of the `333`-stud length per hit, so a contact can now push a ball into the elimination edge.
+
+Found while rewriting: `BALL_COLLISION_SHOVE_SPEED`'s docblock still said "at `10` ... **10 studs** ... about 2.8 studs per second at the peak, which is below `BELT_SPEED`". It describes the value from before a retune; at `100` the peak is 100 studs/second, ten times `BELT_SPEED`. Corrected in place, value left alone.
+
+### Four docblocks rewritten
+
+`lateral-shove.ts`'s module block and `shoveDirection`, `maybeShove`'s "why the direction is the contact normal" (which argued the old behaviour as deliberate -- the first half of its reasoning, that a real separation from a rear-end hit is *along* the belt, is exactly why the old conclusion was wrong), and `BALL_COLLISION_SHOVE_SPEED`.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 505 passed in 36 files** (five new cases: head-on dominance, side-by-side dominance, diagonal has both, equal-and-opposite pair, and no halving across axes); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all five touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged.
+
+**Studio-only:** whether the 360 push reads as a bump or as one ball punting the other; whether `BALL_COLLISION_SHOVE_SPEED = 100` is now too strong along the belt; and whether the sway's `SWAY_TRACK_SECONDS = 1.5` correction fights a lateral shove visibly while leaving the along-belt one permanent (it must -- there is no lane to return to on that axis).

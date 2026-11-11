@@ -1916,19 +1916,34 @@ export class BallSpawnerService implements OnStart {
 				// falls. The along-belt component is removed separately, as before.
 				const carriedLateral = velocity.Dot(across);
 
-				// **The contact shove, applied by the writer that owns the axis.** A collision handler cannot leave a
-				// lateral *velocity* behind: the `sub(across ...)` above removes it one tick later. It can leave an
-				// *impulse*, and that is what this reads. The projection onto `across` is what keeps X the model's: a
-				// dead-on contact normal is mostly along-belt, and its along-belt part must not become an unmodelled
-				// positional nudge. `across` is horizontal, so Y is untouched. See `lateral-shove.ts`.
+				// **The contact shove, applied by the writer that owns both axes (item 203).** A collision handler cannot
+				// leave a *velocity* behind: the `sub(across ...)` above removes the lateral one a tick later, and the
+				// `sub(right ...)` below replaces the along-belt one on every tick. It can leave an *impulse*, and that is
+				// what this reads.
+				//
+				// **Both components are applied, not just the lateral one.** Until item 203 this read
+				// `across.mul(shoveImpulse.Dot(across))`, which silently discarded the normal's along-belt part: a body
+				// struck from directly behind has a normal that is almost entirely `right`, so it received almost no shove
+				// at all, and every contact that did register read as a sideways flick regardless of where it came from.
+				// `[Powers] shove: ... dir=(-0.946, 0, 0.324)` is exactly that case on the wire — 95% of the impulse was
+				// along the belt and this line threw it away, which is why the shove looked one-dimensional.
+				//
+				// `right` and `across` are orthogonal and both horizontal for a belt whose `RightVector` is horizontal, so
+				// the two dot products reconstruct the impulse and nothing is dropped; `Y` still belongs to gravity. The
+				// peak is still `BALL_COLLISION_SHOVE_SPEED`, because `clampShove` caps the **vector** — a dead-on contact
+				// is one full shove along the belt rather than half of one on each axis. That also means the effective
+				// strength of a rear-end hit went up by roughly the inverse of its lateral projection, which is the retune
+				// item 203 deliberately left alone.
 				const shoveImpulse = lateralShoveFor(ball, dt);
 				const lateralShove = across.mul(shoveImpulse.Dot(across));
+				const alongShove = right.mul(shoveImpulse.Dot(right));
 				ball.AssemblyLinearVelocity = velocity
 					.sub(right.mul(along))
 					.sub(across.mul(carriedLateral))
 					.add(right.mul(-relative))
 					.add(lateral)
-					.add(lateralShove);
+					.add(lateralShove)
+					.add(alongShove);
 				continue;
 			}
 

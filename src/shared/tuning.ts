@@ -843,17 +843,51 @@ export const RING_TRANSPARENCY = 0.6;
  * **Item 147 kept `200` after the fill replaced the outline, and the argument is not the same one.** The annulus's
  * legibility *was* its stroke width in canvas pixels, so the density and the thickness were coupled; a filled disc's edge is
  * a boundary between `RING_COLOR` at `RING_TRANSPARENCY` and whatever is under it, so the density now only decides how
- * smooth that edge is. `200` draws a 400-pixel circle, where the corner tessellation is finer than a stud by an order of
- * magnitude — there is nothing left to buy by raising it, and the cost of a higher value is paid once per pad.
+ * smooth that edge is. There is nothing left to buy by raising it, and the cost of a higher value is paid once per pad.
+ *
+ * **The canvas is `4000 x 4000`, and this docblock used to say `400 x 400` (corrected in item 202).** The `400` was true of
+ * the 2-stud *ring* the annulus drew; the disc is `pickupDiscDiameter(padSize)` — `20` studs for `PICKUP_SIZE` — so
+ * `200 x 20 = 4000` per axis, and one pad's fill is a 16-megapixel raster. That is a **memory** cost, not the visibility
+ * bug: it is paid once per pad, it is cheap on the GPU precisely because the content is one flat colour, and item 202
+ * deliberately left it alone rather than bundling a texture-budget change into a rendering fix.
  */
 export const RING_PIXELS_PER_STUD = 200;
 
 /**
+ * **Placeholder.** How far from the camera, in studs, the ring's `SurfaceGui` is allowed to draw.
+ *
+ * **The engine's default is `1000`, and it is a hard cut rather than a fade.** From the Roblox documentation for
+ * `SurfaceGui.MaxDistance`: *"This property controls how far from the camera the SurfaceGui will be displayed before it
+ * stops rendering. A value of `0` means there is no limit and it will render infinitely far away. The default value of
+ * `1000` works fine for most cases."* A pad that stops drawing past a fixed distance is exactly the reported symptom, and
+ * the belt alone is `333` studs long, so the limit is removed rather than reasoned around.
+ *
+ * **`1e6` rather than the documented `0`.** The docs say both mean "no limit", but `0` also reads to the next person as
+ * "cull at zero distance" — one careless "fix" away from switching the ring off. A million studs is past any camera this
+ * place can have, and says what it means without a reader needing the documentation.
+ *
+ * The same check applies to the sprite's `BillboardGui`, whose `MaxDistance` **defaults to infinity** — that asymmetry is
+ * why only the ring had a finite limit to remove.
+ */
+export const PICKUP_RING_MAX_DISTANCE = 1e6;
+
+/**
  * **Placeholder.** The footprint ring's own vertical thickness, in studs.
  *
- * It exists only because a `SurfaceGui` needs a face to sit on, and a `Part` needs a size on all three axes. `0.05` is a
- * twentieth of a stud: thin enough that the ring reads as paint on the floor rather than as a plate, thick enough that the
- * disc it makes is not degenerate.
+ * It exists only because a `SurfaceGui` needs a face to sit on, and a `Part` needs a size on all three axes. The cylinder is
+ * stood on its side, so this is the extent along world **Y**: the part spans `RING_LIFT_STUDS` to
+ * `RING_LIFT_STUDS + RING_THICKNESS_STUDS` above the pad's bottom face, and the `SurfaceGui` is on its top (`Face = Right`
+ * after the turn).
+ *
+ * **The value is `2`, and this docblock used to say `0.05` (corrected in item 202).** The old text argued for "a twentieth
+ * of a stud: thin enough that the ring reads as paint on the floor rather than as a plate" — at `2` it *is* a plate, and the
+ * consequence is worth stating because nothing else in the tree records it: with `BELT_SURFACE_THICKNESS = 0.1` and
+ * `RING_LIFT_STUDS = 0.12`, the painted face sits **2.22 studs above the belt's top surface**, not the 0.12 the lift alone
+ * suggests. A ball standing on a pad therefore covers the disc for the bottom 2.22 studs of its own 20-stud height, which is
+ * the mechanism item 147's "the ball hides the middle of a disc" is really describing.
+ *
+ * Not changed in item 202: it is a shape decision, and the round that fixed the ring's distance cut was not the round to
+ * retune it.
  */
 export const RING_THICKNESS_STUDS = 2;
 
@@ -863,7 +897,12 @@ export const RING_THICKNESS_STUDS = 2;
  * **Not zero, and the reason is a coplanarity, not a look.** `PickupService.positionFor` puts the pad's bottom face exactly
  * on the surface a ball rests on — the invisible moving collider, itself `BELT_SURFACE_THICKNESS` thick and sitting on the
  * belt. A ring at exactly that height z-fights with the thing it is lying on: two coplanar surfaces, decided per frame, per
- * pixel. `0.02` studs is below the perceptual floor and above the depth buffer's.
+ * pixel.
+ *
+ * **The value is `0.12`, and this docblock used to say `0.02` (corrected in item 202).** The argument above still holds, but
+ * the number no longer does the work it claims: `RING_THICKNESS_STUDS = 2` means the painted face ends up `2.22` studs above
+ * the belt, so the lift is a rounding error next to the thickness. It is left as written because it is the right *rule* —
+ * never coplanar — and `.12` is still above the depth buffer's resolution at belt distances.
  */
 export const RING_LIFT_STUDS = 0.12;
 
@@ -1059,28 +1098,42 @@ export const BALL_COLLISION_POP_UPWARD_SPEED = 80;
 export const DECOY_SPAWN_DELAY_SECONDS = 5;
 
 /**
- * **Placeholder.** Peak sideways speed one contact gives each body, in studs/second.
+ * **Placeholder.** Peak speed one contact gives each body, in studs/second, **in whichever horizontal direction the contact
+ * normal points**.
  *
- * ## Why this is a number at all, when the engine already separates in Z
+ * ## Why this is a number at all, when the engine already separates the bodies
  *
- * Because the engine's lateral separation is erased. The sway sets the lateral component of every ball's velocity on every
- * tick (item 151), so a collision imparts one physics step of sideways motion — about `1/60` of a stud — and the next tick
- * replaces it. A Studio log showed `hit` and `pop` lines with no visible sideways movement, which is that arithmetic, not
- * a missing shove in the engine.
+ * Because the engine's separation is erased. The model sets the lateral component of every ball's velocity on every tick
+ * (item 151) and replaces the along-belt component on every tick, so a collision imparts one physics step of motion — about
+ * `1/60` of a stud — and the next tick replaces it. A Studio log showed `hit` and `pop` lines with no visible movement,
+ * which is that arithmetic, not a missing shove in the engine.
+ *
+ * ## Direction: full plane, not sideways (item 203)
+ *
+ * This used to be described as "peak sideways speed", and it was: the writer projected the contact normal onto the belt's
+ * lateral axis and dropped the rest, so a rear-end hit — whose normal is almost entirely along the belt — shove almost
+ * nothing. Both components are applied now, so the same number describes a push in any direction in the belt plane, and a
+ * head-on contact is a push along the belt.
+ *
+ * **The effective strength of an along-belt contact is therefore larger than it was**, by roughly the inverse of the
+ * lateral projection it used to be reduced to. The number is deliberately unchanged in item 203 — this is a direction fix,
+ * and the retune is its own round.
  *
  * ## The displacement this buys
  *
- * A shove of `s` decaying with time constant `T` moves a body `s * T` studs in total. At `10` and
- * `BALL_COLLISION_SHOVE_DECAY_SECONDS = 1` that is **10 studs** on a belt `173` wide, against a 20-stud ball — visible as a
- * knock rather than as a nudge, and about 2.8 studs per second at the peak, which is below `BELT_SPEED` so the sideways
- * motion never outruns the along-belt picture.
+ * A shove of `s` decaying with time constant `T` moves a body `s * T` studs in total. At the current `100` and
+ * `BALL_COLLISION_SHOVE_DECAY_SECONDS = 1` that is **100 studs**, or its full length in whichever direction it points, on a
+ * belt `173` wide and `333` long. A docblock here claimed `10` studs and "about 2.8 studs per second at the peak, which is
+ * below `BELT_SPEED`"; that described the value this constant shipped with in item 175's retune, not `100`, and both claims
+ * are false at `100` (the peak is `100` studs/second, ten times `BELT_SPEED`). Corrected in item 203, value left alone.
  *
  * This was `5` / `0.3` (1.5 studs) when it shipped in item 175, against 1-stud balls: 1.5 studs is one and a half *ball
  * diameters* there, and a tenth of one on a 20-stud ball, which is why it was retuned with the size change. The pair is one
  * displacement (`s * T`), so raising either without the other moves twice.
  *
- * The sway's own position correction (`SWAY_TRACK_SECONDS = 1.5`) then walks the ball back to its wave, so the shove
- * settles instead of permanently changing lane.
+ * The sway's own position correction (`SWAY_TRACK_SECONDS = 1.5`) then walks the ball back toward its wave, so a lateral
+ * shove settles instead of permanently changing lane. It does nothing about the along-belt component: that axis has no lane
+ * to return to, so an along-belt shove is a real change of position on the belt, bounded only by the belt's ends.
  */
 export const BALL_COLLISION_SHOVE_SPEED = 100;
 

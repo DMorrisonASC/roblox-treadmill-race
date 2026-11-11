@@ -70,7 +70,7 @@ export const MOTION_BLUR_FADE_SECONDS = 0.5;
  * implementation — rather than by writing a second scale routine. A designer who wants the effect bigger changes this one
  * number and nothing else moves.
  */
-export const MOTION_BLUR_SCALE = 1;
+export const MOTION_BLUR_SCALE = 0.5;
 
 /**
  * How far a box of `size`, turned by `basis`, reaches along the **world** direction `direction`.

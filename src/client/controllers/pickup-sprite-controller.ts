@@ -11,6 +11,7 @@ import {
 	PICKUP_SPRITE_ASSET_ID,
 	PICKUP_SPRITE_LIFT_STUDS,
 	PICKUP_SPRITE_STUDS,
+	PICKUP_RING_MAX_DISTANCE,
 	RING_COLOR,
 	RING_LIFT_STUDS,
 	RING_PIXELS_PER_STUD,
@@ -105,6 +106,13 @@ export class PickupSpriteController implements OnStart {
 	 * constants.
 	 */
 	private reportedFirstAttach = false;
+
+	/**
+	 * Whether the first ring has already reported its `SurfaceGui`'s settled state. One line per session, per the same
+	 * argument as `reportedFirstAttach`: every pad shares the constants, so the second ring cannot say anything the first
+	 * did not.
+	 */
+	private reportedFirstRingSurface = false;
 
 	public onStart(): void {
 		this.imageUri = this.resolveImage();
@@ -321,6 +329,19 @@ export class PickupSpriteController implements OnStart {
 		// **Not `AlwaysOnTop`.** It is paint on the floor, not an overlay: drawn through a ball it would read as a disc the
 		// ball is standing in front of rather than on. The lift above is what keeps it clear of the floor it lies on.
 		surface.AlwaysOnTop = false;
+		// **No distance limit (item 202).** `SurfaceGui.MaxDistance` stops drawing at a fixed camera distance, and the engine
+		// default is `1000` studs — a hard cut, not a fade, which is the reported symptom on a `333`-stud belt. The constant's
+		// docblock quotes the documentation, including why a large finite number is used instead of the documented `0`.
+		//
+		// This is the *whole* fix for the round: no other property on a `SurfaceGui` is distance-dependent. `PixelsPerStud` and
+		// `SizingMode` decide resolution, `ZOffset` decides depth, `ClipsDescendants` decides cropping, and `AlwaysOnTop` decides
+		// occlusion — none of them can switch the gui off at a distance.
+		//
+		// `AlwaysOnTop` stays `false` deliberately. It cannot produce a distance cut, and the disc is `2.22` studs above the
+		// belt with nothing between it and a camera looking down at the pad, so there is no occlusion for it to solve. Turning it
+		// on would buy nothing here and would cost the "painted on the floor" read by drawing the disc over every ball that
+		// touches a pad.
+		surface.MaxDistance = PICKUP_RING_MAX_DISTANCE;
 		surface.Parent = ring;
 
 		const frame = new Instance("Frame");
@@ -356,6 +377,29 @@ export class PickupSpriteController implements OnStart {
 		// roblox-ts types `UDim` as a constructor, so `UDim.new` does not compile.)
 		corner.CornerRadius = new UDim(1, 0);
 		corner.Parent = frame;
+
+		// **One line per session, saying what the engine ended up with rather than what was asked for (item 202).** The round
+		// before this one measured the ring at `19.2 px` on screen and could not say whether that was the ring being tiny or
+		// the ring not being drawn — the log had no field that could tell those apart. `maxDistance` is the one that answers it:
+		// a finite value below the camera distance means the disc is *culled*, and a huge one means anything invisible is
+		// *small or faint* instead, which is a different fix.
+		//
+		// Every field is read back off the instance, not printed from the constant that produced it: a property the engine
+		// refuses, clamps, or does not have yet reads as itself here rather than as the intent.
+		//
+		// On its own thread and two waits in, for the same reason `first visuals` waits: `CanvasSize` is the rasteriser's
+		// answer, and it has no answer until the gui has been drawn once.
+		if (!this.reportedFirstRingSurface) {
+			this.reportedFirstRingSurface = true;
+			task.spawn(() => {
+				task.wait();
+				task.wait();
+
+				print(
+					`[PickupSprite] ring surface maxDistance=${formatStuds(surface.MaxDistance)} alwaysOnTop=${tostring(surface.AlwaysOnTop)} brightness=${formatStuds(surface.Brightness)} pixelsPerStud=${formatStuds(surface.PixelsPerStud)} canvas=${surface.CanvasSize.X}x${surface.CanvasSize.Y} parent=${surface.GetFullName()}`,
+				);
+			});
+		}
 
 		// **No `UIStroke`, and this is a decision rather than an omission (item 147).** A stroke in the same colour at the same
 		// transparency as the fill is not an edge: it is the fill drawn twice along its rim, which reads as a rendering seam at

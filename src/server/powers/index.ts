@@ -1029,14 +1029,15 @@ function maybePop(ball: BasePart, other: BasePart): void {
 }
 
 /**
- * Leaves one sideways impulse on each body of a qualifying contact.
+ * Leaves one impulse on each body of a qualifying contact, and it is a push in the belt's whole horizontal plane.
  *
  * ## Why this exists, given the sway owns Z
  *
- * The engine's own lateral separation is real but invisible: `stepBallSpeeds` sets the lateral component every tick, so a
- * collision moves a ball sideways for one physics step — about `1/60` of a stud — before the sway replaces it. A Studio log
- * showed `hit` and `pop` lines with no sideways movement, which is that arithmetic rather than a dormant engine. This
- * records an *impulse* the sway's writer applies and decays, so the axis keeps one writer and the shove cannot race it.
+ * The engine's own separation is real but invisible: `stepBallSpeeds` sets the lateral component every tick and replaces the
+ * along-belt component every tick, so a collision moves a ball for one physics step — about `1/60` of a stud — before the
+ * model overwrites it. A Studio log showed `hit` and `pop` lines with no sideways movement, which is that arithmetic rather
+ * than a dormant engine. This records an *impulse* the writer applies and decays, so each axis keeps one writer and the shove
+ * cannot race it.
  *
  * ## Why it does not roll
  *
@@ -1049,12 +1050,22 @@ function maybePop(ball: BasePart, other: BasePart): void {
  * age (the spawn pile-up is not a hit), the per-body contact cooldown, and the lower `serial` of the pair, so `Touched`
  * firing on both parts still produces one shove rather than two.
  *
- * ## Why the direction is the contact normal
+ * ## Why the direction is the contact normal, and the whole of it
  *
- * Two bodies in adjacent lanes get a normal that is mostly across the belt, which the writer projects onto `across` — the
- * full shove. Two bodies dead in line get a normal that is mostly along-belt, whose along-belt part the writer drops, so a
- * pure rear-end contact shoves little. That is deliberate: it is what a real separation would do, and forcing a sideways
- * kick out of a head-on hit would read as a random flick. The vertical pop covers that contact instead.
+ * The normal points from one body to the other, so the two bodies are given `-direction` and `+direction` — **repulsive,
+ * equal and opposite**, and that sign pair is unchanged by item 203.
+ *
+ * **What item 203 changed is how much of it survives.** The writer used to project the normal onto `across` and drop the
+ * rest, which made every contact a sideways flick and made a rear-end hit nearly free: those bodies have a normal that is
+ * almost entirely along the belt, and almost all of it was discarded. The old docblock called that deliberate — "it is what
+ * a real separation would do, and forcing a sideways kick out of a head-on hit would read as a random flick". The first half
+ * of that is right and the conclusion was wrong: a real separation from a rear-end hit is a push **along the belt**, which
+ * is precisely what was being thrown away. The vertical pop covers the visual flourish; it was never a substitute for the
+ * along-belt component of the contact.
+ *
+ * Both projections are now applied, so a head-on contact pushes one body forward along the belt and the other back, a
+ * side-by-side contact pushes them apart across it, and a diagonal contact does both in proportion. The magnitude is still
+ * `BALL_COLLISION_SHOVE_SPEED` for the pair, because `clampShove` caps the vector rather than either component.
  */
 function maybeShove(ball: BasePart, other: BasePart): void {
 	const now = os.clock();
