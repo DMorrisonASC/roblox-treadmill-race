@@ -1216,6 +1216,79 @@ export const MOTION_BLUR_FOLDER_NAME = "SpawnedMotionBlur";
 export const BALL_PHANTOM_NAME = "BallPhantom";
 
 /**
+ * The name of the client-only avatar overlay, created by `BallAvatarController` as a child of the ball it belongs to.
+ *
+ * Same reason as `BALL_PHANTOM_NAME`: as a child of the body it is destroyed with it, and "does this body have exactly one
+ * avatar" is a name lookup rather than a walk. A name, not a folder path — the overlay belongs to one body.
+ */
+export const BALL_AVATAR_NAME = "BallAvatar";
+
+/**
+ * **Placeholder.** The avatar's drawn size, in pixels, on both axes.
+ *
+ * **A square, and it must be:** the thumbnail is a player's `HeadShot`, which is square, and a non-square frame would crop
+ * the head or letterbox it. A `BillboardGui`'s offset `Size` is a **pixel** size held constant with distance — the same
+ * mechanic as the power badge's, and the reason this is pixels rather than studs.
+ *
+ * `36` is deliberately about the badge's `20`-pixel height plus its own clearance: the avatar is a second label in the same
+ * vertical stack on the same body, so it has to be big enough to be recognisable at the distance the arena camera sits and
+ * small enough that eight of them do not become a wall of faces over the belt.
+ */
+export const BALL_AVATAR_SIZE = 36;
+
+/**
+ * **Placeholder.** How far above the ball's surface the avatar floats, in studs, measured from the ball's **centre**.
+ *
+ * **It does not reuse `POWER_BADGE_OFFSET_STUDS` (14), and that is a measured decision rather than a preference.** The badge
+ * sits at `radius + 14` — for a 20-stud ball, `10 + 14 = 24` above the centre — and it is `20` pixels tall, so the avatar has
+ * to clear the badge as well as the body. `40` is `radius (10) + badge offset (14) + 16` of clearance, which leaves a gap
+ * at the game camera's distance without pushing the face so high that it stops reading as belonging to its ball.
+ *
+ * **The honest caveat:** the badge's height is in pixels and this offset is in studs, so the clearance is exact at one
+ * camera distance and only approximate at others. That is the same trade the badge itself makes (`POWER_BADGE_OFFSET_STUDS`
+ * above the radius), and a studs offset is the only kind a `BillboardGui` accepts for this.
+ */
+export const BALL_AVATAR_OFFSET_STUDS = 40;
+
+/**
+ * **Placeholder.** The thumbnail resolution requested per player, in pixels, and the largest `Enum.ThumbnailSize` whose
+ * squareness matches `BALL_AVATAR_SIZE`.
+ *
+ * Asked for at the size it is drawn rather than at `420x420`: the call is a web request, and every player in the round is one
+ * of them. `48x48` against a `36`-pixel frame is the smallest option that is still down-sampled rather than up-sampled.
+ */
+export const BALL_AVATAR_THUMBNAIL_SIZE = Enum.ThumbnailSize.Size48x48;
+
+/**
+ * **Placeholder.** The spectate button's drawn size, in pixels. Wide enough for `Stop spectating` — the longer of its two
+ * labels — at the control text size, and tall enough for a chunky face plus its depth.
+ */
+export const SPECTATE_BUTTON_WIDTH = 200;
+
+/** **Placeholder.** See `SPECTATE_BUTTON_WIDTH`. */
+export const SPECTATE_BUTTON_HEIGHT = 56;
+
+/** **Placeholder.** How far the button sits above the bottom of the HUD, in pixels. */
+export const SPECTATE_BUTTON_MARGIN = 32;
+
+/**
+ * **Placeholder.** The button's label size, in pixels.
+ *
+ * Fixed rather than big-ui's: a chunky face is a fixed box, and the label is drawn on it with a stroke, so it is a
+ * `TextLabel` inside the face rather than a themed bar — the same shape every other chunky control uses.
+ */
+export const SPECTATE_LABEL_TEXT_SIZE = 20;
+
+/**
+ * The two labels the spectate control flips between.
+ *
+ * In `tuning.ts` rather than in the controller because the *words* are the design: a button that says what it does is a
+ * requirement of the brief, and `Stop spectating` is long enough that a change to it is a size change here.
+ */
+export const SPECTATE_LABEL_OFF = "Spectate";
+export const SPECTATE_LABEL_ON = "Stop spectating";
+
+/**
  * **Placeholder.** The ball radius, in studs, that the VFX pack was drawn against.
  *
  * Every ball effect divides the contact's radius by this and multiplies every distance in its clone by the result, so changing

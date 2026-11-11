@@ -188,6 +188,34 @@ export const OWNER_USER_ID_ATTRIBUTE = "OwnerUserId";
 export const OWNER_DISPLAY_NAME_ATTRIBUTE = "OwnerDisplayName";
 
 /**
+ * **Who a body should be *drawn* as, when that is not who it is.** Read only by the client's avatar overlay (item 193).
+ *
+ * ## Why this is a second key and not `OwnerUserId` on the twin
+ *
+ * A `decoy` twin is deliberately **ownerless** — `OwnerUserId` is the field `getCompetitors()` filters on, so writing it to
+ * the twin would make the fake a competitor, change the winner rule, and let it hold a round open. That absence is load
+ * bearing and it is not negotiable.
+ *
+ * It also means the twin is a bare ball to every viewer, and a bare ball beside an identical one is **the fake**, instantly.
+ * Items 77 and 129 spent two rounds making the pair indistinguishable, so the avatar cannot be keyed on a field the twin
+ * must not have.
+ *
+ * ## The rule, in one line
+ *
+ * **`OwnerUserId` is the competition key; `AvatarUserId` is a display key.** They agree on every real body and only this
+ * one exists on a twin. Nothing in the simulation reads it: `RoundService`, the tick loop, the powers and the winner rule
+ * never look at it, and a body carrying a `AvatarUserId` and no `OwnerUserId` is still an orphan that competes for nothing.
+ *
+ * ## Where it is written, and where it deliberately is not
+ *
+ * **Only on a decoy twin, at spawn, beside the parent's identity it copies** (`spawnDecoy`). The real body needs no copy —
+ * its `OwnerUserId` *is* the answer — so a lone extra key would be a second place for one fact to live and drift. The
+ * client's rule is therefore `OwnerUserId ?? AvatarUserId`, which gives the twin its parent's face and every other body its
+ * own.
+ */
+export const AVATAR_USER_ID_ATTRIBUTE = "AvatarUserId";
+
+/**
  * The **lane this body was spawned into**, as an index into the spawner lane list — written once, at spawn, and never
  * rewritten.
  *
@@ -299,3 +327,29 @@ export const PLAYER_OWNED_BALLS_ATTRIBUTE = "OwnedBalls";
  * is about to appear or hide a wallet that exists. One attribute names the state, and the controller renders it.
  */
 export const PLAYER_ECONOMY_STATE_ATTRIBUTE = "EconomyState";
+
+/**
+ * **Whether this player is in the round that is running** — written `true` when a body is spawned for them and `false` when
+ * the round's bodies are cleared. Read by the client's spectate button and the arena camera (item 193).
+ *
+ * ## Why a `Player` attribute and not "does the scene hold a body of mine"
+ *
+ * The scan is possible — `OwnerUserId` is on every real body — but it is wrong in three ways at once. It is a walk of the
+ * tagged body list on every phase change; it answers **no** during the window between the phase changing and the body
+ * replicating, which is exactly when the camera decides what to do; and it answers **no again** for a player whose ball was
+ * eliminated mid-round, who is still watching a round they were in and must not be offered a `Spectate` button that would
+ * take a camera they already have.
+ *
+ * The attribute is one write per spawn and one per teardown, it replicates to its own player only (a `Player` attribute is
+ * not broadcast to everyone), and it is correct the moment the client reads it.
+ *
+ * ## Why it is cleared at teardown and not when the body dies
+ *
+ * "Competed this round" is the question the camera asks, and an eliminated competitor still has the arena camera — they are
+ * watching the rest of the race, which is the behaviour item 186 shipped. Clearing on death would hand an eliminated player
+ * their own camera mid-round, which is a regression dressed as a feature.
+ *
+ * **It is deliberately not `enrolledUserIds`.** Enrollment is the picker's record and closes before the round starts; this is
+ * "a body exists for you", which is also true of the debug paths that bypass enrollment.
+ */
+export const PLAYER_COMPETING_ATTRIBUTE = "Competing";

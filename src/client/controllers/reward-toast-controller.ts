@@ -164,7 +164,6 @@ export class RewardToastController implements OnStart {
 		// from making the card a hit area by copying a property from a button.
 		panel.frame.Active = false;
 		panel.surface.Active = false;
-		panel.shadow.Active = false;
 
 		applyPanelScale(panel.frame, "reward-toast");
 		this.live.push(panel.frame);
@@ -253,7 +252,7 @@ export class RewardToastController implements OnStart {
 	 * the reveal goes `0 -> 1`, so the card arrives *and* appears in one gesture rather than in two queued ones.
 	 */
 	private animate(
-		panel: { readonly surface: Frame; readonly shadow: Frame; readonly frame: Frame },
+		panel: { readonly surface: Frame; readonly frame: Frame },
 		resting: UDim2,
 		faded: Array<GuiObject>,
 		strokes: Array<UIStroke>,
@@ -266,7 +265,6 @@ export class RewardToastController implements OnStart {
 			const amount = reveal.Value;
 
 			panel.surface.BackgroundTransparency = mix(1, 0, amount);
-			panel.shadow.BackgroundTransparency = mix(1, 0, amount);
 
 			for (const stroke of strokes) {
 				stroke.Transparency = mix(1, 0, amount);

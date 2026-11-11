@@ -515,7 +515,7 @@ export class PayoutController implements OnStart {
 	 * rather than as two animations queued behind each other, and it fits the phase.
 	 */
 	private animate(
-		panel: { readonly surface: Frame; readonly shadow: Frame; readonly frame: Frame },
+		panel: { readonly surface: Frame; readonly frame: Frame },
 		faded: Array<GuiObject>,
 		strokes: Array<UIStroke>,
 		total: TextLabel,
@@ -528,10 +528,9 @@ export class PayoutController implements OnStart {
 		const paint = () => {
 			const amount = reveal.Value;
 
-			// The sheet's layers: the face and the plate behind it. Both are opaque in the theme, so "revealed" is `0` for
-			// both, and the outline and every inner band's outline follow the same driver rather than their own tween.
+			// The sheet's one visible layer. It used to be the face *and* the plate behind it; item 195 deleted the plate, so
+			// there is no second background to fade and no way for the two to drift apart.
 			panel.surface.BackgroundTransparency = mix(1, 0, amount);
-			panel.shadow.BackgroundTransparency = mix(1, 0, amount);
 
 			for (const stroke of strokes) {
 				stroke.Transparency = mix(1, 0, amount);

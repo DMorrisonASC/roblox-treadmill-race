@@ -3,9 +3,10 @@ import { Controller, OnStart } from "@flamework/core";
 import Fusion from "@rbxts/fusion-3.0";
 import { Text } from "@rbxts/big-ui";
 import { ROUND_STATE_VALUE_NAME, WINNER_NAME_VALUE_NAME } from "shared/remotes";
+import { buildChunkyPanel, ChunkyPanel } from "shared/ui/chunky-panel";
 import { getScreenGui } from "shared/ui/layers";
 import { SPACING, TextVariant } from "shared/ui/scale";
-import { getTheme } from "shared/ui/theme";
+import { chunkyDarkTheme, getTheme } from "shared/ui/theme";
 
 /**
  * **Placeholder.** Seconds to wait for `RoundState` / `WinnerName` before giving up loudly.
@@ -32,6 +33,16 @@ const BANNER_VARIANT: TextVariant = "h6";
 
 /** Distinct unknown phase values already reported, so a wrong phase cannot print on every recompute. */
 const reportedUnknown = new Set<string>();
+
+/**
+ * The label's draw order, **above the panel face**, which `buildChunkyPanel` draws at its `zIndex` (`1`).
+ *
+ * The picker's `LABEL_Z_INDEX` is `6` for the same reason and this matches it: a label inside a chunky face at its
+ * default order is drawn *under the plate*, which is a chip with no text and no error (item 194 was exactly that). A
+ * panel has no shadow plate since item 195, so the only thing above the label now is the face's own `UIStroke`, which
+ * draws with the face.
+ */
+const BANNER_LABEL_Z_INDEX = 6;
 
 /**
  * The label's text, decided in one place.
@@ -119,8 +130,11 @@ export function bannerText(phase: string, winner: string): string {
 @Controller()
 export class PhaseBannerController implements OnStart {
 	public onStart(): void {
-		// First read: constructs the theme and pushes it into big-ui. Everything below reads the result.
-		const theme = getTheme();
+		// First read: constructs the theme and **pushes it into big-ui**. That push is the reason this call exists here —
+		// every `Text` below reads its ink from it — so the value itself is no longer used in this method: the panel's face
+		// comes from `chunkyDarkTheme()`, whose `paint.panel` is `CHUNKY_PANEL_FACE`, and the HUD theme's face is brown.
+		getTheme();
+		const chunky = chunkyDarkTheme();
 		const gui = getScreenGui("hudTopbar");
 
 		// **The waits come before the build.** The label's first paint carries the current phase, so building
@@ -175,11 +189,45 @@ export class PhaseBannerController implements OnStart {
 		// to the two values it reads.
 		const text = Fusion.Computed(scope, (use) => bannerText(use(phase), use(winner)));
 
-		// `UIPadding` on the container rather than a nested padded frame: padding a container insets its
-		// children, which is exactly "space between the text and the panel edge" without a second instance to
-		// auto-size through. The step comes from the app's spacing ladder, because big-ui's own `Spacing()` is a
-		// function used by big-ui's internals and is not themable.
-		const padding = Fusion.New(
+		// **The container is `buildChunkyPanel`, not Fusion's `New` (item 193).** The banner used to be a plain
+		// `Frame` painted from `theme.paint.panel` — a HUD readout in the HUD palette, which is what item 122 recorded
+		// as deliberate and what `UI_STYLE_GUIDE.md` now records as reversed: the designer asked for the same chunky
+		// language as the store, the inventory, the payout and the toast, and a banner is the most-seen surface in the
+		// game after the ball itself.
+		//
+		// `buildChunkyPanel` rather than `applyChunkyChrome`, and the split is not a preference: the chrome dresses an
+		// **existing `GuiButton`** — it inverts the stack so the button becomes a transparent hit area and the plates
+		// become its children — and there is nothing to press here. The panel builder takes only a parent and a size, so
+		// a readout is exactly what it is for.
+		const panel = buildChunkyPanel({
+			name: "PhaseBanner",
+			parent: gui,
+			size: UDim2.fromOffset(0, 0),
+			color: chunky.paint.panel.color,
+			autoHeight: true,
+			zIndex: 1,
+		});
+
+		// **Top-centre, not centred.** The builder anchors every panel at `0.5, 0.5` because every sheet in the game is
+		// an overlay in the middle of the screen; the banner is the one panel that owns an edge, and it keeps the anchor
+		// and position it shipped with (item 41) — under the topbar inset, half the screen's width from the left.
+		panel.frame.AnchorPoint = new Vector2(0.5, 0);
+		panel.frame.Position = UDim2.fromScale(0.5, 0);
+
+		// **Auto-size in both axes, which is the one thing the builder's `autoHeight` mode cannot express.** That mode
+		// reports `Y` from the face's content and leaves `X` at the frame's scale — right for a sheet, whose width is
+		// fixed, and wrong for a chip whose width is its text. The face therefore becomes the reporting child on both
+		// axes and the frame follows it; the plate keeps tracking `surface.Size.Y` through the builder's own
+		// `syncShadow`, and its width follows the frame's scale, which is now the face's own width.
+		panel.frame.AutomaticSize = Enum.AutomaticSize.XY;
+		panel.surface.Size = UDim2.fromOffset(0, 0);
+		panel.surface.AutomaticSize = Enum.AutomaticSize.XY;
+
+		// `UIPadding` on the **face** rather than a nested padded frame: padding a container insets its children, which
+		// is exactly "space between the text and the panel edge" without a second instance to auto-size through. The
+		// step comes from the app's spacing ladder, because big-ui's own `Spacing()` is a function used by big-ui's
+		// internals and is not themable.
+		Fusion.New(
 			scope,
 			"UIPadding",
 		)({
@@ -187,11 +235,19 @@ export class PhaseBannerController implements OnStart {
 			PaddingBottom: new UDim(0, SPACING.sm),
 			PaddingLeft: new UDim(0, SPACING.sm),
 			PaddingRight: new UDim(0, SPACING.sm),
+			Parent: panel.surface,
 		});
 
-		// **big-ui builds the text.** `Text` resolves `variant` through big-ui's live `Typography` table — so the
-		// font, size and line height are the ones `pushBigUiTheme` put there, not literals in this file — and
-		// binds `text` (a Fusion `Computed`) to the label's `Text` property itself.
+		// **big-ui builds the text, and it still can.** Item 58's rule is that big-ui's `Text` reads its ink from the
+		// dark HUD palette it was pushed, so it is legible on a **dark** face and invisible on a light one. The chunky
+		// face is `CHUNKY_PANEL_FACE` — `rgb(52, 52, 58)` charcoal, reached here through `chunkyDarkTheme().paint.panel`,
+		// which that theme documents as equal to it — so the rule is satisfied by the colour rather than by a rewrite: the
+		// labels
+		// stay on big-ui `Text` with `color: "primary"` (pale ink), and nothing about the text logic moved.
+		//
+		// `Text` resolves `variant` through big-ui's live `Typography` table — so the font, size and line height are the
+		// ones `pushBigUiTheme` put there, not literals in this file — and binds `text` (a Fusion `Computed`) to the
+		// label's `Text` property itself.
 		const label = Text(scope, {
 			text,
 			variant: BANNER_VARIANT,
@@ -202,31 +258,23 @@ export class PhaseBannerController implements OnStart {
 
 		// big-ui's `Text` maps `size` to `AutomaticSize = None` (its default is a full-width, fixed-height bar).
 		// The banner wants the opposite — a chip that shrink-wraps its own text — so the one property big-ui does
-		// not expose is re-applied here through Fusion, on the instance big-ui just made.
-		Fusion.Hydrate(scope, label)({ AutomaticSize: Enum.AutomaticSize.XY });
-
-		// **The container is Fusion's `New`, not a big-ui component.** big-ui 1.1.3 has no plain container
-		// primitive: its nearest is `Card`, which unconditionally adds a `UICorner`, adds a `UIStroke` unless
-		// `elevation: 0`, wraps its children in a vertical `UIListLayout`, and drops `AutomaticSize` the moment a
-		// `size` is supplied — four properties this banner's spec forbids or fights. The panel is therefore
-		// painted from the same `Theme` the push reads, which is what the cascade test needs.
-		const frame = Fusion.New(
+		// not expose is re-applied here through Fusion, on the instance big-ui just made, and the label is parented
+		// to the face: a label parented to the container would be drawn under the plates.
+		//
+		// **`ZIndex` is set for the same reason the picker's labels are (items 122, 194).** The first build of this
+		// banner drew an empty charcoal chip: the face was drawn above the label, so the text sat *under the very
+		// plate it is on*. A panel's face is its whole surface since item 195, so there is no shadow plate to
+		// out-rank — but the face still has to be under the label, and a default nobody chose is what got that wrong.
+		Fusion.Hydrate(
 			scope,
-			"Frame",
+			label,
 		)({
-			Name: "PhaseBanner",
-			AnchorPoint: new Vector2(0.5, 0),
-			Position: UDim2.fromScale(0.5, 0),
-			Size: UDim2.fromOffset(0, 0),
 			AutomaticSize: Enum.AutomaticSize.XY,
-			BackgroundColor3: theme.paint.panel.color,
-			BackgroundTransparency: theme.paint.panel.transparency,
-			BorderSizePixel: 0,
-			Parent: gui,
-			[Fusion.Children]: [padding, label],
+			Parent: panel.surface,
+			ZIndex: BANNER_LABEL_Z_INDEX,
 		});
 
-		this.reportMounted(frame, gui, Fusion.peek(text), theme.paint.panel.color);
+		this.reportMounted(panel, gui, Fusion.peek(text), chunky.paint.panel.color);
 	}
 
 	/**
@@ -237,14 +285,19 @@ export class PhaseBannerController implements OnStart {
 	 * default palette because the push never ran. `tostring(Color3)` prints `r, g, b` in `[0, 1]`, enough to
 	 * compare two runs.
 	 *
+	 * **Since item 193 the line also carries the face's drawn size against the text's**, because the banner moved
+	 * from a flat `Frame` to `buildChunkyPanel`. Since item 195 those two numbers are the same on both axes — the panel
+	 * has no offset plate, so the frame *is* the face — and they are still both printed: if they ever disagree again, the
+	 * difference is a plate that came back rather than a geometry bug.
+	 *
 	 * **Deferred by one resumption, because `AbsoluteSize` is zero until the layout pass runs.** Printing the
 	 * geometry synchronously reports `size=(0, 0)` for an element that is about to be 120×40, which reads as
 	 * "the banner has no size" — the exact wrong conclusion this line exists to prevent.
 	 */
-	private reportMounted(frame: Frame, gui: ScreenGui, text: string, panel: Color3): void {
+	private reportMounted(panel: ChunkyPanel, gui: ScreenGui, text: string, face: Color3): void {
 		task.defer(() => {
 			print(
-				`[PhaseBanner] mounted pos=${tostring(frame.AbsolutePosition)} size=${tostring(frame.AbsoluteSize)} parent=${gui.Name} drawOrder=${gui.DisplayOrder} visible=${tostring(gui.Enabled)} text="${text}" panel=${tostring(panel)}`,
+				`[PhaseBanner] mounted pos=${tostring(panel.frame.AbsolutePosition)} size=${tostring(panel.frame.AbsoluteSize)} face=${tostring(panel.surface.AbsoluteSize)} parent=${gui.Name} drawOrder=${gui.DisplayOrder} visible=${tostring(gui.Enabled)} text="${text}" panel=${tostring(face)}`,
 			);
 		});
 	}

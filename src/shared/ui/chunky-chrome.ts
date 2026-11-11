@@ -8,7 +8,12 @@ import { outlineText } from "./text";
  * which at these values is `6 - 1.5 = 4.5` pixels.
  *
  * **Rule: depth must be at least `1.5 x` the stroke**, or the outline eats the shadow (item 113's failure, recorded on
- * `CHUNKY_DEPTH` and `CHUNKY_PANEL_DEPTH` as well).
+ * `CHUNKY_DEPTH` as well).
+ *
+ * **`CHUNKY_PANEL_DEPTH` no longer exists (item 195).** It was the panel-scale version of this number, and the plate it
+ * sized was deleted rather than retuned: a panel is not pressed, and an offset sibling inside a container that measures its
+ * children leaves a sliver of plate instead of a shadow. Depth is a **control** cue now, and this is the only panel-scale
+ * number left in the tree.
  *
  * `6` rather than the card's `8` because a control inside a panel is 30-45 pixels tall, not 84: the same proportion of a
  * much smaller box. It also fits inside a 36-pixel tab after the stroke, which is the tightest control here.

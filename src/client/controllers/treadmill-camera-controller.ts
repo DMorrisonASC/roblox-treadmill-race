@@ -1,6 +1,8 @@
 import { CollectionService, Players, ReplicatedStorage, Workspace } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
+import { PLAYER_COMPETING_ATTRIBUTE } from "shared/attributes";
 import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
+import { cameraWantsArena } from "shared/spectate";
 import { TAGS } from "shared/tags";
 
 /**
@@ -11,6 +13,10 @@ import { TAGS } from "shared/tags";
  * **Snap on `Waiting` entry, hold through `Playing` and `PostGame`, restore on `Intermission` entry** — with `Playing` and
  * `PostGame` acting as the fallback for a client that joined after `Waiting`, and a mid-round character loss restoring
  * without re-engaging until the next round.
+ *
+ * **Since item 193 that rule applies to players who are *in* the round, or who have asked to watch it.** A non-competitor's
+ * camera used to be taken for the whole round by the phase alone; it is now theirs until they press Spectate, which is what
+ * gives the button a meaningful off state. A competitor's behaviour is unchanged in every respect.
  *
  * ## Why `Waiting` is the engage phase and `Playing` is only a fallback
  *
@@ -43,15 +49,12 @@ import { TAGS } from "shared/tags";
 const ROUND_STATE_WAIT_SECONDS = 10;
 
 /**
- * The three phases the arena camera is for. A phase outside this list restores.
- *
- * A `Set` rather than a chain of comparisons because the membership question is asked on every change and every
- * observation, and because the *complement* — "anything not in here restores" — is the rule that makes an unknown, future
- * phase fail safe: a phase this build has never heard of gives the player their camera back rather than stranding them in a
+ * **The phase set is no longer this file's.** `ARENA_CAMERA_PHASES` lives in `shared/spectate.ts` (item 193) because the
+ * spectator button asks the same question — "is this a phase in which a round exists to watch" — and two sets that must stay
+ * equal are two sets that eventually will not. This controller's *complement rule* is unchanged: anything outside that set
+ * restores, so a phase this build has never heard of gives the player their camera back rather than stranding them in a
  * scripted camera nothing will release.
  */
-const ACTIVE_PHASES = new Set(["Waiting", "Playing", "PostGame"]);
-
 @Controller()
 export class TreadmillCameraController implements OnStart {
 	/** The tagged part whose `CFrame` is the camera pose, once one has replicated. */
@@ -71,6 +74,23 @@ export class TreadmillCameraController implements OnStart {
 	 * next round re-engages without anything having to clear the flag — the round boundary *is* the clear.
 	 */
 	private generation = 0;
+
+	/**
+	 * **The two facts the phase rule alone cannot answer (item 193).**
+	 *
+	 * `competing` is `Player:GetAttribute(Competing)`, written by `RoundService` when a body is spawned for this player and
+	 * cleared when the round's bodies are. `spectating` is the local override the spectator button sets.
+	 *
+	 * The rule they feed is `cameraWantsArena(phase, competing, spectating)`: a competitor keeps item 186's automatic engage,
+	 * and a non-competitor gets the arena only while they have asked for it. Before this round the phase decided on its own,
+	 * so a player who was not in the round still had their camera taken — which left the button with no meaningful `off`
+	 * state, because the camera was on before it was pressed.
+	 *
+	 * **Both are read, never polled.** `competing` arrives through `GetAttributeChangedSignal`, which is what makes the
+	 * attribute's update timing invisible: it can replicate before or after `RoundState`, and either order re-runs `observe`.
+	 */
+	private competing = false;
+	private spectating = false;
 
 	private readonly connections = new Array<RBXScriptConnection>();
 
@@ -114,6 +134,18 @@ export class TreadmillCameraController implements OnStart {
 		);
 
 		this.connections.push(roundState.GetPropertyChangedSignal("Value").Connect(() => this.observe()));
+
+		// **The competitor flag, read once and then watched (item 193).** Read at boot because a client can start mid-round,
+		// and watched because it arrives asynchronously: the server writes it when a body is spawned, which may be before or
+		// after `RoundState` changes, and the camera must react to whichever lands second. `SetAttribute` on a `Player` reaches
+		// only that player, so this is a local read of a local fact.
+		const player = Players.LocalPlayer;
+		if (player !== undefined) {
+			this.readCompeting(player);
+			this.connections.push(
+				player.GetAttributeChangedSignal(PLAYER_COMPETING_ATTRIBUTE).Connect(() => this.readCompeting(player)),
+			);
+		}
 
 		this.watchCharacter();
 		this.observe();
@@ -185,12 +217,14 @@ export class TreadmillCameraController implements OnStart {
 	/**
 	 * Whether the camera should be scripted right now.
 	 *
-	 * All three must hold: the phase is one the arena camera is for, a part exists to copy, a character exists to hand the
-	 * camera back to later, and this round has not been suppressed by a reset.
+	 * All three must hold: a part exists to copy, a character exists to hand the camera back to later, this round has not
+	 * been suppressed by a reset, **and the player wants the arena** — which is `cameraWantsArena`: a competitor always does
+	 * in these phases, and a non-competitor only while they have pressed Spectate.
 	 *
 	 * **The character test is not decoration.** `CameraType = Custom` with no `Subject` leaves the camera at the origin
 	 * staring at nothing, and a player with no body is not watching a race. Keeping the default camera for that case is
-	 * strictly better than a scripted camera with nothing to release it to.
+	 * strictly better than a scripted camera with nothing to release it to. It is also why a spectator still needs a
+	 * character: the restore hands the camera back to it.
 	 */
 	private isActive(): boolean {
 		const state = this.roundState;
@@ -198,11 +232,55 @@ export class TreadmillCameraController implements OnStart {
 			return false;
 		}
 
-		if (!ACTIVE_PHASES.has(state.Value)) {
+		if (!cameraWantsArena(state.Value, this.competing, this.spectating)) {
 			return false;
 		}
 
 		return this.suppressedGeneration !== this.generation;
+	}
+
+	/** Reads the replicated "am I in this round" flag and re-runs the rule if it changed. */
+	private readCompeting(player: Player): void {
+		const raw = player.GetAttribute(PLAYER_COMPETING_ATTRIBUTE);
+		const competing = raw === true;
+
+		if (competing === this.competing) {
+			return;
+		}
+
+		this.competing = competing;
+		print(`[TreadmillCamera] competing=${tostring(competing)} phase=${this.phaseName()}`);
+		this.observe();
+	}
+
+	/**
+	 * **The spectator's override**, called by `SpectateController` when the button is pressed.
+	 *
+	 * It sets the flag and re-runs `observe`, which is the whole implementation: pressing Spectate makes `isActive` true and
+	 * engages through the ordinary path; pressing Stop spectating makes it false and **restores through the same branch a
+	 * phase change uses** — `observe`'s `if (this.engaged)` call to `restore`, which is `CameraSubject` then `CameraType`.
+	 * There is no second restore path here, because a second one is a second thing to get wrong: the first version of this
+	 * camera shipped a hand-written restore that left the old `CameraSubject` behind.
+	 *
+	 * **The latch is not cleared by a phase change**, which is what makes the toggle survive one: `spectating` is only ever
+	 * written here and by the button, so `Waiting → Playing → PostGame` re-evaluates the same answer. It is cleared by the
+	 * spectate button when the player stops, and — the case that matters — the button clears it when this player becomes a
+	 * competitor, because a racer must never be watching their own ball from a fixed pose.
+	 */
+	public setSpectating(on: boolean): void {
+		if (this.spectating === on) {
+			return;
+		}
+
+		this.spectating = on;
+		print(`[TreadmillCamera] spectating=${tostring(on)} phase=${this.phaseName()}`);
+		this.observe();
+	}
+
+	/** The current phase, or `none` before `RoundState` has replicated. For log lines only. */
+	private phaseName(): string {
+		const state = this.roundState;
+		return state === undefined ? "none" : state.Value;
 	}
 
 	/**

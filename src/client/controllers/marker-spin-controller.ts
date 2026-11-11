@@ -219,6 +219,14 @@ export class MarkerSpinController implements OnStart {
 		let discoveryTimedOut = false;
 
 		/**
+		 * Whether the steady-state budget has been re-armed for the round that is now running (item 194).
+		 *
+		 * Latched, not a phase read: the first frame any body reports a speed above `SPIN_DEADBAND_SPEED` is the moment
+		 * the belt is driving the field, and it is the only moment at which the twelve lines become interesting.
+		 */
+		let raceLoggingStarted = false;
+
+		/**
 		 * Starts the discovery clock the first time a body carrying `TAGS.ball` is seen.
 		 *
 		 * Measured from the first ball rather than from `onStart` on purpose: in a normal session the
@@ -393,16 +401,30 @@ export class MarkerSpinController implements OnStart {
 				// never replicate. Same defect, same treatment — a silent infinite wait is indistinguishable
 				// from "it will arrive next frame", and the user-visible symptom of both is a ball with no
 				// spin and no log line saying why.
+				// **The discovery give-up is about a body that exists and has no markers (item 194).** The first build
+				// of this check tested `trackedMarkers.size() === 0` alone, so it fired *after a legitimate round
+				// teardown* — every body destroyed, every marker untracked — and printed "markers seen=0 ... Check the
+				// tag string", which reads as "discovery never worked" for a round where it had worked perfectly. The
+				// live-body test is what makes the warning mean what it says.
 				if (
 					!discoveryTimedOut &&
 					trackedMarkers.size() === 0 &&
+					liveBallCount() > 0 &&
 					firstBallSeenAt !== undefined &&
 					os.clock() - firstBallSeenAt >= MARKER_SPIN_DISCOVERY_TIMEOUT_SECONDS
 				) {
 					discoveryTimedOut = true;
 					warn(
-						`[MarkerSpin] GAVE UP waiting for ${TAGS.ballDecoration} ${MARKER_SPIN_DISCOVERY_TIMEOUT_SECONDS}s after the first ${TAGS.ball}: markers seen=${CollectionService.GetTagged(TAGS.ballDecoration).size()} tracked=0. Check the tag string and that the markers are children of a ${TAGS.ball}-tagged body.`,
+						`[MarkerSpin] GAVE UP waiting for ${TAGS.ballDecoration} ${MARKER_SPIN_DISCOVERY_TIMEOUT_SECONDS}s after the first ${TAGS.ball}: liveBodies=${liveBallCount()} markers seen=${CollectionService.GetTagged(TAGS.ballDecoration).size()} tracked=0. Check the tag string and that the markers are children of a ${TAGS.ball}-tagged body.`,
 					);
+				}
+
+				// A later round re-arms the check: a give-up that fired once must not silence a *new* round's warning,
+				// and a teardown that emptied the field must not leave the stamp behind. Both are the same reset —
+				// the check is armed again whenever no ball is alive.
+				if (liveBallCount() === 0) {
+					firstBallSeenAt = undefined;
+					discoveryTimedOut = false;
 				}
 			}
 		});
@@ -455,6 +477,28 @@ export class MarkerSpinController implements OnStart {
 			// starts, all twelve lines were consumed reporting `bodies=0` — which is why a run that
 			// discovered every marker still said nothing about them. Empty-state lines are now printed the
 			// first time and then suppressed, so the count means "lines about a real body".
+			// **The budget restarts when the race does (item 194).** The countdown before `Playing` is over fourteen
+			// seconds -- `[Countdown] start ... startsIn=14.43s` in the run that reported "a few balls not spinning" --
+			// and the bodies exist for all of it with `BALL_SPEED=0`, so all twelve steady-state lines were spent on a
+			// parked field *before the round started*. That is why the log could not answer the question it was added
+			// to answer. The reset is keyed on the first frame any body reports a speed above the deadband, which is
+			// the observable definition of "the belt is running" and needs no phase subscription.
+			//
+			// Read once per frame only until the reset has fired, then never again.
+			if (!raceLoggingStarted) {
+				for (const [candidate] of bodies) {
+					const raw = candidate.GetAttribute(BALL_SPEED_ATTRIBUTE);
+					const speed = typeIs(raw, "number") && raw === raw ? raw : 0;
+
+					if (speed > SPIN_DEADBAND_SPEED) {
+						raceLoggingStarted = true;
+						stateLogCount = 0;
+						nextStateLogAt = now;
+						break;
+					}
+				}
+			}
+
 			if (stateLogCount < STATE_LOG_LIMIT && now >= nextStateLogAt) {
 				nextStateLogAt = now + STATE_LOG_INTERVAL_SECONDS;
 
@@ -754,8 +798,25 @@ export class MarkerSpinController implements OnStart {
 					// after this one needs as a baseline, and the one that must read 0 while the ball is parked.
 					const frameLabel = traceThisFrame ? `boot f=${BOOT_TRACE_FRAMES - bootFramesRemaining}` : "state";
 
+					// **The whole field, not one body (item 194).** The reported symptom is "a few balls do not spin
+					// sometimes", and a line about a single sampled body cannot answer it: the sampled body may be one of
+					// the ones that work. `speeds=` is every live body's `BALL_SPEED` in map order and `spinning=` is how
+					// many are above the deadband — which, under this model, *is* the set of bodies that turn. A body
+					// reading `0` here is a body with no rotation, and that is the sentence the previous log could not
+					// say.
+					const speeds = new Array<string>();
+					let spinning = 0;
+					for (const [candidate] of bodies) {
+						const rawSpeed = candidate.GetAttribute(BALL_SPEED_ATTRIBUTE);
+						const speed = typeIs(rawSpeed, "number") && rawSpeed === rawSpeed ? rawSpeed : 0;
+						if (speed > SPIN_DEADBAND_SPEED) {
+							spinning++;
+						}
+						speeds.push(describeNumber(speed));
+					}
+
 					print(
-						`[MarkerSpin] ${frameLabel} bodies=${bodies.size()} tracked=${trackedMarkers.size()} markers=${state.markers.size()} body="${body.GetFullName()}" |v|=${describeNumber(replicatedVelocity.Magnitude)} velocitySource=${source} BALL_SPEED=${describeNumber(ballSpeed)} rateSource=${rateSource} omegaPhysical=${describeNumber(body.AssemblyAngularVelocity.Magnitude)} axis=${axisSource} omegaVisual=${describeNumber(omegaThisFrame)} r=${describeNumber(state.radius)} angle=${describeNumber(state.angle)} bodyPos=${describeVector(position)} markerPos=${firstMarker === undefined ? "none" : describeVector(firstMarker.Position)} writeError=${describeNumber(writeError)}`,
+						`[MarkerSpin] ${frameLabel} bodies=${bodies.size()} tracked=${trackedMarkers.size()} markers=${state.markers.size()} body="${body.GetFullName()}" |v|=${describeNumber(replicatedVelocity.Magnitude)} velocitySource=${source} BALL_SPEED=${describeNumber(ballSpeed)} rateSource=${rateSource} omegaPhysical=${describeNumber(body.AssemblyAngularVelocity.Magnitude)} axis=${axisSource} omegaVisual=${describeNumber(omegaThisFrame)} r=${describeNumber(state.radius)} angle=${describeNumber(state.angle)} bodyPos=${describeVector(position)} markerPos=${firstMarker === undefined ? "none" : describeVector(firstMarker.Position)} writeError=${describeNumber(writeError)} spinning=${spinning}/${bodies.size()} speeds=[${speeds.join(",")}]`,
 					);
 				}
 			}
@@ -783,6 +844,25 @@ export class MarkerSpinController implements OnStart {
  * offset path is exactly the "no spin at all" symptom this round exists to remove.
  */
 let cachedBelt: BasePart | undefined;
+
+/**
+ * How many `Ball`-tagged parts are alive on this client right now.
+ *
+ * A `GetTagged` walk per use, which is why it is only called from the once-a-`TRACK_RESCAN_SECONDS` discovery check and
+ * its warning — never from the render loop. It exists so "no markers are tracked" can be told apart from "there are no
+ * bodies to track markers for", which is the difference between a broken tag and a finished round (item 194).
+ */
+function liveBallCount(): number {
+	let count = 0;
+
+	for (const instance of CollectionService.GetTagged(TAGS.ball)) {
+		if (instance.IsA("BasePart") && instance.Parent !== undefined) {
+			count++;
+		}
+	}
+
+	return count;
+}
 
 function beltSpinAxis(): Vector3 {
 	if (cachedBelt === undefined || cachedBelt.Parent === undefined) {

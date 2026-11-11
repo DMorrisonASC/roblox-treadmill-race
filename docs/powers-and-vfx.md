@@ -113,6 +113,11 @@ one thin imperative wrapper that touches instances.
   really does eclipse the field or really does steal speed. `presentPower` gives the attribute, the collision group and the badge
   (what a viewer sees); `setPower` adds the registry entry and the connection (what the simulation acts on).
 - The twin also cannot win: it carries no owner attribute, and `getCompetitors()` filters on owners.
+- **It wears its parent's avatar (item 193).** `spawnDecoy` copies the parent's user id into the twin's **`AvatarUserId`** —
+  a display-only key that no rule reads — so the client's avatar overlay draws the same face on both bodies. `OwnerUserId`
+  is deliberately **not** written: it is the competition key, and a twin carrying one would become a competitor and change
+  the winner rule. The client's rule is `OwnerUserId ?? AvatarUserId`, so a real body needs no second key and a twin is the
+  only place the display key exists.
 
 ### `rocket` — one snap, once
 
@@ -191,6 +196,19 @@ behaviour is opt-in per ball. Nothing in `tickDelta` knows about it.
 - **Not a client controller.** `updateBadge` in `powers/index.ts` builds a `BillboardGui` named `PowerBadge` and parents it to the
   ball, on the **server**. It is the only thing this module puts in the world that is not a body. `powerLabel` uppercases the id;
   `powerLabelFits` asserts the width so a new power whose name overflows fails the spec rather than truncating in Studio.
+
+### The avatar (item 193)
+
+- **A client controller, and it must be.** `BallAvatarController` builds a `BillboardGui` named `BallAvatar` above every body —
+  `Players:GetUserThumbnailAsync` **yields and is a web call**, which on the server would be a per-player round-trip on the race's
+  own thread. The result is cached per `UserId` for the session, failures included, so one player costs one request.
+- **Whose face** is `avatarUserIdFor(OwnerUserId, AvatarUserId)` in `shared/ball-avatar.ts`: the competition key first, the
+  display key second, nothing at all if neither. A `decoy` twin answers from `AvatarUserId` — copied from its parent at spawn —
+  because it has no `OwnerUserId` and must not have one. A missing or failed thumbnail draws **nothing**.
+- **`BALL_AVATAR_OFFSET_STUDS` (40) is above `radius + POWER_BADGE_OFFSET_STUDS`** because the badge is already there; the far
+  cutoff reuses `POWER_BADGE_MAX_DISTANCE`, which is a fact about the arena's diagonal rather than about badges.
+- **The red outline is untouched** — `DecoyOutlineController` stays owner-only. The face is the same for everyone precisely
+  because it must give nothing away; the highlight is the one thing that does.
 
 ---
 

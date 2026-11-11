@@ -6,6 +6,7 @@ import {
 	OWNER_DISPLAY_NAME_ATTRIBUTE,
 	OWNER_USER_ID_ATTRIBUTE,
 	PLAYER_COINS_ATTRIBUTE,
+	PLAYER_COMPETING_ATTRIBUTE,
 	PLAYER_OWNED_BALLS_ATTRIBUTE,
 } from "shared/attributes";
 import {
@@ -709,6 +710,12 @@ export class RoundService implements OnStart {
 
 			this.trackBall(ball);
 			spawned++;
+
+			// **The replicated answer to "am I in this round" (item 193).** Written here, where a body demonstrably exists,
+			// rather than from the enrollment set: the debug keys spawn bodies for players who never enrolled, and the client's
+			// question is about the round it can see, not about the picker's record. `Player.SetAttribute` reaches only its own
+			// player, so this is one write per competitor rather than a broadcast.
+			player.SetAttribute(PLAYER_COMPETING_ATTRIBUTE, true);
 
 			// The pick reaching the body, logged where it lands rather than where it was chosen: the two can disagree if
 			// an offer was never generated, and this line is what makes that visible.
@@ -1464,6 +1471,14 @@ export class RoundService implements OnStart {
 		// countdown ran — a round of five would pay nobody.
 		this.roundParticipants = new Array<BallOwner>();
 		this.eliminatedOwners = new Array<BallOwner>();
+
+		// **Every player stops being a competitor when the round's bodies go (item 193).** Written from the `Players` list
+		// rather than by remembering who was spawned, because the two cannot disagree: a player who joined mid-round never had
+		// it set, and clearing it is idempotent. This is the one place every round's body set ends — `forceWaiting`, the
+		// `Playing` restart and `Intermission` all arrive here — so the flag can never outlive the bodies it describes.
+		for (const player of Players.GetPlayers()) {
+			player.SetAttribute(PLAYER_COMPETING_ATTRIBUTE, false);
+		}
 
 		if (destroyed > 0) {
 			print(`[Round] cleared ${destroyed} ball(s) (${reason})`);

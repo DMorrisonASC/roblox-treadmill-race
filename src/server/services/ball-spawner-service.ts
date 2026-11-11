@@ -11,6 +11,7 @@ import {
 	MARKER_LOCAL_RIGHT_ATTRIBUTE,
 	MARKER_LOCAL_UP_ATTRIBUTE,
 	OWNER_DISPLAY_NAME_ATTRIBUTE,
+	AVATAR_USER_ID_ATTRIBUTE,
 	OWNER_USER_ID_ATTRIBUTE,
 	hasOwnerIdentity,
 	SPAWN_LANE_ATTRIBUTE,
@@ -1385,6 +1386,16 @@ export class BallSpawnerService implements OnStart {
 		// the parent's spawn path; a decoy being logged there is acceptable and no longer distinguishable in the log.
 		this.attachBallTexture(decoy, entry);
 
+		// **The display identity, before `Parent` like every other attribute a body is drawn from** (item 193). Read from the
+		// *parent*, which is the only body that has owner attributes at all: the twin is ownerless by design, so without this
+		// key every client would see a bare ball — and a bare ball beside an identical one is the fake, which is the one thing
+		// items 77 and 129 must not allow. `AvatarUserId` is a display key and the simulation never reads it; `OwnerUserId` is
+		// still absent on this body and remains the only competition key.
+		const parentIdentity = this.identityOf(parent);
+		if (parentIdentity !== undefined) {
+			decoy.SetAttribute(AVATAR_USER_ID_ATTRIBUTE, parentIdentity.userId);
+		}
+
 		// **No `ChosenBallId`.** It is a label for "the ball a player picked", and no player picked this body; every reader
 		// of it either filters on an owner (`applyChosenBall`) or is a log line that would then lie.
 		decoy.Parent = this.ballsFolder();
@@ -1419,9 +1430,9 @@ export class BallSpawnerService implements OnStart {
 		parent.Destroying.Connect(() => this.forgetDecoy(parent));
 
 		// The identity this twin answers with, taken now because the answer has to outlive the parent — see
-		// `decoyIdentities`. Read before the twin is parented is irrelevant (it is the *parent's* attributes), but it is read
-		// here rather than later so the copy is made at the one moment the two bodies are known to be a pair.
-		const parentIdentity = this.identityOf(parent);
+		// `decoyIdentities`. The attribute above is the *same pair* as a display key; this map is what the leaderboard and the
+		// `DecoyOutline` answer read server-side, and it is read here rather than earlier only because the copy is made at the
+		// one moment the two bodies are known to be a pair.
 		if (parentIdentity !== undefined) {
 			this.decoyIdentities.set(decoy, parentIdentity);
 		}

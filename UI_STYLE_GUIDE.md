@@ -11,21 +11,28 @@ thick near-black outline, with bold outlined text on top.**
 
 ## 1. The Chunky Component Anatomy
 
-Every chunky surface is the same five layers. A tab, a panel, a chest button and a close button differ only in
-their dimensions and their content — never in their structure.
+**There are two anatomies, and which one applies is decided by one question: can you press it?**
+
+A **control** — a tab, a chest button, a close button — is an object sitting on something, so it has the five layers. A
+**panel** — a sheet, the picker, the payout, a toast, the phase banner — is a surface, so it has one layer. Dimensions and
+content differ within each family; never the structure.
 
 ```
-Container                transparent, owns the layout cell and the input
-├─ Shadow Plate          the darker plate, fills the cell, square-cornered
-└─ Face Plate            the bright card, inset from the shadow, rounded, outlined
-   ├─ Border             a UIStroke on the face (not on the container)
-   ├─ Texture Overlay    optional: a tiled, low-opacity pattern wash
-   └─ Content            icon, title, badge, list — all inside the face
+CONTROL                                    PANEL
+Container   transparent, owns the cell     Container   transparent, exactly the face's box
+├─ Shadow   darker plate, fills the cell   └─ Face      the panel: filled, rounded, outlined
+└─ Face     bright card, inset from the                    ├─ Border   UIStroke
+   │        shadow's far edges                            └─ Content
+   ├─ Border   UIStroke on the face
+   └─ Content  icon, title, badge, list
 ```
+
+**A panel has no shadow plate (item 195).** Not "a plate with depth 0" — none. §1.2b records the three rounds of bugs
+that produced that decision, and §1.1's arithmetic below applies to controls.
 
 ### 1.1 The Golden Math of Depth
 
-This is the whole trick, and it is arithmetic, not taste.
+This is the whole trick for a control, and it is arithmetic, not taste.
 
 **A `UIStroke` is drawn centred on the edge it strokes.** A stroke of `X` pixels therefore extends `X / 2`
 pixels *inside* the frame and `X / 2` pixels *outside* it.
@@ -42,7 +49,6 @@ visible shadow = D − (X / 2)
 | 4 | 4 | **2 px** | a slightly thick outline — flat |
 | 6 | 3 | **4.5 px** | shallow depth |
 | 8 | 4 | **6 px** | depth |
-| 10 | 6 | **7 px** | depth at panel scale |
 
 **The rule, stated as a constraint:**
 
@@ -56,13 +62,13 @@ the outline *eats* the shadow entirely: the component animates correctly, has al
 looks flat. **This is the single most common way to build this style wrongly.** If a chunky component reads
 flat, check this inequality before touching anything else.
 
-**The numbers in use.** All three scales obey it:
+**The numbers in use.** Both control scales obey it, and the panel scale has no depth to check:
 
 | Scale | Depth `D` | Border `X` | Visible |
 |---|---|---|---|
 | Card / tab (`CHUNKY_DEPTH`) | 8 | 4 | 6 px |
-| Panel / sheet | 10 | 6 | 7 px |
 | Control inside a panel | 6 | 3 | 4.5 px |
+| Panel / sheet | **none** | 6 | — (§1.2b) |
 
 Depth is a **fixed pixel inset**, never a scale fraction. A scale-based inset vanishes on a small card and
 becomes a slab on a large one; a pixel inset reads as a cast shadow at every size. Roughly a tenth of the
@@ -79,49 +85,53 @@ edges. The shadow therefore shows along the far edges only — a one-sided strip
   eats the gap to the neighbour above; against a screen edge it clips. Inset the face instead — same shadow, same
   place, and the component's union stays exactly the cell it was given.
 
-### 1.2b The shadow is the SAME SIZE as the face. Only its position moves.
+### 1.2b Depth belongs to controls only. Panels have no shadow plate.
 
-Depth is a **position**, not a size. Two identical boxes with one pushed `D` down and right show a uniform strip along those
-two edges and nothing along the other two — which is what reads as one card sitting on another. A *smaller* plate reads as a
-drop shadow from a light source; a *larger* one reads as a second card framing the first.
+**The rule, stated once: if you cannot press it, it has no depth.** A panel is a surface; a control is an object. The
+control's depth is the inset in §1.2 — a shadow strip inside a **fixed layout cell**. A panel has **one face, one outline,
+one corner radius** and nothing behind it.
 
-Two mechanics give that picture, and which one applies is forced by whether the box is fixed:
+**The offset sibling is deleted, and it is worth recording why (item 195).** For three rounds panels carried a second
+`Frame` nudged `D` down and right, on the argument that a child cannot draw behind its own parent's background. The
+argument was true; the design was still wrong, because a panel is usually `AutomaticSize` and **a container measures all
+of its children**. The frame grew by the plate's overhang, the face stopped being the container's own box, and what
+remained of the plate was a sliver along two edges. That one cause produced both reported symptoms:
 
-| | **inset** (buttons) | **offset sibling** (panels) |
+- **"there is no panel underneath to give it depth"** — the visible band was narrower than the offset, so a short chip had
+  nothing that read as depth at all;
+- **"a black line at the top right"** — the sliver's edge showing past the face's `UICorner` arc.
+
+Items 122 and 123 had each already spent a round on a variant of this (a square plate under a rounded face; a pale corner
+that was never the shadow). Three fixes to a cosmetic plate is the signal: **the plate is the defect.**
+
+| | control (pressed) | panel (readout or containment) |
 | --- | --- | --- |
-| cell / frame | fixed by the layout | free-floating, often `AutomaticSize.Y` |
-| shadow | fills the cell at `(0, 0)`, `Scale (1, 1)` | sized **from the face**, moved `+D` |
-| face | inset by `D` on the bottom/right | full size |
-| union | exactly the cell | `D` larger on the right/bottom |
+| shadow plate | yes — inset strip inside the cell | **none** |
+| face | inset by `D` on the bottom/right | fills the container exactly |
+| edge | outline over the shadow strip | outline only |
+| union | exactly the cell | the container's own box |
 
-**For the offset sibling, the plate must match the *visible* face, not the frame.** `ApplyStrokeMode.Border` draws the stroke
-centred, so a face is `X` pixels bigger than its frame on **both** axes. Get that wrong by the stroke and the plate is
-`X` pixels short — the "the shadow is smaller than the panel" bug.
+**What is lost, plainly:** sheets no longer read as cards raised off the screen. They read as flat charcoal panels with a
+thick near-black outline and a rounded corner — the same silhouette as everything else, which is the look that was asked
+for. `CHUNKY_PANEL_DEPTH` and `CHUNKY_PANEL_SHADOW` are **deleted**, not set to zero; this tree removes inert values.
 
-**And it must not be `fromScale(1, 1)` inside an `AutomaticSize` parent.** The parent asks its children for a height, a scale
-child answers "100% of you", and the engine breaks the loop by giving it none — the same circular-size trap as §4.1. The face
-dodges it by *reporting* its content height; the plate has no content, so it has to be **told**:
-
-```lua
-shadow.Position = UDim2.fromOffset(D - X/2, D - X/2)            -- equal boxes, offset
-shadow.Size     = UDim2.new(1, X, 0, surface.Size.Y.Offset + X)  -- face height + stroke
-```
-
-The rule stated plainly: **a shadow never has its own size. It is the panel, moved.**
+**Still true, and still the mechanism for controls:** the plate is the same size as the face and only its *position* moves
+(§1.3), and a plate never has a size of its own — it is the face, moved, inside a cell the layout already fixed.
 
 
-### 1.3 Corners: both plates, same radius
+### 1.3 Corners: every plate that exists carries the same radius
 
-**Every plate in a component carries the same `UICorner` radius ? the shadow included.** A square plate under a
-rounded face is a silhouette mismatch: the control reads as a different component family from the tabs and cards
-beside it, and the eye notices the *shape* long before it notices the colour.
+**Every plate in a component carries the same `UICorner` radius — the shadow included, where there is one.** A square plate
+under a rounded face is a silhouette mismatch: the control reads as a different component family from the tabs and cards
+beside it, and the eye notices the *shape* long before it notices the colour. **Panels have no plate at all** (§1.2b), so
+this applies to controls only.
 
-The radius is one number per scale, applied to the shadow and the face:
+The radius is one number per scale:
 
 | Scale | Radius | Depth |
 |---|---|---|
 | Card / tab | 8 | 8 |
-| Panel / sheet | 12 | 10 |
+| Panel / sheet | 12 | **none** (§1.2b) |
 | Control inside a panel | 8 | 6 |
 
 Two consequences worth knowing:
@@ -134,7 +144,7 @@ Two consequences worth knowing:
   fix was removing a light section fill behind the buttons, not squaring their shadows.)
 - **Do not try to fix the corners by clipping the container.** `ClipsDescendants` on a rounded container does not
   reliably produce a rounded clip, so the shadow keeps its square silhouette ? the component is then pointed with
-  a clip that does nothing. Round the plate itself.
+  a clip that does nothing. Round the plate itself — or, for a panel, have no plate to round.
 
 
 ### 1.4 Border mode
@@ -197,6 +207,15 @@ rectangle.
   which is where it is doing its job.
 - **A control is an object.** Buttons, tabs, cards and rows keep their identity colour, because the colour is
   the affordance.
+- **A readout is a panel, not a control** — and it is *not* exempt from the language. The phase banner was the one
+  surface that stayed in the flat HUD palette, on the argument that a fact display has nothing to press and therefore
+  nothing to style. **That is reversed (item 193):** the banner is the most-seen surface in the game after the ball, and
+  it was the only one a player could not mistake for this game's. It is built through `buildChunkyPanel` — the panel
+  builder, *not* `applyChunkyChrome`, which dresses an existing `GuiButton` and would invert a stack around a hit area
+  that does not exist. Its labels stay on big-ui `Text` because the chunky face is charcoal (§2.3's own rule), and pale
+  ink on charcoal is exactly the pairing item 58 found big-ui could do.
+- **So the rule is the builder, not the input.** A surface with no control takes `buildChunkyPanel`; a surface that is
+  pressed takes `buildChunkyButton` or `applyChunkyChrome`. "Readout" is no longer a reason to stay flat.
 
 ### 2.4 Typography
 
@@ -387,7 +406,7 @@ not a device:
 | layer | order | insets | tenants |
 | --- | --- | --- | --- |
 | `fullScreen` | 10 | `None` | scenery that must reach the screen edge |
-| `hudCore` | 20 | `CoreUISafeInsets` | the leaderboard, **the picker** |
+| `hudCore` | 20 | `CoreUISafeInsets` | the leaderboard, **the picker**, **the spectate button** |
 | `hudTopbar` | 30 | `TopbarSafeInsets` | the phase banner |
 | `splash` | 35 | `CoreUISafeInsets` | the elimination splash, the payout panel, the countdown |
 | `sheet` | 37 | `CoreUISafeInsets` | **the store, the inventory, the rail** |
@@ -479,10 +498,14 @@ order, and a child of a face is at least `face.ZIndex + 1`.
 
 ### 5.5 A child cannot draw behind its own parent's background
 
-So the shadow plate is a **sibling** of the face and both live under a transparent container. This is also why
+So a **control's** shadow plate is a sibling of its face and both live under a transparent container. This is also why
 "add depth to an existing button" means *inverting the stack*: the button becomes a transparent hit area and the
 plates become its children. The consequence to remember: **the button's own `Text` is then covered**, and its
 caption has to move to a `TextLabel` inside the face.
+
+**A panel does not face this problem, because it has no plate (§1.2b).** Do not read this section as a reason to give a
+sheet a sibling plate: the sibling has to be measured, and a measured sibling inside an `AutomaticSize` container is
+exactly what left a sliver of plate and a black line at a corner.
 
 ### 5.6 One `UIStroke` per object
 
@@ -530,11 +553,12 @@ Companions, in increasing scale:
 
 Before calling a chunky screen finished:
 
-- [ ] Every plate's depth satisfies `D ≥ 2X`, and the visible strip was computed rather than eyeballed.
+- [ ] Every **control** plate's depth satisfies `D ≥ 2X`, and the visible strip was computed rather than eyeballed.
+- [ ] No **panel** has a shadow plate at all — one face, one outline, one radius.
 - [ ] Every shadow is a saturated shade of its own face, and face/shadow/border form a three-value ladder.
 - [ ] Every plate stroke names `ApplyStrokeMode.Border`; every text stroke does **not**.
 - [ ] No object carries two `UIStroke`s.
-- [ ] The shadow and the face carry the **same** corner radius; neither is square.
+- [ ] A control's shadow and its face carry the **same** corner radius; neither is square.
 - [ ] Every label is outlined, including the ones on buttons that carry their own text.
 - [ ] `TextScaled` appears only with a `UITextSizeConstraint`.
 - [ ] Selection is expressed by the pressed state, not by a second colour.
