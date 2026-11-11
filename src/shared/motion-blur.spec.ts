@@ -1,13 +1,13 @@
 import { describe, expect, it } from "@rbxts/jest-globals";
 import {
+	extentAlong,
 	generationOwnsFadeOut,
 	MOTION_BLUR_FADE_SECONDS,
 	MOTION_BLUR_PHASE,
 	MOTION_BLUR_SCALE,
 	motionBlurActionFor,
-	motionBlurAnchor,
 	motionBlurCloneFrame,
-	motionBlurDepthStuds,
+	motionBlurFillRatio,
 } from "shared/motion-blur";
 
 /**
@@ -92,79 +92,78 @@ describe("the effect's tuning", () => {
 		expect(MOTION_BLUR_FADE_SECONDS).toBe(0.5);
 	});
 
-	it("defaults to the asset's authored size", () => {
-		// Criterion: `MOTION_BLUR_SCALE` is **not** any ball effect's multiplier (each is `0.1` in `shared/config/` since item
-		// 177) and **not** a ball ratio. `1` means the clone is drawn exactly as the designer built it, which is the only
-		// defensible default for an asset authored around a hand-placed zone rather than against a 0.5-stud ball.
+	it("defaults to the zone-filling scale, not to a ball ratio", () => {
+		// `MOTION_BLUR_SCALE` is **not** any ball effect's multiplier (each is `0.1` in `shared/config/` since item 177) and
+		// **not** a ball ratio. Since item 192 it is a trim on `motionBlurFillRatio`, so `1` means "exactly the zone" — the
+		// only defensible default for an effect whose whole job is to mark a hand-placed box. The case below proves the base it
+		// trims is derived rather than authored.
 		expect(MOTION_BLUR_SCALE).toBe(1);
 	});
 });
 
-describe("motionBlurAnchor", () => {
-	/** An axis-aligned zone, 40 studs long, centred at `(100, 2, -5)`. */
-	const zoneFrame = new CFrame(100, 2, -5);
+describe("extentAlong", () => {
+	it("reads the box's own axis for an unrotated box", () => {
+		// A 10 x 4 x 2 box, unrotated: its reach along world `X` is 10, along `Y` 4, along `Z` 2.
+		const size = new Vector3(10, 4, 2);
+		const basis = CFrame.identity;
 
-	it("puts the effect inside the zone, near its front, not on the boundary", () => {
-		// **The bug this fixes (item 143).** Item 141 placed the clone exactly on the front *face*, which is the boundary itself:
-		// the origin sat on the wall and the emitters sprayed outward from there, so the visible result was a haze floating in
-		// the air in front of the arena. A point on a boundary divides its own cloud in half.
-		//
-		// At `MOTION_BLUR_DEPTH_FRACTION = 0.2` of a 40-stud zone the depth is 8 studs, so the anchor is `-20 + 8 = -12` from the
-		// centre: `100 - 12 = 88`.
-		const anchor = motionBlurAnchor(zoneFrame, 40);
-
-		expect(anchor.Position.X).toBe(88);
-		// `Y` and `Z` are untouched: this is a slide along one axis, not a re-centring.
-		expect(anchor.Position.Y).toBe(2);
-		expect(anchor.Position.Z).toBe(-5);
-
-		// And it is **strictly inside** the box — the property the face version failed. Half-length to the front face, so
-		// anything greater than `-20` and less than `+20` in local X is in the arena.
-		expect(motionBlurDepthStuds(40)).toBe(8);
-		expect(anchor.Position.X > 100 - 20).toBe(true);
+		expect(extentAlong(size, basis, new Vector3(1, 0, 0))).toBe(10);
+		expect(extentAlong(size, basis, new Vector3(0, 1, 0))).toBe(4);
+		expect(extentAlong(size, basis, new Vector3(0, 0, 1))).toBe(2);
 	});
 
-	it("moves with the zone, so re-placing the fixture in Studio keeps the effect in its front", () => {
-		// A hard-coded world coordinate would have to be re-derived by hand every time the zone moved; an offset from the
-		// fixture is the reason this is a function of the zone at all.
-		const moved = motionBlurAnchor(new CFrame(250, 7, 90), 40);
+	it("swaps the axes for a box turned a quarter turn, which is the whole point", () => {
+		// **The case a `size.X` read would get wrong.** A quarter turn about `Y` sends the box's local `X` to world `Z`, so the
+		// reach along world `X` becomes the box's `Z` size. Scaling a rotated asset against its own local axes is how an effect
+		// ends up sized against the wrong dimension — the failure `motionBlurFillRatio` exists to avoid.
+		const size = new Vector3(10, 4, 2);
+		const basis = CFrame.Angles(0, math.rad(90), 0);
 
-		expect(moved.Position.X).toBe(238);
-		expect(moved.Position.Y).toBe(7);
-		expect(moved.Position.Z).toBe(90);
+		expect(math.round(extentAlong(size, basis, new Vector3(1, 0, 0)))).toBe(2);
+		expect(math.round(extentAlong(size, basis, new Vector3(0, 1, 0)))).toBe(4);
+		expect(math.round(extentAlong(size, basis, new Vector3(0, 0, 1)))).toBe(10);
 	});
 
-	it("follows the zone's size, so a resized zone keeps the effect the same fraction in", () => {
-		// The depth is **proportional**, which is the point of a fraction over a studs inset: what has to stay inside is a share
-		// of the box, so a longer zone moves the effect further in rather than leaving it near a face that has moved away.
-		expect(motionBlurAnchor(zoneFrame, 40).Position.X).toBe(88); // -20 + 8
-		expect(motionBlurAnchor(zoneFrame, 100).Position.X).toBe(70); // -50 + 20
-		// A zero-length zone degenerates to its centre rather than throwing, which is what a part whose `Size` has not
-		// replicated reads as.
-		expect(motionBlurAnchor(zoneFrame, 0).Position.X).toBe(100);
+	it("handles the asset's authored -90 degree tilt, which is what the log reports", () => {
+		// The place's `motionBlur` asset is authored at `-90, 0, 0` (the `mounted` line prints it). A -90 degree turn about `X`
+		// sends local `Y` to world `-Z` and local `Z` to world `Y`, so a box that is 4 deep in its own `Y` reaches 4 along world
+		// `Z` — the numbers swap sign-wise but not magnitude, and the point is that the function is asked rather than assumed.
+		const tilt = CFrame.Angles(math.rad(-90), 0, 0);
+		const size = new Vector3(10, 4, 2);
+
+		expect(math.round(extentAlong(size, tilt, new Vector3(0, 1, 0)))).toBe(2);
+		expect(math.round(extentAlong(size, tilt, new Vector3(0, 0, 1)))).toBe(4);
+	});
+});
+
+describe("motionBlurFillRatio", () => {
+	it("scales a small asset up to cover a large zone", () => {
+		// The reported bug, as arithmetic: a `4 x 4 x 4` authored part inside the 262-stud zone the log implies
+		// (`depth=52.4` was a fifth of `zone.Size.X`). The largest per-axis ratio is `262 / 4 = 65.5`, so the effect is drawn 65
+		// times its authored size and covers the box on every axis.
+		expect(motionBlurFillRatio(new Vector3(262, 116, 173), new Vector3(4, 4, 4))).toBe(262 / 4);
 	});
 
-	it("keeps the zone's rotation instead of replacing it with an identity basis", () => {
-		// The offset is composed **in the zone's local frame** (`CFrame.mul`), so a fixture rotated in Studio carries the effect
-		// with it. Composing the offset in world space instead would leave the effect on the world `-X` side of a rotated box,
-		// which is off the fixture entirely.
-		//
-		// **This asserts the *anchor*, not the clone.** Since item 142 the clone takes only this CFrame's `Position` and keeps the
-		// asset's rotation — but the anchor's basis is still load-bearing, because it is what puts the position on the correct
-		// face of a turned box, and this case is the only thing that pins it.
-		const turned = CFrame.Angles(0, math.rad(90), 0);
-		const rotatedZone = new CFrame(100, 2, -5).mul(turned);
-		const anchor = motionBlurAnchor(rotatedZone, 40);
+	it("is the largest ratio, so no axis is left short", () => {
+		// An asset that is already zone-sized on two axes and short on the third is scaled by the short one. Taking the smallest
+		// ratio instead would fit the box *inside* the zone and leave two axes short — the failure being fixed.
+		const zone = new Vector3(100, 50, 20);
+		const extents = new Vector3(100, 50, 5);
 
-		// A quarter turn about +Y sends the local `-X` axis to world `+Z`, so the anchor is 12 studs along it from the centre:
-		// `-5 + 12 = 7`. (Worked through rather than eyeballed: the Y-rotation matrix's first column is `(cos, 0, -sin)`, which
-		// is `(0, 0, -1)` at 90 degrees, and `-12` along that is `(0, 0, +12)`.)
-		expect(math.round(anchor.Position.X)).toBe(100);
-		expect(math.round(anchor.Position.Z)).toBe(7);
+		expect(motionBlurFillRatio(zone, extents)).toBe(4);
+	});
 
-		// And the basis is the zone's, not the identity.
-		expect(math.abs(anchor.RightVector.X) < 1e-6).toBe(true);
-		expect(math.round(anchor.RightVector.Z)).toBe(-1);
+	it("is exactly 1 for an asset that already matches the zone", () => {
+		// A designer who authors the asset to the zone's size gets `scaleEffect`'s own no-op path, so nothing is multiplied by a
+		// number that means "already right".
+		expect(motionBlurFillRatio(new Vector3(40, 10, 60), new Vector3(40, 10, 60))).toBe(1);
+	});
+
+	it("does not divide by zero on an asset with a flat axis", () => {
+		// A `0`-thickness part (or one whose `Size` has not replicated) has no extent to measure. `1` is returned rather than an
+		// infinity, so a mis-authored asset renders small — a visible bug — instead of filling the arena's interior with noise.
+		expect(motionBlurFillRatio(new Vector3(100, 50, 20), new Vector3(0, 0, 0))).toBe(1);
+		expect(motionBlurFillRatio(new Vector3(100, 50, 20), new Vector3(10, 10, 0))).toBe(10);
 	});
 });
 
@@ -198,53 +197,54 @@ describe("motionBlurCloneFrame", () => {
 	const assetRotation = CFrame.Angles(0, 0, math.rad(45));
 
 	it("takes the position from the zone and the rotation from the asset", () => {
-		// **The regression item 142 exists for.** Item 141 assigned the anchor straight to `clone.CFrame`, so the zone's basis
-		// replaced the asset's and the effect rendered at the wrong angle — item 97's symptom, one object class over. The user's
-		// Studio rotation is ground truth; the zone has no opinion about which way a particle emitter was drawn.
+		// **The regression item 142 exists for.** Item 141 assigned the zone's `CFrame` straight to `clone.CFrame`, so the
+		// zone's basis replaced the asset's and the effect rendered at the wrong angle — item 97's symptom, one object class
+		// over. The user's Studio rotation is ground truth; the zone has no opinion about which way a particle emitter was drawn.
 		const zoneFrame = new CFrame(100, 2, -5).mul(CFrame.Angles(0, math.rad(90), 0));
-		const cloneFrame = motionBlurCloneFrame(zoneFrame, 40, assetRotation);
+		const cloneFrame = motionBlurCloneFrame(zoneFrame, assetRotation);
 
 		// The positive: the clone is turned exactly as the asset is.
 		expect(equalBasis(cloneFrame, assetRotation)).toBe(true);
 
 		// **The negative, and it is the half that catches a future "simplification".** `zoneFrame.mul(assetRotation)` — or the
-		// anchor, which carries the zone's basis — compiles, lints, and turns the effect 90 degrees further than the designer
-		// intended. With an unrotated asset *and* an unrotated zone both spellings agree, so a case that only checked the positive
-		// would pass on the broken code.
+		// zone's `CFrame` alone — compiles, lints, and turns the effect 90 degrees further than the designer intended. With an
+		// unrotated asset *and* an unrotated zone both spellings agree, so a case that only checked the positive would pass on the
+		// broken code.
 		expect(equalBasis(cloneFrame, zoneFrame)).toBe(false);
 		expect(equalBasis(cloneFrame, zoneFrame.Rotation)).toBe(false);
 
-		// And the position is still the anchor's: inside the front of the (rotated) box, where `motionBlurAnchor` puts it.
-		const anchor = motionBlurAnchor(zoneFrame, 40);
-		expect(math.round(cloneFrame.Position.X)).toBe(math.round(anchor.Position.X));
-		expect(math.round(cloneFrame.Position.Y)).toBe(math.round(anchor.Position.Y));
-		expect(math.round(cloneFrame.Position.Z)).toBe(math.round(anchor.Position.Z));
+		// And the position is the zone's own: since item 192 the effect is the zone's size, so the only place it belongs is the
+		// centre — including when the zone is turned. A quarter turn must move the position not at all.
+		expect(math.round(cloneFrame.Position.X)).toBe(100);
+		expect(math.round(cloneFrame.Position.Y)).toBe(2);
+		expect(math.round(cloneFrame.Position.Z)).toBe(-5);
 	});
 
 	it("keeps the asset's rotation when the zone is rotated and the asset is not", () => {
 		// Acceptance criterion 5's first combination. An identity asset rotation must survive a turned zone — the case where
 		// "the effect is at the right place but tilted with the fixture" would look like a bug in the asset.
 		const zoneFrame = new CFrame(0, 0, 0).mul(CFrame.Angles(0, math.rad(90), 0));
-		const cloneFrame = motionBlurCloneFrame(zoneFrame, 40, CFrame.identity);
+		const cloneFrame = motionBlurCloneFrame(zoneFrame, CFrame.identity);
 
 		expect(equalBasis(cloneFrame, CFrame.identity)).toBe(true);
 		expect(equalBasis(cloneFrame, zoneFrame)).toBe(false);
-		// Position still follows the zone: 12 studs along its local `-X` (half the box minus the 0.2 depth on 40 studs), which
-		// a quarter turn sends to `+Z`.
-		expect(math.round(cloneFrame.Position.Z)).toBe(12);
+		// Position still follows the zone — and a zone turned about its own centre keeps that centre, which is the number this
+		// asserts: no component of the position is derived from the zone's basis any more.
+		expect(math.round(cloneFrame.Position.X)).toBe(0);
+		expect(math.round(cloneFrame.Position.Z)).toBe(0);
 	});
 
 	it("keeps the asset's rotation when the asset is rotated and the zone is not", () => {
 		// Acceptance criterion 5's second combination, and the one the user actually reported: an axis-aligned zone, a rotated
 		// asset. Before item 142 this produced an identity basis — the asset's 45 degrees thrown away entirely.
 		const zoneFrame = new CFrame(10, 3, 4);
-		const cloneFrame = motionBlurCloneFrame(zoneFrame, 40, assetRotation);
+		const cloneFrame = motionBlurCloneFrame(zoneFrame, assetRotation);
 
 		expect(equalBasis(cloneFrame, assetRotation)).toBe(true);
 		expect(equalBasis(cloneFrame, CFrame.identity)).toBe(false);
-		// The axis-aligned anchor is `X - 20 + 8` (half the box, back in by the depth fraction).
-		expect(math.round(cloneFrame.Position.X)).toBe(-2);
-		expect(math.round(cloneFrame.Position.Y)).toBe(3);
-		expect(math.round(cloneFrame.Position.Z)).toBe(4);
+		// The zone's centre, unchanged by the asset's rotation: position and rotation are taken from different sources.
+		expect(cloneFrame.Position.X).toBe(10);
+		expect(cloneFrame.Position.Y).toBe(3);
+		expect(cloneFrame.Position.Z).toBe(4);
 	});
 });

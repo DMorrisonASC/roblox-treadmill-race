@@ -838,26 +838,6 @@ export class BallSpawnerService implements OnStart {
 	}
 
 	/**
-	 * The bound spawner **parts**, in bind order ? the same order lane indices use.
-	 *
-	 * Not a count, and not a copy of their positions: `PickupService` needs to place one pickup in each lane,
-	 * and a lane's `Z` is scene data that can be edited in Studio between rounds. Returning the parts means the
-	 * reader calls `Position` at the moment it spawns, so moving a spawner in Studio moves its lane.
-	 *
-	 * A fresh array on every call, so a caller cannot mutate the service's own lane list by sorting what it was
-	 * given.
-	 */
-	public getBoundSpawners(): Array<BasePart> {
-		const parts = new Array<BasePart>();
-		for (const spawner of this.spawnerLanes) {
-			if (spawner.Parent !== undefined) {
-				parts.push(spawner);
-			}
-		}
-		return parts;
-	}
-
-	/**
 	 * Spawns one body in a specific lane, returning it or `undefined` if the lane does not exist or the
 	 * spawn failed.
 	 *

@@ -31,7 +31,16 @@ export type MotionBlurAction = "show" | "hide" | "nothing";
 export const MOTION_BLUR_FADE_SECONDS = 0.5;
 
 /**
- * **Placeholder.** The multiplier applied to the clone's authored size. `1` means **the asset exactly as authored**.
+ * **Placeholder.** The designer's trim **on top of the zone-fitted scale**: `1` means the effect exactly covers the
+ * `EliminationZone`, and anything else is a deliberate enlargement or shrink of that.
+ *
+ * ## What changed (item 192), and what the old number meant
+ *
+ * This used to be the clone's **own size**: `1` meant "the authored geometry, unchanged", on the argument that the asset was
+ * authored *in place* around the zone. It was not — or at least not on this scene. The `show` line reported `scale=1` and the
+ * reported result was a haze the size of the authored part inside an `EliminationZone` **262 studs long** (`depth=52.4` at the
+ * old `MOTION_BLUR_DEPTH_FRACTION = 0.2`). A number whose meaning is "whatever the asset happens to be" cannot fill a fixture,
+ * so the size is now derived from the zone (`motionBlurFillRatio`) and this constant is the trim on top of it.
  *
  * ## Why this is not `effectScaleFor(ball)`, and why it is not `VFX_SCALE_MULTIPLIER`
  *
@@ -51,128 +60,126 @@ export const MOTION_BLUR_FADE_SECONDS = 0.5;
  * rotating this asset in Studio **is** honoured, because this clone keeps the authored rotation. So the answer for this
  * effect is "rotate the asset", and adding an offset would create a second, conflicting knob over the same property.
  *
- * **Its reference length is the asset itself, which is why this number is not in a ball-relative config.** Every ball effect
- * scales `ballRadius / BASE_BALL_RADIUS * multiplier`, so its number means "design radii above a 0.5-stud ball". This one has
- * no ball and no length in the scene to be relative to: it draws the asset where the asset was authored, inside a zone tens of
- * studs across, so `1` means "the authored geometry, unchanged" and any other value is a plain magnification of that. That is a
- * meaningful reference — it is just not a length, which is why it stays here beside the ramp constants it belongs with rather
- * than in a fourth config file that would only hold a number already documented one paragraph below it.
+ * **Its reference length is the zone, which is why it is not in a ball-relative config.** Every ball effect scales
+ * `ballRadius / BASE_BALL_RADIUS * multiplier`, so its number means "design radii above a 0.5-stud ball". This one has no ball:
+ * its base is `motionBlurFillRatio(zone.Size, …)` — the scale at which the authored box covers the zone — so `1` means "the
+ * zone, exactly" and `2` means "twice the zone". That is a meaningful reference and it is not a length, which is why it stays
+ * here beside the ramp constants rather than in a fourth config file holding a number already documented below it.
  *
- * So the multiplier is local, defaults to `1` (authored), and is applied through `scaleEffect` — the shared five-property
+ * So the multiplier is local, defaults to `1` (fill the zone), and is applied through `scaleEffect` — the shared five-property
  * implementation — rather than by writing a second scale routine. A designer who wants the effect bigger changes this one
  * number and nothing else moves.
  */
 export const MOTION_BLUR_SCALE = 1;
 
 /**
- * **Placeholder.** How far from the zone's **front face** toward its back the effect sits, as a **fraction of the zone's
- * length**. `0` is the face itself, `0.5` the centre, `1` the back face.
+ * How far a box of `size`, turned by `basis`, reaches along the **world** direction `direction`.
  *
- * ## Why this is a fraction and not the studs inset it used to be
+ * ## Why the projection is needed at all
  *
- * Item 141 introduced `MOTION_BLUR_INSET_STUDS = 0` — "exactly on the front face" — and that is what put the effect **outside**
- * the box. The face is a *boundary*, not a place: the clone's origin sat on the wall, its emitters sprayed outward from there,
- * and the visible result was a haze floating in the air in front of the arena with nothing behind it. A point on a boundary
- * divides its own cloud in half, and no amount of "it is at the front, as asked" makes that read as inside.
+ * The clone keeps the asset's **authored rotation** (item 142), so the asset's local axes and the zone's local axes are two
+ * different bases. "Fill the zone" is a statement about the *zone's* axes, and reading `asset.Size.X` as if it were the zone's
+ * width is how a rotated asset gets scaled against the wrong dimension — the same class of mistake `PICKUP_X_MIN` made by
+ * being a world-axis number on a belt that can be turned (item 191).
  *
- * A studs value would fix *this* zone and then need re-deriving the moment the fixture was resized, because what has to stay
- * inside is a proportion of the box. The fraction travels with the fixture: resize the zone and the effect stays the same
- * distance *along* it.
- *
- * ## Why 0.2, and what to change if it is wrong
- *
- * A fifth of the way in is far enough that the effect reads as belonging to the arena rather than as a pane in front of it,
- * and near enough the front that it does not become the all-over haze item 141 was fixing. It is a **guess made without the
- * asset's dimensions**, which is why the `show` line prints `depth=` in studs: if the cloud still pokes out, raise this; if it
- * sits too deep, lower it. The number that is *right* is the one where the cloud's leading edge lands just inside the boundary,
- * and only a playtest can measure that.
+ * For a box, the extent along a direction is the sum of its three half-axis projections:
+ * `|Sx·(basis.XVector·d)| + |Sy·(basis.YVector·d)| + |Sz·(basis.ZVector·d)|`. That is exact for any rotation, needs no case
+ * analysis, and is one expression.
  */
-export const MOTION_BLUR_DEPTH_FRACTION = 0.2;
-
-/**
- * How far the effect sits from the zone's front face, **in studs** — the one definition of that number.
- *
- * Exported so the `show` log can report the resolved depth without recomputing the product at the call site: a log that worked
- * the number out its own way would be a second answer to "how far in did it go", and the two would disagree the first time the
- * fraction was tuned.
- */
-export function motionBlurDepthStuds(zoneLengthStuds: number): number {
-	return zoneLengthStuds * MOTION_BLUR_DEPTH_FRACTION;
+export function extentAlong(size: Vector3, basis: CFrame, direction: Vector3): number {
+	return (
+		math.abs(size.X * basis.XVector.Dot(direction)) +
+		math.abs(size.Y * basis.YVector.Dot(direction)) +
+		math.abs(size.Z * basis.ZVector.Dot(direction))
+	);
 }
 
 /**
- * Where the clone is placed: **inside the zone, near its front**, in the zone's own frame.
+ * The uniform scale at which an authored box **covers the zone in every axis**: the largest of the three per-axis ratios.
  *
- * ## Which end "front" is, and why that is not a guess
+ * ## Why the largest, and not one named axis
  *
- * Front is `-X`. The tree's own axis rule is `+X` = toward the exit and elimination, `-X` = the front and the spawn edge, and
- * bodies are placed at a negative belt-frame `X`. The zone is checked against with `PointToObjectSpace` in
- * `RoundService.isInsideZone`, so "the zone's local `-X`" is the same axis the round itself uses to decide which end of the box
- * a body is nearest — one definition, two readers.
+ * The complaint this answers is "does not fill the entire zone", so the target is *coverage*, and coverage has three tests.
+ * Taking the largest ratio means no axis is ever left short; the cost is overshoot on the others, which for a soft haze means
+ * particles spilling past the boundary rather than a visible gap inside it. Taking the **smallest** ratio would fit the box
+ * inside the zone on every axis and leave all three short once the asset's aspect differs from the zone's — the failure that
+ * was reported, on purpose.
  *
- * ## It is a fraction of the box, not a coordinate
+ * **Why one uniform ratio rather than three.** `scaleEffect` multiplies a scalar: a `ParticleEmitter`'s `Size` is a diameter
+ * and its `Speed` a magnitude, so there is no anisotropic form of "a bigger puff along `X`". A per-axis scale would have to
+ * leave the emitters disagreeing with the part they hang on.
  *
- * A constant like `x = 0` names a position in whatever frame the reader happens to be thinking in. This names a position
- * **relative to the fixture** — see `MOTION_BLUR_DEPTH_FRACTION` for why the depth is proportional, and for why the version
- * that sat exactly on the face put the effect outside the arena.
+ * ## The guard, and why a flat axis is skipped rather than clamped
  *
- * ## Why a function rather than a `CFrame` expression at the call site
- *
- * Because the anchor is the one part of this effect that is a *position in the world* rather than a value, and it is the part
- * most likely to be re-argued (face, a fifth in, centre, an inset in studs). As a pure function over a `CFrame` and a length it
- * is asserted in `motion-blur.spec.ts` — that the depth is a fraction of the length, that `Y` and `Z` do not move, and that the
- * offset is composed in the **zone's** basis. A call site that composed the offset by hand could get any of those three wrong and
- * no build would notice; a wrong one here fails a test.
- *
- * ## What this returns, and what the clone does with it (rewritten twice — items 142 and 143)
- *
- * It returns a full `CFrame`: the offset is composed in the zone's local space, so the **result's rotation is the zone's**. That
- * is correct *here* — it is what puts the position on the right side of a turned box - and it is no longer what the clone uses.
- *
- * Item 141 argued the opposite of that last clause, and the correction is kept rather than deleted because it is the trap: it
- * said the clone should take "the zone's orientation rather than the asset's authored one, which is the opposite of item 97's
- * rule". The first half of the reasoning was sound and the conclusion was wrong: a fixture gives a stable *position* and has no
- * opinion about which way a **particle asset** was drawn. The asset's author rotated it in Studio precisely so it would render
- * that way, and only the asset knows it. So `motionBlurCloneFrame` takes this anchor's **position** and the asset's
- * **rotation**, and this function's own `Rotation` is unused by the clone.
- *
- * It stays a `CFrame` rather than becoming a `Vector3` because its rotation is the thing the spec asserts — "the offset is
- * composed in the zone's frame" is only checkable through the resulting basis, and a position-only return would make that case
- * vacuous.
+ * A zero-thickness part — a sheet, which a haze asset may well be — has no extent on its thin axis, and there is nothing to
+ * fill there. Dividing by it (even by a `1e-3` floor) would scale the effect by thousands of times and fill the arena's
+ * interior with noise. So an axis with no geometry is **not a constraint and is skipped**; if every axis is degenerate the
+ * answer is `1` (authored), which renders small — a visible bug someone reports, rather than an effect nobody can see past.
  */
-export function motionBlurAnchor(zoneFrame: CFrame, zoneLengthStuds: number): CFrame {
-	// `CFrame.mul` with a translation composes in the zone's **local** space, so this is "-X by half the box, then back in by
-	// the depth fraction" along the zone's own axis whether the zone is axis-aligned or not.
-	return zoneFrame.mul(new CFrame(-(zoneLengthStuds / 2) + motionBlurDepthStuds(zoneLengthStuds), 0, 0));
+export function motionBlurFillRatio(zoneSize: Vector3, extents: Vector3): number {
+	const zone = [zoneSize.X, zoneSize.Y, zoneSize.Z];
+	const extent = [extents.X, extents.Y, extents.Z];
+
+	let largest = 0;
+	for (let index = 0; index < zone.size(); index++) {
+		if (extent[index] <= 1e-3) {
+			continue;
+		}
+
+		largest = math.max(largest, zone[index] / extent[index]);
+	}
+
+	if (!(largest > 0) || largest === math.huge) {
+		return 1;
+	}
+
+	return largest;
 }
 
 /**
- * **The clone's `CFrame`: position from the anchor, rotation from the asset.** Item 97's composition, applied to a
- * fixture-anchored clone instead of a body-anchored one.
+ * **The clone's `CFrame`: position from the zone, rotation from the asset** — and, since item 192, **the zone's centre.**
  *
- * ## Why this is a second function rather than a line in the controller
+ * ## Why the depth machinery is gone rather than set to `0.5` (item 192)
+ *
+ * Items 141-143 argued at length about *where in the box* a small haze should sit: on the front face (item 141, which put it
+ * outside), then a fraction of the length in from it (item 143). Both were answers to "a small cloud must not look like it is
+ * floating outside the arena", and both presupposed that the cloud was **smaller than the box**.
+ *
+ * Item 192 made the effect the size of the zone (`motionBlurFillRatio`). A zone-sized volume has exactly one position that
+ * fills the zone: its centre. A fraction whose only correct value is `0.5` is a knob that can only be set wrong, and the anchor
+ * that resolved it — `motionBlurAnchor`, `MOTION_BLUR_DEPTH_FRACTION`, `motionBlurDepthStuds`, and the four spec cases pinning
+ * them — had become arithmetic that multiplies out to zero. This tree deletes inert values rather than leaving them at a value
+ * that happens to work (item 190's rule), so they are gone.
+ *
+ * **The history is kept here rather than in the code it used to explain**, because the trap it documents is still live: a
+ * *smaller* effect (`MOTION_BLUR_SCALE < 1`) at the zone's centre is the effect item 140 shipped and item 141 was asked to
+ * move. If the designer ever wants the haze pushed toward one end, that wants a new, stated rule — not the resurrection of a
+ * fraction that was only right because the effect was once smaller than the box.
+ *
+ * ## Why this is a function rather than a line in the controller
  *
  * The rule — *which rotation wins* — is a property of the effect, not of the order a controller happens to construct things in,
  * and the controller cannot be built in this runtime (`CollectionService`, `Workspace`, `TweenService`). Keeping the
  * composition here means the regression that matters can be asserted: an edit that "simplifies" this back to
- * `anchor.mul(assetRotation)` compiles, lints, and renders the effect at the **zone's** orientation while every other test in
- * the tree still passes. `motionBlurActionFor` and `generationOwnsFadeOut` live here for the same reason (item 140).
+ * `zoneFrame.mul(assetRotation)`, or to a clone that inherits the zone's basis, compiles, lints, and renders the effect at the
+ * wrong angle while every other test in the tree still passes. `motionBlurActionFor` and `generationOwnsFadeOut` live here for
+ * the same reason (item 140).
  *
  * ## Why `new CFrame(position).mul(rotation)` and not the two shorter spellings
  *
- * - `anchor.mul(assetRotation)` — the bug. It composes the **zone's** basis into the asset's, so a zone rotated 90 degrees turns
- *   the effect 90 degrees further than the designer intended. This is exactly what shipped in item 141 and what the user saw.
- * - `anchor.Rotation.mul(assetRotation)` — the same bug written more explicitly.
- * - `new CFrame(anchor.Position).mul(assetRotation)` — a translation frame, then the asset's basis on top of it. The result's
+ * - `zoneFrame.mul(assetRotation)` — the bug item 142 fixed. It composes the **zone's** basis into the asset's, so a zone
+ *   rotated 90 degrees turns the effect 90 degrees further than the designer intended. This is exactly what shipped in item 141
+ *   and what the user saw.
+ * - `zoneFrame.Rotation.mul(assetRotation)` — the same bug written more explicitly.
+ * - `new CFrame(zoneFrame.Position).mul(assetRotation)` — a translation frame, then the asset's basis on top of it. The result's
  *   rotation is the asset's *exactly* (multiplying by an identity basis is exact in floating point), and its position is the
- *   anchor's. Both halves come from the source that knows them.
+ *   zone's. Both halves come from the source that knows them.
  *
- * **The zone's rotation is therefore visible only through the anchor's position**, never through the clone's orientation — which
- * is what makes "rotate the zone in Studio" mean "slide the effect round the fixture" rather than "also spin the particles".
+ * **The zone's rotation is therefore visible only through its position**, never through the clone's orientation — which is what
+ * makes "rotate the zone in Studio" mean "the effect travels with the fixture" rather than "also spin the particles".
  */
-export function motionBlurCloneFrame(zoneFrame: CFrame, zoneLengthStuds: number, assetRotation: CFrame): CFrame {
-	const anchor = motionBlurAnchor(zoneFrame, zoneLengthStuds);
-	return new CFrame(anchor.Position).mul(assetRotation);
+export function motionBlurCloneFrame(zoneFrame: CFrame, assetRotation: CFrame): CFrame {
+	return new CFrame(zoneFrame.Position).mul(assetRotation);
 }
 
 /**

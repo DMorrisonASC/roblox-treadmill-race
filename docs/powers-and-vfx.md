@@ -237,6 +237,29 @@ and accept that `ghost` then has no mechanism.
   every ball consumes, it is a snapshot.
 - `sprinter` takes `SPRINTER_BOOST_SPEED`; everyone else `BOOST_TARGET_BALL_SPEED`.
 
+### Where a pad goes
+
+`PickupService.spawnPickups` → `pickupBounds(belt.Size, PICKUP_SIZE)` → bounded rejection sampling. Since item 191:
+
+- **The count is `PICKUP_MAX_COUNT` (12), not the spawner count.** A pad is not a body: it holds no `BALL_SPEED`, consumes no
+  slot against `MaxLiveBalls`, and does not care how many lanes the scene has. **The pad count and the competitor cap are
+  deliberately decoupled** — if a round ever wants "one pickup per lane" back, that is a new constant with its own reason, not a
+  re-connection to `getBoundSpawnerCount()`.
+- **The bounds come from the belt, not from absolute numbers.** `pickupBounds` returns the belt's half-extents minus the pad's
+  half-size on `X` and `Z`, so a pad's **entire collider** is on the surface rather than merely its centre. The old
+  `PICKUP_X_MIN`/`PICKUP_X_MAX` pair was deleted: it knew one belt's size and one belt's orientation.
+- **No two pads overlap**, and that is produced rather than merely checked: each candidate is rejected if its belt-local
+  rectangle overlaps a placed pad's (`rectsOverlap`, strict — flush pads do not overlap), with `PICKUP_PLACEMENT_ATTEMPTS` per
+  pad. Hitting the bound warns with `placed/requested/unplaced` and the bounds used; the next attempt is the 15 s top-up tick.
+- **A pad's lane has nothing to do with a ball's lane.** Balls still spawn from the spawner parts; pads are placed by a rule on
+  the surface. The two are unrelated on purpose.
+- **`Y` is not bounded.** The pad sits on the top face of the invisible floor under the belt (`belt.Size.Y / 2 +
+  BELT_SURFACE_THICKNESS + PICKUP_SIZE.Y / 2`), not inside the belt, and hangs above it so a ball can enter the volume.
+
+The geometry is pure and asserted: [`shared/pickup-placement.ts`](../src/shared/pickup-placement.ts) with
+[`pickup-placement.spec.ts`](../src/shared/pickup-placement.spec.ts), including a belt rotated 90° so the belt-local frame is
+proven rather than assumed.
+
 ---
 
 ## 6. The VFX inventory
@@ -293,11 +316,13 @@ agent looking for its controller will not find one.
   (`BASE_BALL_RADIUS`, in `tuning.ts`), so they cannot disagree about how to scale or what a design radius is — only about how
   much. They are **not comparable by eye**, though all three currently read `0.1`: that number means "design radii above a
   0.5-stud ball", so a 20-stud ball draws each at `20 x 0.1 = 2x` authored. The motion blur is the exception and is not
-  ball-relative at all — its `MOTION_BLUR_SCALE` (`1` = authored) lives in `shared/motion-blur.ts` because its reference is the
-  asset itself.
-- **motion blur** — one clone for the whole arena, at the `EliminationZone`, alive only in `Playing`; reads
-  [`shared/motion-blur.ts`](../src/shared/motion-blur.ts) for its ramp maths. Its `Rate` ramp is a tween on emitters, so it is the
-  only effect that is "on" without being triggered.
+  ball-relative at all — its scale is **derived from the zone** (`motionBlurFillRatio`: the largest per-axis ratio needed for
+  the authored box to cover the `EliminationZone`), and `MOTION_BLUR_SCALE` (`1` = exactly the zone) is a trim on top of that.
+  Both live in `shared/motion-blur.ts` because the reference is the fixture, not a ball.
+- **motion blur** — one clone for the whole arena, **centred in and sized to the `EliminationZone`** (`motionBlurFillRatio`
+  scales the authored box to cover it, logged as `ratio=`), alive only in `Playing`; reads
+  [`shared/motion-blur.ts`](../src/shared/motion-blur.ts) for its ramp maths and its size rule. Its `Rate` ramp is a tween on
+  emitters, so it is the only effect that is "on" without being triggered.
 - **ball phantom** — the ball's own part is invisible and the phantom draws; the six face textures have to be copied and hidden
   separately, because a `Decal`/`Texture` renders on an invisible part. Spin comes from
   [`shared/apparent-spin.ts`](../src/shared/apparent-spin.ts) so the phantom and `marker-spin-controller` cannot disagree.

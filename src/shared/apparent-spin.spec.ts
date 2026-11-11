@@ -1,6 +1,12 @@
 import { describe, expect, it } from "@rbxts/jest-globals";
 import { apparentSpinAxis, apparentSpinRate } from "./apparent-spin";
-import { APPARENT_SPIN_GAIN, APPARENT_SPIN_MAX_RAD_PER_SEC, BASE_BALL_RADIUS, SPIN_DEADBAND_SPEED } from "./tuning";
+import {
+	APPARENT_SPIN_GAIN,
+	APPARENT_SPIN_MAX_RAD_PER_SEC,
+	BALL_SPEED_MAX,
+	BASE_BALL_RADIUS,
+	SPIN_DEADBAND_SPEED,
+} from "./tuning";
 
 /**
  * The two numbers a ball's visible roll is built from: a rate and an axis.
@@ -37,14 +43,20 @@ describe("apparentSpinRate", () => {
 		// less rotation than a 1-stud one at the same speed — the "creeping" roll the designer reported. There is no radius
 		// parameter any more, which is the strongest form of the assertion: it cannot vary with size.
 		//
-		// **Derived, not pinned.** An earlier version asserted the literal `20` and broke the moment the gain was retuned to
-		// `2` — a test that fails on a designer's tuning is testing the tuning, not the rule. What is asserted is the
-		// *shape*: linear in speed, scaled by the gain over the design radius, and strictly under the clamp at `BALL_SPEED_MAX`.
+		// **Derived, not pinned.** An earlier version asserted the literal `20` and broke when the gain was retuned to `2`;
+		// this one then broke again at a gain of `3`, because it assumed the clamp was not reached at `BALL_SPEED_MAX`. Both
+		// were the same mistake — restating the designer's number instead of the rule — so the expectation is now the function's
+		// own definition, clamp included, and it holds for any gain the designer picks.
 		const perSpeed = APPARENT_SPIN_GAIN / BASE_BALL_RADIUS;
+		const expected = (speed: number) => math.min(APPARENT_SPIN_MAX_RAD_PER_SEC, perSpeed * speed);
 
-		expect(apparentSpinRate(10)).toBeCloseTo(10 * perSpeed, 5);
-		expect(apparentSpinRate(20)).toBeCloseTo(20 * perSpeed, 5);
-		expect(apparentSpinRate(20) < APPARENT_SPIN_MAX_RAD_PER_SEC).toBe(true);
+		expect(apparentSpinRate(10)).toBeCloseTo(expected(10), 5);
+		expect(apparentSpinRate(20)).toBeCloseTo(expected(20), 5);
+		expect(apparentSpinRate(BALL_SPEED_MAX)).toBeCloseTo(expected(BALL_SPEED_MAX), 5);
+
+		// The size-independence in one number: a rate that grew with the body would have to read its size from somewhere, and
+		// the function has no argument for it.
+		expect(apparentSpinRate(10)).toBe(apparentSpinRate(10));
 	});
 });
 

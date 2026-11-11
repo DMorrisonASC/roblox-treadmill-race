@@ -528,7 +528,7 @@ export const SPIN_DEADBAND_SPEED = 0.5;
  * **The rest of the visual coupling lives in `BELT_TEXTURE_SCROLL_MULTIPLIER`.** No ball rotation can match a tread drawn
  * faster than the belt model's `BELT_SPEED`; the two only agree at `1`.
  */
-export const APPARENT_SPIN_GAIN = 2;
+export const APPARENT_SPIN_GAIN = 3;
 
 /**
  * **Placeholder, and not read by anything.** Kept as the placeholder for a multiplier on a body's *own*
@@ -662,33 +662,48 @@ export const APPARENT_SPIN_SIGN = -1;
 export const PICKUP_SIZE = new Vector3(20, 20, 20);
 
 /**
- * **Placeholder.** The random band a pickup's `X` is chosen from, in the belt's **local** `X`, in studs.
+ * **Placeholder.** How many pads a round tries to keep on the belt at once.
  *
- * ## Why each bound exists
+ * ## This used to be the spawner count, and deliberately is not any more (item 191)
  *
- * `-18` is the far side, and it sits **5 studs in front of where a ball spawns** (code-frame `-23`, user-X `5`). Balls
- * drift toward `+X` — toward the back, i.e. toward elimination — so a pickup behind the spawn line would be behind every
- * ball for its whole life: a marker that can never be touched is worse than no marker, because it looks like content.
+ * The old cap was `BallSpawnerService.getBoundSpawners().size()` — **one pad per lane** — so the pad count and the
+ * competitor cap were the same number by accident of construction: both read how many spawner parts the place happened to
+ * hold. They answer different questions. A pad is scenery a ball may touch; it is not a body, it holds no `BALL_SPEED`, and
+ * it consumes no slot against `MaxLiveBalls` (`50`). Twelve pads with eight spawners is **twelve pads and eight competitors**,
+ * and neither number constrains the other.
  *
- * `+23` is the near side, chosen to stop well short of the exit at code-frame `+28` (user-X `56`). A ball's drift
- * accelerates as `BALL_SPEED` decays, so a pickup in the last few studs would only be collected after the ball had already
- * committed to leaving the belt.
+ * **The coupling is intentionally gone, not merely dormant.** A future round that wants "one pickup per lane" back must write
+ * that as its own stated constant with its own reason. Reconnecting this one to `getBoundSpawnerCount()` would silently cap
+ * the pads at whatever the scene contains, which is the same class of bug item 45 was fixing from the other side — a count
+ * that comes from the place cannot say what it meant.
  *
- * **Both numbers are code-frame X**, from `PointToObjectSpace` with the belt's centre as origin; user-frame they are `10`
- * and `51`. Both ends are inside the belt's own code-frame `-28 .. +28`, so a pad is always on the surface rather than
- * floating past an end. The lane (`Z`) is not random: it is read from the bound spawner parts, so every round covers
- * every lane a ball can spawn in.
+ * ## Why 12 is sparse enough to place by rejection rather than by a grid
+ *
+ * A 20-stud pad on a `336 x 173` belt has centres ranging over `316 x 153`; a grid packing of the surface holds
+ * `floor(336 / 20) x floor(173 / 20) = 16 x 8 = 128` pads, so twelve pads occupy about a tenth of the packable cells. Almost
+ * every draw lands free, which is what makes `PICKUP_PLACEMENT_ATTEMPTS` a guard against a broken scene rather than a
+ * load-bearing part of the algorithm.
  */
-export const PICKUP_X_MIN = -18;
+export const PICKUP_MAX_COUNT = 12;
 
-/** **Placeholder.** The near end of the random `X` band. See `PICKUP_X_MIN` for why both bounds exist. */
-export const PICKUP_X_MAX = 23;
+/**
+ * **Placeholder.** Draws allowed per pad before that pad is reported as unplaceable.
+ *
+ * ## Why a bound, and why the bound is not the mechanism
+ *
+ * "The band is sparse, so overlap is rare" is a probability, not a guarantee, and an unbounded retry loop is a loop that can
+ * starve the thread that runs it. Twenty draws against a surface that packs 128 pads is a count that will not be reached in a
+ * well-formed scene; reaching it means the scene is wrong (a pad larger than the belt, a belt shrunk in Studio, a pad count
+ * raised past what the surface holds). That case is **reported with a count**, not retried forever and not swallowed: a pad
+ * that quietly did not appear is indistinguishable from a placement bug.
+ */
+export const PICKUP_PLACEMENT_ATTEMPTS = 20;
 
 /**
  * **Placeholder.** Seconds between top-up attempts while `Playing`.
  *
- * A top-up never exceeds the bound-spawner count, so this is a *replacement* cadence, not a spawn rate: a
- * round that runs forever holds at most five pads, and a pad taken at `t = 3 s` is replaced at the
+ * A top-up never exceeds `PICKUP_MAX_COUNT`, so this is a *replacement* cadence, not a spawn rate: a
+ * round that runs forever holds at most twelve pads, and a pad taken at `t = 3 s` is replaced at the
  * next multiple of 15. Longer than a ball takes to cross the belt, so a replacement never appears in front of
  * the ball that just took the last one.
  */
@@ -722,8 +737,8 @@ export const PICKUP_SPRITE_ASSET_ID = "135266450823195";
  * distance the way the pad it sits on does.
  *
  * Slightly wider than the 2-stud pad on purpose - the sprite is a marker, and a marker the pad's own size or smaller is hard
- * to tell from the pad it marks. It is not a lane-crowding risk in practice: `PickupService` spreads the live pads along the
- * belt's length, so two of them rarely share an X, and the sprite is centred on its own pad rather than reaching sideways.
+ * to tell from the pad it marks. It is not a crowding risk in practice: `PickupService` places pads with a non-overlap rule
+ * (item 191), so no two colliders share space, and the sprite is centred on its own pad rather than reaching sideways.
  */
 export const PICKUP_SPRITE_STUDS = 2.6;
 
@@ -864,7 +879,7 @@ export const BALL_SPEED_START = DEFAULT_BELT_SPEED;
  * sit at forever, and a race where a ball can survive indefinitely is not a race. Zero is the floor that makes
  * every ride finite.
  */
-export const BALL_SPEED_DECAY_RATE = 0.1;
+export const BALL_SPEED_DECAY_RATE = 2;
 
 /**
  * **Placeholder.** How far a ball's own starting speed may vary **above** `BALL_SPEED_START`, in studs/second.
@@ -937,7 +952,7 @@ export const BALL_SPEED_MIN = 0;
  * **This is a safety net, not a balance guard.** Nothing derives a power's magnitude from it, and the designer tunes the
  * powers.
  */
-export const BALL_SPEED_MAX = 20;
+export const BALL_SPEED_MAX = 50;
 
 /** **Placeholder.** Density shared by every spawned body; this matches Plastic's current default density. */
 export const BALL_PHYSICAL_DENSITY = 0.7;
@@ -1016,7 +1031,7 @@ export const DECOY_SPAWN_DELAY_SECONDS = 5;
  * The sway's own position correction (`SWAY_TRACK_SECONDS = 1.5`) then walks the ball back to its wave, so the shove
  * settles instead of permanently changing lane.
  */
-export const BALL_COLLISION_SHOVE_SPEED = 80;
+export const BALL_COLLISION_SHOVE_SPEED = 100;
 
 /**
  * **Placeholder.** Time constant of a contact shove, in seconds.
@@ -1045,7 +1060,7 @@ export const BALL_COLLISION_SHOVE_DECAY_SECONDS = 1;
  * forward until its decay brings `BALL_SPEED` back under the reference, at which point it turns around and
  * resumes losing ground.
  */
-export const BOOST_TARGET_BALL_SPEED = 12;
+export const BOOST_TARGET_BALL_SPEED = 20;
 
 /**
  * **Placeholder.** How often a ball sways across the belt: **full left-right cycles per second**.

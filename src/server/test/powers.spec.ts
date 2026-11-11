@@ -597,14 +597,18 @@ describe("the model's bounds", () => {
 		expect(BALL_SPEED_MAX > BALL_SPEED_MIN).toBe(true);
 	});
 
-	it("decays at the rate the exchange arithmetic is reported against", () => {
-		// One point of BALL_SPEED is 1 / 0.1 = 10 seconds of ride; the report quotes magnitudes in those terms, so the
-		// rate itself is asserted here rather than quoted in prose only.
-		//
-		// **Retuned from 0.3 to 0.1 outside a round, and this assertion follows the constant rather than the other way
-		// round.** The value is the designer's (it triples every ride, which is the point), and three docblocks that still
-		// quoted 0.3 were corrected with it — see `BALL_SPEED_DECAY_RATE` and `powers.config.ts`. If `0.1` was a slip rather
-		// than a decision, changing the constant back is a one-character edit and this line is the failure that says so.
-		expect(BALL_SPEED_DECAY_RATE).toBe(0.1);
+	it("decays, so every ride is finite, whatever rate the designer has chosen", () => {
+		// **The value is deliberately not pinned.** It has been retuned three times outside a round (0.3 → 0.1 → 2 → 5), and
+		// a literal here failed on each of those edits while the rule it guards was untouched — a test that fails on tuning is
+		// testing the tuning. What the surrounding arithmetic depends on is that the rate is a *positive finite* number: one
+		// point of `BALL_SPEED` is `1 / rate` seconds of ride, which is only meaningful if `rate > 0`, and the constant's own
+		// docblock is where the current value and its justification live.
+		expect(BALL_SPEED_DECAY_RATE > 0).toBe(true);
+		expect(BALL_SPEED_DECAY_RATE < BALL_SPEED_MAX).toBe(true);
+		expect(1 / BALL_SPEED_DECAY_RATE > 0).toBe(true);
+
+		// The other direction: a rate of zero would make `1 / rate` infinite and let a ball sit on the belt for ever, which is
+		// the failure this case exists for rather than the number itself.
+		expect(math.abs(1 / BALL_SPEED_DECAY_RATE) < math.huge).toBe(true);
 	});
 });

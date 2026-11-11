@@ -1,12 +1,13 @@
 import { CollectionService, ReplicatedStorage, TweenService, Workspace } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
 import {
+	extentAlong,
 	generationOwnsFadeOut,
 	MOTION_BLUR_FADE_SECONDS,
 	MOTION_BLUR_SCALE,
 	motionBlurActionFor,
 	motionBlurCloneFrame,
-	motionBlurDepthStuds,
+	motionBlurFillRatio,
 } from "shared/motion-blur";
 import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import { TAGS } from "shared/tags";
@@ -43,6 +44,17 @@ interface BlurRecord {
 	readonly generation: number;
 	/** `os.clock()` at clone time, so the destroy line can say how long the effect lived. */
 	readonly bornAt: number;
+	/**
+	 * The uniform scale this clone was built at, and the two inputs it came from: the zone's size and the asset's own extent
+	 * along each of the zone's axes (item 192).
+	 *
+	 * Kept on the record rather than recomputed at log time because the clone has already been **scaled** by the time `show`
+	 * prints: reading `clone.Size` there would report the result as if it were the input, and a wrong ratio would then be
+	 * invisible in the one line that exists to expose it.
+	 */
+	readonly ratio: number;
+	readonly zoneSize: Vector3;
+	readonly extents: Vector3;
 }
 
 /**
@@ -96,8 +108,8 @@ export class MotionBlurController implements OnStart {
 	 * angle because the controller overwrote it. A **fixture** gives a stable *position*; it has no opinion about which way an
 	 * author drew a particle emitter. Only the asset knows that, and it says so with its `CFrame`.
 	 *
-	 * The other half of item 141's reasoning was sound and is preserved: the position is the zone's, taken from
-	 * `motionBlurAnchor`'s front face, so moving or resizing the fixture moves the effect with it.
+	 * The other half of item 141's reasoning was sound and is preserved: the position is the zone's — its centre, since item
+	 * 192 made the effect zone-sized — so moving or resizing the fixture moves the effect with it.
 	 *
 	 * Captured **once**, like `windBoost`'s (`assetRotation` in that controller, item 97) and for the same reason: the asset is
 	 * authored in the place and does not change between rounds, so a per-clone read would be a second source that could disagree
@@ -185,7 +197,7 @@ export class MotionBlurController implements OnStart {
 		}
 
 		print(
-			`[MotionBlur] mounted on ${found.GetFullName()} (${found.ClassName}) emitters=${rates.size()} rates=${rates.join(",")} scale=${MOTION_BLUR_SCALE} fade=${MOTION_BLUR_FADE_SECONDS}s assetRotation=${describeOrientation(this.assetRotation)}`,
+			`[MotionBlur] mounted on ${found.GetFullName()} (${found.ClassName}) emitters=${rates.size()} rates=${rates.join(",")} multiplier=${MOTION_BLUR_SCALE} fade=${MOTION_BLUR_FADE_SECONDS}s assetRotation=${describeOrientation(this.assetRotation)}`,
 		);
 
 		// **Immediate read, then subscribe** — item 39's pattern, the same one `round-state-controller`,
@@ -287,7 +299,7 @@ export class MotionBlurController implements OnStart {
 		}
 
 		print(
-			`[MotionBlur] show generation=${generation} zone=${zone.GetFullName()} pos=${tostring(record.clone.Position)} depth=${formatSeconds(motionBlurDepthStuds(zone.Size.X))} emitters=${record.emitters.size()}`,
+			`[MotionBlur] show generation=${generation} zone=${zone.GetFullName()} pos=${tostring(record.clone.Position)} zoneSize=${tostring(record.zoneSize)} authored=${tostring(record.extents)} ratio=${formatNumber(record.ratio)} multiplier=${MOTION_BLUR_SCALE} emitters=${record.emitters.size()}`,
 		);
 	}
 
@@ -334,7 +346,7 @@ export class MotionBlurController implements OnStart {
 			this.current = undefined;
 			record.clone.Destroy();
 
-			print(`[MotionBlur] destroyed generation=${scheduled} age=${formatSeconds(os.clock() - record.bornAt)}s`);
+			print(`[MotionBlur] destroyed generation=${scheduled} age=${formatNumber(os.clock() - record.bornAt)}s`);
 		});
 	}
 
@@ -423,20 +435,32 @@ export class MotionBlurController implements OnStart {
 			warn(`[MotionBlur] ${silent.size()} emitter(s) authored at Rate 0 will stay hidden: ${silent.join(", ")}`);
 		}
 
-		// **The scale, off-world, through the shared five-property implementation** (item 101). `MOTION_BLUR_SCALE` is this
-		// effect's own number — since item 177 every ball effect has its own in `shared/config/`, and none of them is this
-		// one. See the constant's docblock for why a zone overlay is not ball-relative.
-		scaleEffect(clone, MOTION_BLUR_SCALE);
+		// **The scale, off-world, through the shared five-property implementation** (item 101) — but the **number** is now
+		// derived from the fixture rather than from the asset (item 192). `MOTION_BLUR_SCALE` alone was `1`, i.e. "draw the
+		// authored part", and the reported result was a haze the size of that part inside a 262-stud zone. The extents are
+		// taken along the **zone's own axes** because the clone keeps the asset's authored rotation (item 142): `asset.Size.X`
+		// is not the zone's width once the asset is turned, and reading it as if it were is how a rotated asset gets scaled
+		// against the wrong dimension. Off-world still, so no frame ever shows the unscaled tree.
+		const zoneFrame = zone.CFrame;
+		const extents = new Vector3(
+			extentAlong(clone.Size, this.assetRotation, zoneFrame.XVector),
+			extentAlong(clone.Size, this.assetRotation, zoneFrame.YVector),
+			extentAlong(clone.Size, this.assetRotation, zoneFrame.ZVector),
+		);
+
+		const ratio = motionBlurFillRatio(zone.Size, extents) * MOTION_BLUR_SCALE;
+
+		scaleEffect(clone, ratio);
 
 		// **`CFrame` before `Parent`.** `Clone()` copies the template's transform; parenting does not re-base it and the clone is
 		// anchored, so nothing else will ever move it. This one line is the difference between the effect at the zone and the
 		// effect wherever the asset happens to sit in `ReplicatedStorage`.
 		//
-		// **Position from the zone's front face, rotation from the asset** — item 142, and item 97's rule applied to a
-		// fixture-anchored clone. `motionBlurCloneFrame` is where that composition lives so the spec can assert it; composing it
-		// here as `anchor.mul(rotation)` (or as `anchor` alone, which is what item 141 shipped) would silently render the effect at
-		// the **zone's** orientation and override the rotation the user set in Studio.
-		clone.CFrame = motionBlurCloneFrame(zone.CFrame, zone.Size.X, this.assetRotation);
+		// **Position from the zone, rotation from the asset** — item 142, and item 97's rule applied to a fixture-anchored
+		// clone. `motionBlurCloneFrame` is where that composition lives so the spec can assert it; composing it here as
+		// `zone.CFrame.mul(assetRotation)` (or as the zone's `CFrame` alone, which is what item 141 shipped) would silently render
+		// the effect at the **zone's** orientation and override the rotation the user set in Studio.
+		clone.CFrame = motionBlurCloneFrame(zone.CFrame, this.assetRotation);
 
 		clone.Parent = this.effectsFolder();
 
@@ -446,6 +470,9 @@ export class MotionBlurController implements OnStart {
 			authoredRates,
 			generation,
 			bornAt: os.clock(),
+			ratio,
+			zoneSize: zone.Size,
+			extents,
 		};
 	}
 
@@ -509,8 +536,13 @@ function makeInert(part: BasePart): void {
 	part.Massless = true;
 }
 
-/** Seconds to two places, so the destroy line is readable without `string.format`. */
-function formatSeconds(value: number): string {
+/**
+ * A number to two places, so a log field is readable without `string.format`.
+ *
+ * Carries both the clone's age in seconds and its `ratio`, which is why it is not named for either: the rounding rule is the
+ * same and two copies of it would be two answers to "how many decimals does this line show".
+ */
+function formatNumber(value: number): string {
 	return tostring(math.round(value * 100) / 100);
 }
 

@@ -5,13 +5,13 @@ import { PICKUP_SOUND_REMOTE_NAME, REMOTES_FOLDER_NAME, ROUND_STATE_VALUE_NAME }
 import { TAGS } from "shared/tags";
 import {
 	BELT_SURFACE_THICKNESS,
+	PICKUP_MAX_COUNT,
+	PICKUP_PLACEMENT_ATTEMPTS,
 	PICKUP_SIZE,
 	PICKUP_SPAWN_INTERVAL_SECONDS,
-	PICKUP_X_MAX,
-	PICKUP_X_MIN,
 	PICKUPS_FOLDER_NAME,
 } from "shared/tuning";
-import { BallSpawnerService } from "./ball-spawner-service";
+import { beltLocalToWorld, padFootprint, pickupBounds, PickupFootprint, rectsOverlap } from "shared/pickup-placement";
 import { pickupDecision, powerOf, speedAfterPickup } from "server/powers";
 
 /**
@@ -51,17 +51,13 @@ const ROUND_STATE_WAIT_SECONDS = 10;
  * ## Why the cluster is capped rather than rate-limited
  *
  * `PLAYING_CAP_SECONDS` was deleted, so a round can run forever and a timed spawner would accumulate
- * pads without bound — hundreds of parts on a 56-stud belt, and a ball hitting five at once. The cap is
- * the bound-spawner count; the 15 s tick only ever *replaces* what was taken.
+ * pads without bound — hundreds of parts on a 336-stud belt, and a ball hitting five at once. The cap is
+ * `PICKUP_MAX_COUNT`, and the 15 s tick only ever *replaces* what was taken. The cap is **not** the spawner count
+ * any more (item 191): a pad is not a body, so how many pads the belt holds has nothing to do with how many balls
+ * may be on it.
  */
 @Service()
 export class PickupService implements OnStart {
-	/**
-	 * Injected for one thing: the bound spawner **parts**, so the lane list is the scene's rather than a
-	 * constant's. `BallSpawnerService` does not import this file, so there is no cycle.
-	 */
-	constructor(private readonly spawner: BallSpawnerService) {}
-
 	/** Live pads, so the cap is counted rather than inferred from the folder. */
 	private readonly live = new Array<BasePart>();
 
@@ -189,21 +185,32 @@ export class PickupService implements OnStart {
 	}
 
 	/**
-	 * Places one pickup in each lane that does not already hold one, up to the bound-spawner count.
+	 * Tops the belt up to `PICKUP_MAX_COUNT` pads, each wholly on the belt and overlapping no other.
 	 *
-	 * ## The count is the scene's, not a constant
+	 * ## Placement is a *rule*, not a check (item 191)
 	 *
-	 * **A fixed `3` was wrong because a scene does not scale to a number in code.** Four
-	 * spawners were bound and three pickups were placed, so one lane could never hold anything; a fifth spawner
-	 * added in Studio would have changed nothing at all. `maxPickups()` is the bound-spawner count, read at the
-	 * moment of spawning, so adding a lane in Studio adds a pickup with no code change.
+	 * This used to place one pad per lane: the count was the bound-spawner count and the `Z` was the spawner's own, so two
+	 * pads could never overlap because there was at most one per lane. Now the position is free in both axes, which means
+	 * "no overlap" has to be produced rather than observed. The shape is **bounded rejection sampling**: draw a candidate
+	 * footprint inside `pickupBounds`, reject it if it overlaps anything already placed, and give each pad at most
+	 * `PICKUP_PLACEMENT_ATTEMPTS` draws.
 	 *
-	 * ## Only the missing ones
+	 * Rejection rather than a grid or a sweep, because the band is sparse: a 20-stud pad on a 336 x 173 belt has 128
+	 * packable grid cells and a round wants 12, so almost every draw lands free. A grid would be a second, invisible layout
+	 * rule that a designer would have to discover from the positions.
 	 *
-	 * A top-up spawns `maxPickups() - live` pickups, not a fresh set: the untouched ones keep the position they
-	 * were created at, which is what "a collected pickup is replaced" has to mean for the round to stay
-	 * readable. Lanes that already hold a pickup are excluded, so the deficit always lands in an empty lane and
-	 * two pickups can never share one at the same X.
+	 * ## A pad that cannot be placed is *reported*, never dropped
+	 *
+	 * Hitting the attempt bound means the scene is wrong — a pad wider than the belt, a belt shrunk in Studio, a count past
+	 * what the surface holds — so the shortfall is warned about with both numbers. There is no unbounded retry: the draws per
+	 * pad are bounded, and the next attempt is the 15 s top-up tick, which is where a genuinely crowded belt gets its (also
+	 * bounded) second chance rather than a loop spinning on the same full surface.
+	 *
+	 * ## Only the missing ones, and the existing pads are obstacles
+	 *
+	 * A top-up spawns `PICKUP_MAX_COUNT - live` pads, not a fresh set: the untouched ones keep the position they were created
+	 * at, which is what "a collected pickup is replaced" has to mean for the round to stay readable. Every live pad is seeded
+	 * into the taken list first, so a replacement lands clear of the pads that stayed rather than on top of one of them.
 	 */
 	private spawnPickups(reason: string): void {
 		const belt = this.findBelt();
@@ -211,88 +218,114 @@ export class PickupService implements OnStart {
 			return;
 		}
 
-		const spawners = this.spawner.getBoundSpawners();
-		if (spawners.size() === 0) {
-			return;
-		}
+		// Pads destroyed outside this service (a manual `Destroy`, a Studio edit mid-round) are dropped before the cap is
+		// counted, so a phantom entry cannot shrink the field the same way the old lane bookkeeping could.
+		this.pruneDestroyed();
 
-		const folder = this.pickupsFolder();
-		const deficit = spawners.size() - this.live.size();
+		const deficit = PICKUP_MAX_COUNT - this.live.size();
 		if (deficit <= 0) {
 			return;
 		}
 
-		// Lanes already occupied by a live pickup, by their **code-frame** belt-local `Z` (centred on the belt's centreline;
-		// user-Z = this + 6). A pickup's lane is a *position*, so
-		// "occupied" is a Z match rather than a slot index - there are no fixed slots any more.
-		const lanesTaken = new Set<number>();
+		const folder = this.pickupsFolder();
+		const bounds = pickupBounds(belt.Size, PICKUP_SIZE);
+
+		// The live pads, as obstacles, in the **belt's own frame** — the same frame their positions were built in, so a
+		// rotated belt needs no special case here.
+		const taken = new Array<PickupFootprint>();
 		for (const pickup of this.live) {
-			if (pickup.Parent !== undefined) {
-				lanesTaken.add(math.round(belt.CFrame.PointToObjectSpace(pickup.Position).Z * 100) / 100);
-			}
+			const localPoint = belt.CFrame.PointToObjectSpace(pickup.Position);
+			taken.push(padFootprint(localPoint.X, localPoint.Z, pickup.Size));
 		}
 
 		const placed = new Array<BasePart>();
-		for (const spawner of spawners) {
-			if (placed.size() >= deficit) {
-				break;
+		for (let index = 0; index < deficit; index++) {
+			let chosen: PickupFootprint | undefined;
+
+			for (let attempt = 0; attempt < PICKUP_PLACEMENT_ATTEMPTS; attempt++) {
+				const candidate = padFootprint(
+					bounds.minX + math.random() * (bounds.maxX - bounds.minX),
+					bounds.minZ + math.random() * (bounds.maxZ - bounds.minZ),
+					PICKUP_SIZE,
+				);
+
+				let blocked = false;
+				for (const other of taken) {
+					if (rectsOverlap(candidate, other)) {
+						blocked = true;
+						break;
+					}
+				}
+
+				if (!blocked) {
+					chosen = candidate;
+					break;
+				}
 			}
 
-			// **The lane's `Z` comes from the part, in the belt's own frame.** A spawner's `Z` is scene data, so
-			// this is the only way a fifth spawner added in Studio produces a fifth lane with no code change; a
-			// constant here would put every pickup on top of whichever lane the constant described.
-			const localZ = belt.CFrame.PointToObjectSpace(spawner.Position).Z;
-			if (lanesTaken.has(math.round(localZ * 100) / 100)) {
+			if (chosen === undefined) {
 				continue;
 			}
 
-			const pickup = this.createPickup(belt, folder, this.positionFor(belt, localZ), placed.size());
+			taken.push(chosen);
+			const pickup = this.createPickup(belt, folder, this.positionFor(belt, chosen.x, chosen.z), placed.size());
 			if (pickup !== undefined) {
 				placed.push(pickup);
-				lanesTaken.add(math.round(localZ * 100) / 100);
 			}
 		}
 
-		if (placed.size() === 0) {
-			return;
+		if (placed.size() > 0) {
+			const summary = new Array<string>();
+			for (const pickup of placed) {
+				const localPoint = belt.CFrame.PointToObjectSpace(pickup.Position);
+				summary.push(`${formatNumber(localPoint.X)},${formatNumber(localPoint.Z)}`);
+			}
+
+			// The bounds are printed with the count because they are the rule, not the result: a pad that appears in the wrong
+			// place and a pad that appears inside a nonsensical bound look identical in the Explorer, and only the second says
+			// the scene is the problem.
+			print(
+				`[Pickup] spawned reason=${reason} placed=${placed.size()} requested=${deficit} live=${this.live.size()} count=${PICKUP_MAX_COUNT} bounds=x[${formatNumber(bounds.minX)},${formatNumber(bounds.maxX)}] z[${formatNumber(bounds.minZ)},${formatNumber(bounds.maxZ)}] positions=${summary.join("|")}`,
+			);
 		}
 
-		const summary = new Array<string>();
-		for (const pickup of placed) {
-			const localPoint = belt.CFrame.PointToObjectSpace(pickup.Position);
-			summary.push(`${formatNumber(pickup.Position.X)},${formatNumber(localPoint.Z)}`);
+		if (placed.size() < deficit) {
+			// A warning rather than a print: this is the scene refusing to hold what was asked for, and it is the only signal
+			// that a pad is missing. Named numbers, because "some pads did not fit" is not actionable and "3 of 12" is.
+			warn(
+				`[Pickup] placement shortfall reason=${reason} placed=${placed.size()} requested=${deficit} unplaced=${deficit - placed.size()} attemptsPerPad=${PICKUP_PLACEMENT_ATTEMPTS} bounds=x[${formatNumber(bounds.minX)},${formatNumber(bounds.maxX)}] z[${formatNumber(bounds.minZ)},${formatNumber(bounds.maxZ)}] pad=${formatNumber(PICKUP_SIZE.X)}x${formatNumber(PICKUP_SIZE.Z)} — could not place the rest clear of the pads already on the belt; retried at the next ${PICKUP_SPAWN_INTERVAL_SECONDS}s top-up`,
+			);
 		}
-
-		print(
-			`[Pickup] spawned reason=${reason} count=${placed.size()} live=${this.live.size()} positions=${summary.join("|")}`,
-		);
 	}
 
 	/**
-	 * A world position for a pickup: random along the belt, snapped to a lane across it.
+	 * A world position for a pad whose centre is a given belt-local `(localX, localZ)`.
 	 *
-	 * ## Why `X` is random and bounded
+	 * ## What replaced the random band and the lane
 	 *
-	 * **`PICKUP_X_MIN` bounds the far side at the ball's spawn.** Balls spawn at **code-frame** `X = -23` (user-X `5`) and
-	 * drift toward `+X` — toward the back, i.e. toward elimination — so a pickup behind `-18` would be behind every ball for
-	 * its whole life and could never be touched. The fixed `-15` cluster had exactly that problem in the other direction,
-	 * sitting at one spot every round.
+	 * The `X` band was two absolute numbers (`PICKUP_X_MIN = -18`, `PICKUP_X_MAX = 23`) picked against one belt by eye, and
+	 * the `Z` was a bound spawner's own `Z` — so a pad was confined to a lane, could never exceed the spawner count, and could
+	 * not account for its own width at either end of the belt. Both are gone (item 191). `X` and `Z` are now drawn inside
+	 * `pickupBounds(belt.Size, PICKUP_SIZE)`, which is the belt's half-extents minus the pad's on both axes — the region in
+	 * which the pad's **entire collider** is on the belt rather than merely its centre.
 	 *
-	 * **`PICKUP_X_MAX` bounds the near side so a pickup is reachable well before the exit.** A ball's drift accelerates as
-	 * `BALL_SPEED` decays, and a pickup in the last few studs before **code-frame** `+28` (user-X `56`) would be collected
-	 * after the ball had already committed to leaving.
+	 * ## A pickup's lane and a ball's lane are now unrelated, deliberately
 	 *
-	 * Both ends are inside the belt's own code-frame `X` range of `-28 .. +28` (user `0 .. 56`), so the pad is always
-	 * on the surface rather than floating past an end.
+	 * Nothing here reads a spawner. A ball's lane is where bodies appear and is still governed by the spawner parts; a pad's
+	 * position is a point on the surface a ball may or may not cross. They were the same number because a pad used to be
+	 * placed by copying a lane, and that coupling produced two artefacts nobody asked for: pads capped at the spawner count,
+	 * and every pad on a lane line.
 	 *
-	 * `Y` is the **floor's** top face, not the belt's: the floor is what a ball rests on, so a pickup placed on
-	 * the belt's face would sit inside the floor and below the ball's contact point, where `Touched` may never
-	 * fire.
+	 * ## Why `Y` is unchanged, and why it is the floor's face
+	 *
+	 * `Y` is the **floor's** top face, not the belt's: the floor is what a ball rests on, so a pickup placed on the belt's
+	 * face would sit inside the floor and below the ball's contact point, where `Touched` may never fire. The lift is the belt's
+	 * own half-height plus the floor's thickness plus the pad's half-height, and it is unrelated to the horizontal bounds —
+	 * which is why `pickupBounds` has no `Y` and should not gain one.
 	 */
-	private positionFor(belt: BasePart, localZ: number): Vector3 {
-		const localX = PICKUP_X_MIN + math.random() * (PICKUP_X_MAX - PICKUP_X_MIN);
+	private positionFor(belt: BasePart, localX: number, localZ: number): Vector3 {
 		const lift = belt.Size.Y / 2 + BELT_SURFACE_THICKNESS + PICKUP_SIZE.Y / 2;
-		return belt.CFrame.mul(new CFrame(localX, lift, localZ)).Position;
+		return beltLocalToWorld(belt.CFrame, localX, lift, localZ);
 	}
 
 	/**
@@ -463,6 +496,21 @@ export class PickupService implements OnStart {
 		}
 	}
 
+	/**
+	 * Drops pads that no longer exist from the live list.
+	 *
+	 * Walked backwards so each `remove` cannot shift an entry the loop has yet to look at. The list is the cap's own
+	 * bookkeeping, so an entry left behind by a `Destroy` this service did not perform would permanently cost one of the
+	 * `PICKUP_MAX_COUNT` slots — a pad that is never replaced and never explained.
+	 */
+	private pruneDestroyed(): void {
+		for (let index = this.live.size() - 1; index >= 0; index--) {
+			if (this.live[index].Parent === undefined) {
+				this.live.remove(index);
+			}
+		}
+	}
+
 	/** Destroys every live pad, and anything tagged `pickup` that outlived the bookkeeping. */
 	private clearPickups(): void {
 		const tagged = CollectionService.GetTagged(TAGS.pickup);
@@ -501,11 +549,11 @@ export class PickupService implements OnStart {
 	}
 
 	/**
-	 * The belt the cluster is laid out on: the first tagged belt that is still in the world.
+	 * The belt the pads are laid out on: the first tagged belt that is still in the world.
 	 *
-	 * First rather than nearest, because a cluster belongs to a belt and this service has no point to be near —
+	 * First rather than nearest, because the pads belong to a belt and this service has no point to be near —
 	 * unlike the spawner's `nearestBeltTo`, there is no ball to measure from. With more than one belt the scene
-	 * would need a statement about which one the pickups belong to, and that statement does not exist yet;
+	 * would need a statement about which one the pads belong to, and that statement does not exist yet;
 	 * picking the first is honest about that rather than pretending to choose.
 	 */
 	private findBelt(): BasePart | undefined {
