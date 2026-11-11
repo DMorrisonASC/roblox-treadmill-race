@@ -35,16 +35,28 @@ export const MOTION_BLUR_FADE_SECONDS = 0.5;
  *
  * ## Why this is not `effectScaleFor(ball)`, and why it is not `VFX_SCALE_MULTIPLIER`
  *
- * `effectScaleFor` is `ball.Size.X / 2 / BASE_BALL_RADIUS * VFX_SCALE_MULTIPLIER` — a **ball-relative** ratio whose output
- * at a 1-stud ball is `0.1`. It exists because the VFX pack was drawn against a 0.5-stud radius and every trail has to be
- * shrunk to fit a body. This effect is not drawn on a body: it is drawn around the `EliminationZone`, which is tens of studs
- * across and was authored *in place*. Feeding it a ball ratio would render it at a tenth of its designed size, and there is
- * no ball anywhere in this controller to read a radius from.
+ * `effectScaleFor(ball, multiplier)` is `ball.Size.X / 2 / BASE_BALL_RADIUS * multiplier` — a **ball-relative** ratio whose
+ * output at a 1-stud ball is a tenth of that effect's multiplier. It exists because the VFX pack was drawn against a
+ * 0.5-stud radius and every trail has to be shrunk to fit a body. This effect is not drawn on a body: it is drawn around the
+ * `EliminationZone`, which is tens of studs across and was authored *in place*. Feeding it a ball ratio would render it at a
+ * tenth of its designed size, and there is no ball anywhere in this controller to read a radius from.
  *
- * `VFX_SCALE_MULTIPLIER` is the other tempting number and the worse one. Its docblock argues that it is one number for one
- * *kind* of effect — the ball trails — and that the whole point of sharing it is that the two trails cannot drift apart
- * (item 101). Reusing it here would silently couple a zone overlay to two ball effects: retuning the trails would resize the
- * arena effect, and nobody looking at either number would know.
+ * The other tempting number, the ball effects' multiplier, is the worse one — and since item 177 there is no single one to
+ * reach for: each ball effect has its own in `shared/config/`. Reusing any of them here would silently couple a zone overlay
+ * to a ball effect: retuning a trail would resize the arena effect, and nobody looking at either number would know.
+ *
+ * **It takes no heading offset either** (item 178). `motionBlurCloneFrame` composes a position from the `EliminationZone` and
+ * a rotation **from the asset**, so a "belt-ward + N degrees" offset would have nothing to be relative to — the effect is not
+ * aimed at the belt's start and never was. The lever a designer already has works here and does not work on the trails:
+ * rotating this asset in Studio **is** honoured, because this clone keeps the authored rotation. So the answer for this
+ * effect is "rotate the asset", and adding an offset would create a second, conflicting knob over the same property.
+ *
+ * **Its reference length is the asset itself, which is why this number is not in a ball-relative config.** Every ball effect
+ * scales `ballRadius / BASE_BALL_RADIUS * multiplier`, so its number means "design radii above a 0.5-stud ball". This one has
+ * no ball and no length in the scene to be relative to: it draws the asset where the asset was authored, inside a zone tens of
+ * studs across, so `1` means "the authored geometry, unchanged" and any other value is a plain magnification of that. That is a
+ * meaningful reference — it is just not a length, which is why it stays here beside the ramp constants it belongs with rather
+ * than in a fourth config file that would only hold a number already documented one paragraph below it.
  *
  * So the multiplier is local, defaults to `1` (authored), and is applied through `scaleEffect` — the shared five-property
  * implementation — rather than by writing a second scale routine. A designer who wants the effect bigger changes this one

@@ -246,6 +246,7 @@ and accept that `ghost` then has no mechanism.
 | ball-ball hit burst | `Remotes.HitEffect` (server, per contact) | `hit-effect-controller` | `assets.vfx.hitEffect` (a `BasePart` with emitters) | `Workspace.HitEffects` folder | `Debris` at `LIFETIME_SECONDS + 0.15` |
 | wind trail (`windBoost`) | `Boosted` attribute change | `wind-boost-controller` | `assets.vfx.windBoost` | clone parented **to the ball** | disabled/destroyed when the attribute goes false |
 | tail wind (`tailWind`) | `TailWind` attribute change | `tail-wind-controller` | `assets.vfx.tailWind` | clone parented to the ball | same |
+| *(both trails and the burst)* | orientation and scale | — | — | — | face the belt's **start** (`vfxForward`), size from the ball (`effectScaleFor(ball, ownMultiplier)` / `effectScaleForRadius(radius, ownMultiplier)`), each tuner in `shared/config/` |
 | arena motion blur | phase `Playing` | `motion-blur-controller` | `assets.vfx.motionBlur` | `Workspace` folder, placed at the `EliminationZone` | one clone for the phase; emitter `Rate` ramped 0 → authored → 0 |
 | ball phantom (texture spin) | every frame per ball | `ball-render-controller` | none — a `Part` + copies of the ball's six face textures | parented to the ball, named `BALL_PHANTOM_NAME` | follows the ball; normalises its basis every 300 frames |
 | pickup sprite + ring | phase / pickup spawn | `pickup-sprite-controller` | `pickupSprite` instance **or** `PICKUP_SPRITE_ASSET_ID` | a `BillboardGui` per pad, built per client | destroyed with the pad |
@@ -267,6 +268,30 @@ agent looking for its controller will not find one.
   you write either attribute from anywhere else, that guarantee is gone. Both use `vfx-scale.ts`
   (`effectScaleFor` / `scaleEffect`) so their size follows the ball's size — the motion blur and the confetti deliberately do
   **not**, because neither is attached to a ball.
+- **orientation** — both trails take the ball's **position**, the **belt's** yaw (`vfxForward`, which is `-RightVector`, i.e.
+  toward the start) and the **asset's** tilt, via `vfxFrameFor` (item 176). Item 97's rule — that the ball's own rotation is
+  never read — still holds; only the yaw half changed. Before a belt replicates the old authored-rotation behaviour is kept.
+  The belt is resolved through [`client/belt-frame.ts`](../src/client/belt-frame.ts), cached and invalidated by the belt's
+  `Parent` going nil. Its heading offset lives in its own config beside the scale, for the same reason — see the heading-offset
+  trap below.
+- **burst size** — the server sends the **larger** of the two bodies' radii as a second remote argument, and the client scales
+  the clone with `effectScaleForRadius(radius, HIT_EFFECT_SCALE_MULTIPLIER)`. An older server omits the radius and the burst
+  draws at the authored size; an older client ignores the extra argument. The per-particle `Size` ramp is *not* scaled — it is
+  particle growth in studs, not the clone's size, and the two compose.
+- **heading offsets** — a trail's heading is `vfxFrameFor`'s belt-ward forward **turned about the frame's own up** by that
+  effect's `*_HEADING_OFFSET_DEGREES` (`vfxHeadingOffset`, item 178). Both ship at `0`. This exists because a Studio rotation
+  of a *trail* asset about the vertical axis does nothing: the composition replaces the yaw. `+90` turns the frame's
+  `LookVector` from `-Z` toward `-X`; the four useful values are `0` (home), `180` (away), `±90` (across). The **hit burst and
+  the motion blur deliberately have no offset**: the burst is posed at the identity rotation (its asset root's rotation is
+  discarded), and the blur's rotation comes from its asset, so rotating that asset in Studio already works. Neither has a
+  belt-ward forward for an offset to be measured from.
+- **one tuner per effect** — each ball effect's multiplier lives in its own config: `shared/config/windBoost.config.ts`,
+  `tailWind.config.ts`, `hitEffect.config.ts`, alongside the asset name. All three still share the *function* and the divisor
+  (`BASE_BALL_RADIUS`, in `tuning.ts`), so they cannot disagree about how to scale or what a design radius is — only about how
+  much. They are **not comparable by eye**, though all three currently read `0.1`: that number means "design radii above a
+  0.5-stud ball", so a 20-stud ball draws each at `20 x 0.1 = 2x` authored. The motion blur is the exception and is not
+  ball-relative at all — its `MOTION_BLUR_SCALE` (`1` = authored) lives in `shared/motion-blur.ts` because its reference is the
+  asset itself.
 - **motion blur** — one clone for the whole arena, at the `EliminationZone`, alive only in `Playing`; reads
   [`shared/motion-blur.ts`](../src/shared/motion-blur.ts) for its ramp maths. Its `Rate` ramp is a tween on emitters, so it is the
   only effect that is "on" without being triggered.

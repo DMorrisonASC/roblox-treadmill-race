@@ -79,9 +79,13 @@ describe("shoveStep", () => {
 	it("moves a body about speed x time constant in total", () => {
 		// Summing the per-tick displacement of a decaying shove is the distance a ball actually travels sideways: the
 		// number quoted in `BALL_COLLISION_SHOVE_SPEED`'s docblock.
+		// Enough steps to cover ten time constants, so the residual tail is under `1e-4` of the total. A shorter loop stops
+		// while the shove is still moving and lands *below* `speed * decay`, which is the opposite of what the discrete sum
+		// does once it has run out.
+		const steps = math.ceil((BALL_COLLISION_SHOVE_DECAY_SECONDS * 10) / DT);
 		let travelled = 0;
 		let current = new Vector3(0, 0, BALL_COLLISION_SHOVE_SPEED);
-		for (let step = 0; step < 240; step++) {
+		for (let step = 0; step < steps; step++) {
 			travelled += current.Z * DT;
 			current = shoveStep(current, DT);
 		}
@@ -131,8 +135,11 @@ describe("the shove state", () => {
 		expect(second.Z > 0).toBe(true);
 		expect(second.Z < first.Z).toBe(true);
 
-		// Past the epsilon the entry is deleted rather than carried forever; a body that has settled reads zero.
-		for (let step = 0; step < 240; step++) {
+		// Past the epsilon the entry is deleted rather than carried forever; a body that has settled reads zero. Ten time
+		// constants rather than a fixed step count, so the assertion does not silently stop working when the decay constant
+		// is retuned — that is exactly how this test broke once already.
+		const steps = math.ceil((BALL_COLLISION_SHOVE_DECAY_SECONDS * 10) / DT);
+		for (let step = 0; step < steps; step++) {
 			lateralShoveFor(body, DT);
 		}
 		expect(lateralShoveFor(body, DT).Magnitude).toBe(0);

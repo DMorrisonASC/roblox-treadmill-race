@@ -970,10 +970,14 @@ export const BALL_COLLISION_POP_UPWARD_SPEED = 30;
  *
  * ## The displacement this buys
  *
- * A shove of `s` decaying with time constant `T` moves a body `s * T` studs in total. At `5` and
- * `BALL_COLLISION_SHOVE_DECAY_SECONDS = 0.3` that is **1.5 studs** — one and a half ball diameters, on a 12-stud belt whose
- * lanes sit two apart. Large enough to read as a knock at the belt camera, small enough that one contact cannot carry a
- * ball into the neighbouring lane's resting spot.
+ * A shove of `s` decaying with time constant `T` moves a body `s * T` studs in total. At `10` and
+ * `BALL_COLLISION_SHOVE_DECAY_SECONDS = 1` that is **10 studs** on a belt `173` wide, against a 20-stud ball — visible as a
+ * knock rather than as a nudge, and about 2.8 studs per second at the peak, which is below `BELT_SPEED` so the sideways
+ * motion never outruns the along-belt picture.
+ *
+ * This was `5` / `0.3` (1.5 studs) when it shipped in item 175, against 1-stud balls: 1.5 studs is one and a half *ball
+ * diameters* there, and a tenth of one on a 20-stud ball, which is why it was retuned with the size change. The pair is one
+ * displacement (`s * T`), so raising either without the other moves twice.
  *
  * The sway's own position correction (`SWAY_TRACK_SECONDS = 1.5`) then walks the ball back to its wave, so the shove
  * settles instead of permanently changing lane.
@@ -983,9 +987,11 @@ export const BALL_COLLISION_SHOVE_SPEED = 10;
 /**
  * **Placeholder.** Time constant of a contact shove, in seconds.
  *
- * Exponential: the shove is at 37% of its peak after one of these, 14% after two, and gone after about three. Short enough
- * that the knock reads as a hit rather than a slide, long enough that it survives more than a frame at 60 Hz — a single
- * tick would move a body `5 / 60 = 0.08` studs, which is invisible, which is the complaint this constant answers.
+ * Exponential: the shove is at 37% of its peak after one of these, 14% after two, and effectively gone after five. Long
+ * enough that the knock reads as a slide across the belt rather than as a puff, and long enough that the peak itself is not
+ * a single frame — a single tick would move a body `speed / 60` studs, which is invisible at any ball size.
+ *
+ * Retuned from `0.3` with the ball-size change; see `BALL_COLLISION_SHOVE_SPEED` for why the two move together.
  */
 export const BALL_COLLISION_SHOVE_DECAY_SECONDS = 1;
 
@@ -1163,23 +1169,15 @@ export const BALL_PHANTOM_NAME = "BallPhantom";
 /**
  * **Placeholder.** The ball radius, in studs, that the VFX pack was drawn against.
  *
- * The two effect controllers that scale a cloned asset (`windBoost`, `tailWind`) divide the ball's actual radius by this and
- * multiply every distance in their clone by the result, so changing the ball's `Size` in `ball-spawner-service` resizes the
- * effects without touching an asset or a controller. It lives here rather than in either controller because it is a property of
- * **the pack**, not of one effect: a single number both read is one number that can go stale, and it goes stale for both at
- * once.
+ * Every ball effect divides the contact's radius by this and multiplies every distance in its clone by the result, so changing
+ * the ball's `Size` in `ball-spawner-service` resizes the effects without touching an asset or a controller. It lives here
+ * rather than in a config file because it is a property of **the pack**, not of one effect: it is the one number all three
+ * effects must agree on, and a copy per config would let them disagree about what a design radius is.
+ *
+ * **The per-effect multiplier that rides on top of it moved out of this file** (item 177). `VFX_SCALE_MULTIPLIER` used to sit
+ * below, shared by every cloned effect; it is deleted, and each effect's own number now lives in its own config
+ * (`shared/config/windBoost.config.ts`, `tailWind.config.ts`, `hitEffect.config.ts`). The reason is short: one shared number
+ * meant "make the hit burst legible" also resized both trails, so the value was left untouched twice. See
+ * `shared/vfx-scale.ts`, whose item 101 docblock is rewritten in place to say what changed.
  */
 export const BASE_BALL_RADIUS = 0.5;
-
-/**
- * **Placeholder.** The one scale every cloned VFX effect is drawn at, on top of its ball ratio.
- *
- * `0.1` is the value `windBoost` was tuned to **in Studio**: at `1` the pack's effects are drawn for a ball hundreds of times
- * larger than a 1-stud body and read as a sheet of particles across the arena. It is single and shared because item 101 found
- * the cost of two: `windBoost` at `0.1` beside `tailWind` at `1` put a tail wind ten times the size of the boost trail on the
- * same ball, with both files looking correct. See `shared/vfx-scale.ts`.
- *
- * **Placeholder** in the honest sense: this is a starting point judged by eye, and the number to change is this one ? both
- * effects move together, which is the point.
- */
-export const VFX_SCALE_MULTIPLIER = 0.1;

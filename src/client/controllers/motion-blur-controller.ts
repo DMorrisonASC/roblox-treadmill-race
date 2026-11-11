@@ -424,7 +424,8 @@ export class MotionBlurController implements OnStart {
 		}
 
 		// **The scale, off-world, through the shared five-property implementation** (item 101). `MOTION_BLUR_SCALE` is this
-		// effect's own number and not `VFX_SCALE_MULTIPLIER`, which belongs to the ball trails — see its docblock.
+		// effect's own number — since item 177 every ball effect has its own in `shared/config/`, and none of them is this
+		// one. See the constant's docblock for why a zone overlay is not ball-relative.
 		scaleEffect(clone, MOTION_BLUR_SCALE);
 
 		// **`CFrame` before `Parent`.** `Clone()` copies the template's transform; parenting does not re-base it and the clone is

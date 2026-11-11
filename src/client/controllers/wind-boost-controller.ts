@@ -1,9 +1,14 @@
 import { CollectionService, ReplicatedStorage, RunService } from "@rbxts/services";
+import { beltForward } from "client/belt-frame";
 import { Controller, OnStart } from "@flamework/core";
 import { BOOSTED_ATTRIBUTE } from "shared/attributes";
 import { TAGS } from "shared/tags";
-import { VFX_SCALE_MULTIPLIER } from "shared/tuning";
-import { effectScaleFor, scaleEffect } from "shared/vfx-scale";
+import {
+	WIND_BOOST_ASSET_NAME,
+	WIND_BOOST_HEADING_OFFSET_DEGREES,
+	WIND_BOOST_SCALE_MULTIPLIER,
+} from "shared/config/windBoost.config";
+import { effectScaleFor, scaleEffect, vfxFrameFor, vfxHeadingOffset } from "shared/vfx-scale";
 
 /**
  * The wind-boost effect's name in `ReplicatedStorage`, and the whole of the contract with it: a `BasePart` carrying an
@@ -11,7 +16,10 @@ import { effectScaleFor, scaleEffect } from "shared/vfx-scale";
  * asset, never substitutes it, and never names an asset id — if the instance is missing, the round is misconfigured and
  * says so once.
  */
-const ASSET_NAME = "windBoost";
+// **The asset name and the scale multiplier now live in the effect's own config file** (item 177). This controller is the
+// behaviour; `shared/config/windBoost.config.ts` is the tuner — the name the Studio asset is authored under and the one number
+// a designer changes. The two halves of "what is this effect" no longer sit in different files.
+const ASSET_NAME = WIND_BOOST_ASSET_NAME;
 
 /**
  * The wind trail: a persistent effect that follows every ball at or above belt speed.
@@ -114,7 +122,7 @@ export class WindBoostController implements OnStart {
 		// how that is noticed rather than inferred. It is also how a `windBoost` that ended up somewhere other than beside
 		// `hitEffect` becomes visible in one line instead of as a missing effect.
 		print(
-			`[WindBoost] mounted on ${found.GetFullName()} (${found.ClassName}) scale=${VFX_SCALE_MULTIPLIER} (shared, see shared/vfx-scale.ts)`,
+			`[WindBoost] mounted on ${found.GetFullName()} (${found.ClassName}) scale=${WIND_BOOST_SCALE_MULTIPLIER} offset=${WIND_BOOST_HEADING_OFFSET_DEGREES}deg (own tuners, see shared/config/windBoost.config.ts)`,
 		);
 
 		// Both discovery paths, for the reason `marker-spin-controller` keeps both: the tag signal is the one that works,
@@ -210,15 +218,15 @@ export class WindBoostController implements OnStart {
 		clone.CanTouch = false;
 		clone.Transparency = 1;
 
-		// **Position from the ball, rotation from the asset (item 97).** The first version copied `ball.CFrame` wholesale and
-		// the effect spun: a ball spawns with a random tumble (`randomSpawnRotation` in the spawner) and then rolls, so its
-		// rotation is a per-body accident. The trail's orientation is a *design* — the one the asset was built with — and it
-		// has to be applied unchanged or the effect tumbles with the body it is attached to.
+		// **Position from the ball, yaw from the belt, tilt from the asset (items 97 and 176).** The first version copied
+		// `ball.CFrame` wholesale and the effect spun: a ball spawns with a random tumble (`randomSpawnRotation` in the
+		// spawner) and then rolls, so its rotation is a per-body accident. Item 97 fixed that by taking the asset's rotation
+		// whole; item 176 overrides the yaw half so every trail faces the belt's start. See `frameFor`.
 		clone.CFrame = this.frameFor(ball);
 
 		// **The scale comes from `shared/vfx-scale.ts`**, which owns both the arithmetic and the one multiplier ? item 101 found
 		// that a copy of each per controller had already drifted tenfold between the two effects.
-		scaleEffect(clone, effectScaleFor(ball));
+		scaleEffect(clone, effectScaleFor(ball, WIND_BOOST_SCALE_MULTIPLIER));
 
 		clone.Parent = ball;
 		this.trails.set(ball, clone);
@@ -240,9 +248,28 @@ export class WindBoostController implements OnStart {
 	 * `CFrame.new(ball.Position) * rotation` rather than `CFrame.new(ball.CFrame.Position, ball.CFrame.Position + …)`: the
 	 * multiply composes the authored basis onto a translation-only frame, so no look-vector arithmetic is needed and the
 	 * asset's exact rotation matrix (including any roll the designer gave it) survives untouched.
+	 *
+	 * **The paragraph above is superseded by item 176, and only its second half.** The ball's rotation is still never read —
+	 * that is the half that was right, and it is why the trail does not tumble. What changed is the *yaw*: the asset's
+	 * authored yaw points wherever its author left it inside `ReplicatedStorage`, so every trail faced an arbitrary
+	 * direction. The yaw now comes from the belt (`vfxForward`), and the asset contributes only its **tilt**, via
+	 * `vfxFrameFor`. Before a belt replicates — a real window, the log shows `found=0` before bind — the old behaviour is
+	 * kept rather than guessing a direction and snapping when the belt arrives.
 	 */
 	private frameFor(ball: BasePart): CFrame {
-		return new CFrame(ball.Position).mul(this.assetRotation);
+		const forward = beltForward();
+		if (forward === undefined) {
+			return new CFrame(ball.Position).mul(this.assetRotation);
+		}
+
+		// The heading offset is applied **after** the composition, not inside it: `vfxFrameFor` answers "which way is home and
+		// which way is up", and the offset is this effect's answer to "and how far off home do I point". Keeping the two
+		// separate means the shared direction rule has one definition and each effect has one number, which is the same split
+		// item 177 made for scale.
+		return vfxHeadingOffset(
+			vfxFrameFor(ball.Position, forward, this.assetRotation),
+			WIND_BOOST_HEADING_OFFSET_DEGREES,
+		);
 	}
 
 	/**

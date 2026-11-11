@@ -1,9 +1,14 @@
 import { CollectionService, ReplicatedStorage, RunService } from "@rbxts/services";
+import { beltForward } from "client/belt-frame";
 import { Controller, OnStart } from "@flamework/core";
 import { TAIL_WIND_ATTRIBUTE } from "shared/attributes";
 import { TAGS } from "shared/tags";
-import { VFX_SCALE_MULTIPLIER } from "shared/tuning";
-import { effectScaleFor, scaleEffect } from "shared/vfx-scale";
+import {
+	TAIL_WIND_ASSET_NAME,
+	TAIL_WIND_HEADING_OFFSET_DEGREES,
+	TAIL_WIND_SCALE_MULTIPLIER,
+} from "shared/config/tailWind.config";
+import { effectScaleFor, scaleEffect, vfxFrameFor, vfxHeadingOffset } from "shared/vfx-scale";
 
 /**
  * The tail-wind effect's name in `ReplicatedStorage`, and the whole of the contract with it: a `BasePart` carrying an
@@ -11,7 +16,9 @@ import { effectScaleFor, scaleEffect } from "shared/vfx-scale";
  * creates the asset, never substitutes it and never names an asset id — if the instance is missing, the round is
  * misconfigured and says so once.
  */
-const ASSET_NAME = "tailWind";
+// **The asset name and the scale multiplier now live in the effect's own config file** (item 177) — see
+// `shared/config/tailWind.config.ts`, whose header explains why it is not the wind-boost file despite sharing this formula.
+const ASSET_NAME = TAIL_WIND_ASSET_NAME;
 
 /**
  * The tail trail: a persistent effect on every ball that is **in regular motion** — losing ground, visibly rolling, not boosted.
@@ -97,7 +104,7 @@ export class TailWindController implements OnStart {
 
 		// The full path and the class, so a Studio run proves *which* instance was picked rather than leaving it to be inferred.
 		print(
-			`[TailWind] mounted on ${found.GetFullName()} (${found.ClassName}) scale=${VFX_SCALE_MULTIPLIER} (shared, see shared/vfx-scale.ts)`,
+			`[TailWind] mounted on ${found.GetFullName()} (${found.ClassName}) scale=${TAIL_WIND_SCALE_MULTIPLIER} offset=${TAIL_WIND_HEADING_OFFSET_DEGREES}deg (own tuners, see shared/config/tailWind.config.ts)`,
 		);
 
 		// Both discovery paths, for the reason the other two effect controllers keep both: the tag signal is the one that works,
@@ -180,7 +187,7 @@ export class TailWindController implements OnStart {
 
 		// **The same call `windBoost` makes, from the same module** (item 101): one multiplier, one implementation of the
 		// five-property scale, so the two effects cannot be drawn at different sizes again.
-		scaleEffect(clone, effectScaleFor(ball));
+		scaleEffect(clone, effectScaleFor(ball, TAIL_WIND_SCALE_MULTIPLIER));
 
 		clone.Parent = ball;
 		this.trails.set(ball, clone);
@@ -211,9 +218,25 @@ export class TailWindController implements OnStart {
 		this.trails.delete(ball);
 	}
 
-	/** The ball's **position**, the asset's **authored rotation**. The ball's own rotation is never read. */
+	/**
+	 * The ball's **position**, the belt's **forward direction**, the asset's **tilt**. The ball's own rotation is never
+	 * read.
+	 *
+	 * The middle term is item 176: the asset's authored yaw is wherever its author left it in `ReplicatedStorage`, so two
+	 * trails of the same kind faced different ways and neither faced anything meaningful. `vfxFrameFor` keeps the asset's
+	 * roll (its `UpVector` is passed as `lookAlong`'s `up`) and takes the yaw from the belt. Until a belt replicates the
+	 * previous behaviour is kept rather than guessing.
+	 */
 	private frameFor(ball: BasePart): CFrame {
-		return new CFrame(ball.Position).mul(this.assetRotation);
+		const forward = beltForward();
+		if (forward === undefined) {
+			return new CFrame(ball.Position).mul(this.assetRotation);
+		}
+
+		return vfxHeadingOffset(
+			vfxFrameFor(ball.Position, forward, this.assetRotation),
+			TAIL_WIND_HEADING_OFFSET_DEGREES,
+		);
 	}
 
 	/**

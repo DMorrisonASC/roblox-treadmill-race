@@ -4701,3 +4701,198 @@ unchanged — the new file is a plain module, not a controller or service.
 term to the sway's write makes a shoved ball re-enter its wave smoothly or visibly fight it; and whether the pile-up gains
 chatter now that balls are knocked across each other's paths. The `[Powers] shove` line reports the speed and direction
 recorded, so a run distinguishes "not recorded" from "recorded and invisible".
+
+## 176. Ball effects face the belt's start, and the burst is sized from the ball
+
+**The direction, from the source rather than from a prompt's claim.** `stepBallSpeeds` writes the along-belt velocity as
+`right.mul(-relative)` with `right = belt.CFrame.RightVector` and `relative = BALL_SPEED - BELT_SPEED`. A speed only decays,
+so `relative` is negative for most of a ride and `-relative` is positive: the **elimination** direction is `+RightVector`,
+and **start-ward is `-RightVector`**. The log confirms it on this scene: `rightVector = (0, 0, -1)` with belt-local X running
+`-135` at spawn to `+168` at the exit. So `vfxForward(beltCFrame) = beltCFrame.RightVector.mul(-1)`, and it is written
+against the belt's basis rather than world axes because this fixture's belt axis has changed between rounds (an earlier one
+ran along X). That difference is precisely what makes a world-axis sign silent and wrong.
+
+**One definition, in `shared/vfx-scale.ts`.** `vfxForward` is the single helper; both trails call `vfxFrameFor(position,
+forward, authoredRotation)`, which is `CFrame.lookAlong` with the asset's own `UpVector` as `up`. Decision and cost: a plain
+`lookAlong`/`lookAt` with the default up would force world up and discard the asset's roll in every case, so the authored
+`UpVector` is passed instead. The residual cost is that an up vector is only meaningful perpendicular to the look direction,
+so whatever part of the asset's up lies along the new forward is projected away — for an asset authored flat (up `+Y`,
+forward horizontal) that is a **no-op**, and the test asserts both that and the tilted case.
+
+**The belt, on the client.** New `src/client/belt-frame.ts`: one cached `GetTagged(TAGS.treadmillBelt)` walk, invalidated by
+the belt's `Parent` going nil (the same rule `marker-spin-controller` uses), asked once per ball per frame. Before any belt
+replicates — a real window, the log shows `[BeltScroll] … found=0` before bind — it returns `undefined` and each trail keeps
+its previous authored-rotation frame rather than guessing a direction that would snap when the belt arrived. Two older
+copies of that walk (`ball-render-controller`, `marker-spin-controller`) answer a different question and were not touched.
+
+**Item 97 rewritten, not deleted.** Its rule had two halves. "Never read the ball's rotation" is still right and still why a
+trail does not tumble; "take the asset's rotation whole" is what produced arbitrary headings, and both trails now carry the
+override in place.
+
+**The burst size.** `broadcastHit` gained a second remote argument: the **larger** of the two bodies' radii (a contact has two
+bodies, and an effect smaller than the biggest thing in the contact reads as a bug; the average would be smaller than one by
+construction). A second argument rather than a changed first one is the mixed-deploy-safe shape — Lua ignores extra
+arguments, so an older client draws an unscaled burst rather than nothing, and a new client against an older server reads
+`nil` and also draws unscaled. `effectScaleForRadius` is the same formula a trail uses, extracted so the arithmetic is not
+written twice (item 101's lesson). The per-particle `Size` ramp is untouched, and `scaleEffect` is deliberately called
+**before** the loop that rewrites it — the ramp is particle growth (studs), a different property that composes with the
+clone's scale; reversing the two blocks would silently drop the scaling of `Size` while keeping `Speed`, `Acceleration` and
+the attachment offsets.
+
+**`VFX_SCALE_MULTIPLIER` reported, not changed.** It is `0.1`. `effectScaleForRadius` is
+`radius / BASE_BALL_RADIUS * multiplier`, so a **20-stud** ball (radius `10`, twenty design radii) draws at
+`20 * 0.1 = 2.0` — twice the authored size, on a ball twenty times the size the pack was drawn for. At `1` the same effect
+draws at `20.0`, i.e. the authored geometry mapped exactly onto the ball, which is what "authored against a 1-stud ball"
+means. `1` is the semantically correct value and `0.1` is a deliberate shrink; the choice is visual, so the number was left
+alone for the designer. It is shared by both trails and now the burst, so it is one decision for three effects. **On this
+20-stud ball `0.1` is very likely too small** — the trails are drawn at a fifth of the ball's width.
+
+**Stale constants corrected.** `BALL_COLLISION_SHOVE_SPEED` / `_DECAY_SECONDS` had been retuned to `10` / `1` (10 studs of
+displacement) for the 20-stud ball, and their docblocks still stated `5` / `0.3` / 1.5 studs. The arithmetic was rewritten
+and the old pair recorded as history. Two `lateral-shove` tests that hard-coded a 240-step loop were changed to iterate
+`10 * decay` worth of time, because a fixed count silently stopped covering the tail when the constant grew — that is what
+had broken them.
+
+**Tests.** New `src/shared/vfx-scale.spec.ts` (12 cases): `vfxForward` on the identity frame, on the scene's
+`rightVector = (0,0,-1)` belt, and as the invariant `Dot(RightVector) = -1` under yaw — the identity case alone would pass a
+world-axis implementation. `vfxFrameFor` covers position, `LookVector` facing forward (asserted on `LookVector`, which is a
+part's **-Z**), authored tilt with its along-forward component removed, the flat-asset no-op, the degenerate parallel-up
+fallback, and the no-belt path. `effectScaleForRadius` covers the design radius, linearity (asserting the reported `2.0` at
+20 studs), and the `1` fallback for no size.
+
+**Validation:** `npm run build` passed. `npm test` passed with **424 tests** across 31 files (12 new; two `lateral-shove`
+cases rewritten, named above). `npm run lint` exited 0 with the same 55 pre-existing Prettier warnings in
+`src/shared/ui/viewport.ts`. Every touched file passes `prettier --check`; the full-tree check fails only on that file, which
+is untouched. `\uXXXX` search under `src/` returned no matches and `flamework.build` is unchanged — the new client module is
+a plain module, not a controller.
+
+**Studio-only:** whether the start-ward heading reads as "pointing home" or as backwards, which depends on how each asset was
+authored around its own `-Z`; whether `lookAlong` makes a flat-authored asset stand up; whether a burst at `2x` is legible at
+20 studs; and whether `VFX_SCALE_MULTIPLIER` should be `1`. The burst's log line now prints `radius=` and `scale=`, so a run
+shows what was drawn without inferring it.
+
+## 177. One scale tuner per ball effect, each in its own config file
+
+**The state this replaced, verified from source.** Every ball effect scaled through one number, and the three effects did not
+share a reference cleanly:
+
+| effect | controller | config today | call | reference length | value | at a 20-stud ball |
+| --- | --- | --- | --- | --- | --- | --- |
+| `windBoost` trail | `wind-boost-controller` | none (local `ASSET_NAME`) | `effectScaleFor(ball)` | `BASE_BALL_RADIUS` 0.5 | `0.1` | `2.0x` authored |
+| `tailWind` trail | `tail-wind-controller` | none (local `ASSET_NAME`) | `effectScaleFor(ball)` | `BASE_BALL_RADIUS` 0.5 | `0.1` | `2.0x` authored |
+| `hitEffect` burst | `hit-effect-controller` | none (local `EFFECT_ASSET_NAME`) | `effectScaleForRadius(radius)` | `BASE_BALL_RADIUS` 0.5 | `0.1` | `2.0x` authored |
+| `motionBlur` | `motion-blur-controller` | `MOTION_BLUR_SCALE` in `shared/motion-blur.ts` | `scaleEffect(clone, …)` | **the asset itself** | `1` | n/a — not ball-relative |
+| ball phantom | `ball-render-controller` | — | matches the ball by construction | the ball | — | 20 studs |
+| markers | `marker-spin-controller` | — | offsets are attributes relative to the body | the ball | — | scales with it |
+| pickup sprite | `pickup-sprite-controller` | — | `PICKUP_SPRITE_STUDS` | studs | `2.6` | unchanged |
+
+**`motionBlur` needed no ball tuner, and this is the fact the prompt wanted checked rather than assumed.** Its controller calls
+`scaleEffect(clone, MOTION_BLUR_SCALE)` **directly** — not through `effectScaleFor` — because the effect is drawn around an
+`EliminationZone` tens of studs across and was authored *in place*. `1` therefore means "the authored geometry, unchanged",
+which is a real and statable reference, but it is the asset rather than a length, and the number already lives beside the ramp
+constants it belongs with. A fourth config file holding only that number would have created a second home for it, so it was
+left alone and its docblock rewritten to say what its reference is.
+
+**What changed.** `effectScaleFor(ball, multiplier)` and `effectScaleForRadius(radius, multiplier)` take the multiplier as a
+**required** parameter — not defaulted, because a default is one effect's number silently applying to another, and a required
+parameter means a forgotten call site fails to compile rather than drawing at whatever was last decided. `VFX_SCALE_MULTIPLIER`
+is **deleted from `tuning.ts`**, not zeroed: it had no reader once each effect passed its own. `BASE_BALL_RADIUS` stays, and
+every config's docblock names it as the shared divisor.
+
+**Three config files under `src/shared/config/`**, following `transition.config.ts`'s shape: named exports, a `**Placeholder.**`
+on each tuned number, a docblock stating *what the number multiplies and what the reference length is*. Each holds its effect's
+asset name as well, so "what is this effect and how big is it" is one file rather than half a controller plus a config —
+which also makes the two trail files non-identical despite sharing a formula. `tailWind.config.ts`'s header says explicitly why
+it is not the wind-boost file: the two reach the same arithmetic because item 101 found two hand-copied implementations had
+drifted tenfold, but they are two assets driven by two attributes, and merging the numbers would re-create the coupling this
+item exists to break.
+
+**No retuning.** All three multipliers are `0.1`, which reproduces the exact size each effect drew before the split (`20 x 0.1
+= 2.0` at a 20-stud ball). That equality is a consequence of the preserve rule, not a design statement — the point is that the
+three are now three separate reads, which the spec asserts by moving one and checking the others.
+
+**Where the prompt was wrong.** (1) `economy.config.ts` is **not** in `src/shared/config/` — that folder held only
+`transition.config.ts`; `economy.config.ts` sits at `src/shared/`. (2) The trails' asset names were already local constants,
+not config values, so "whether they move" was a free choice rather than a migration. (3) The claim that the burst's number is
+"radius-relative while the trails' are width-relative" is **not true of the arithmetic**: `effectScaleFor` divides
+`ball.Size.X / 2` by `BASE_BALL_RADIUS`, so it is radius-relative on exactly the same divisor. What actually differs is the
+*provenance* of the radius — a live `BasePart` versus a number in the remote payload — and the config docblock says that
+instead of the stated distinction. (4) Item 101's docblock could not simply gain a sentence: its argument was specifically that
+the number should be shared, so it was rewritten in place to say what changed and why.
+
+**Tests.** `vfx-scale.spec.ts`'s `effectScaleForRadius` block now passes multipliers and gained an independence case: three
+effects at a 20-stud ball, all `2.0` (asserting the no-retuning rule), then one pushed to double its multiplier with the other
+two checked unchanged. The old assertions referencing the deleted constant are gone. `motion-blur.spec.ts`'s comment about
+`VFX_SCALE_MULTIPLIER` was updated; its assertion (`MOTION_BLUR_SCALE === 1`) is unchanged.
+
+**Validation:** `npm run build` passed. `npm test` passed with **425 tests** across 31 files (one net new). `npm run lint`
+exited 0 with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`. Every touched file passes
+`prettier --check`; the full-tree check fails only on that file. `\uXXXX` search under `src/` returned no matches;
+`flamework.build` is unchanged — three config modules and no controller or service added.
+
+**Studio-only:** whether three separate tuners at values that reproduce today's sizes look unchanged (they should — that is
+the point of preserving), whether the burst wants a different number from the trails now that it can have one, and whether
+`MOTION_BLUR_SCALE`'s `1` means anything visible. All four effects print their scale on their existing lines
+(`[WindBoost] … scale=`, `[TailWind] … scale=`, `[HitEffect] … scale=`, `[MotionBlur] … scale=`), so a run shows each value
+without inferring it.
+
+## 178. Each trail gets a heading offset; the burst and the blur get none, for different reasons
+
+**What survives into each clone, from source.**
+
+| effect | posed by | rotation kept | rotation discarded |
+| --- | --- | --- | --- |
+| `windBoost` | `vfxFrameFor(pos, forward, assetRotation)` | the asset's **`UpVector` only** (its tilt / roll, as `lookAlong`'s `up`, minus any component along the new forward) | the asset's **yaw**, and its position |
+| `tailWind` | same | same | same |
+| `hitEffect` | `clone.CFrame = carrier.CFrame`, `carrier.CFrame = new CFrame(position)` | **nothing** — the frame is at the **identity rotation** | the asset root's entire rotation |
+| `motionBlur` | `motionBlurCloneFrame(zone.CFrame, zone.Size.X, assetRotation)` | the **whole authored rotation**; position comes from the zone | nothing (position only) |
+
+So the earlier statement "rotating a trail asset in Studio about the vertical axis does nothing" is correct and is a
+property of `vfxFrameFor`: yaw is the component it replaces. Rotating about any other axis changes the `UpVector`, which *is*
+kept, so a pitch/roll edit visibly tilts the effect — which is the opposite of intuitive and worth recording.
+
+**`vfxHeadingOffset(frame, degrees)`** is `frame.mul(CFrame.Angles(0, math.rad(degrees), 0))` — **post**-multiplied, so the
+axis is the frame's own up. Pre-multiplying would rotate the world-space position too and slide the effect off the ball. Sign,
+as a literal rather than a claim: an identity frame's `LookVector` is `-Z`; `+90` leaves it on `-X` and `-90` on `+X`
+(`R_y(+90)` maps `+Z` to `+X`). On a belt whose start is `+Z`, `0` = home, `180` = away, `±90` = across, which are the four
+headings worth trying. **Zero returns the same frame instance**, not a recomposed near-identity, so "no offset" needs no
+branch anywhere.
+
+**Applied by the caller, not inside `vfxFrameFor`.** `frameFor` composes the frame and then turns it; `vfxFrameFor` keeps
+answering only "which way is home and which way is up". That is the same split item 177 made for scale, and it also keeps the
+pre-belt fallback path (asset rotation, no forward) free of a heading measured from a direction that does not exist yet.
+
+**Two effects deliberately get no offset.**
+
+- **`hitEffect` has no heading to offset.** Its clone is placed at the contact at the **identity rotation** — the assignment
+  `clone.CFrame = carrier.CFrame` discards the asset root's rotation, and the comment beside it said the clone "keeps the
+  asset's own `CFrame`", which was **wrong about the rotation half**; found while answering this question and corrected in
+  place. A number measured from belt-ward has nothing to measure from here. What a designer still controls is everything
+  *inside* the asset: child parts, attachment offsets and each emitter's `EmissionDirection` survive the clone, so those are
+  the things to rotate in Studio. Making the burst belt-ward is a composition change, not a tuner.
+- **`motionBlur` already honours a Studio rotation.** Its clone keeps the whole authored rotation, because its position comes
+  from the `EliminationZone` and its rotation from the asset (item 142). So rotating that asset is the lever, it works, and a
+  code offset would be a second conflicting knob over the same property. Its mount line already prints
+  `assetRotation=` for exactly this reason.
+
+**Where each offset lives, and why not in `vfx-scale.ts`.** `WIND_BOOST_HEADING_OFFSET_DEGREES` and
+`TAIL_WIND_HEADING_OFFSET_DEGREES` are in their own config files beside the scale multiplier and the asset name, shipping at
+`0`. A shared rotation table in `vfx-scale.ts` would re-create, for heading, exactly the coupling item 177 removed for scale:
+one number again, one effect's tuning moving another's. `vfx-scale.ts` keeps the *function*; each effect keeps its *number*.
+
+**Log lines.** The offset was added to the existing mount lines as `offset=Ndeg` on `[WindBoost]` and `[TailWind]` — no new
+line. `[HitEffect]` and `[MotionBlur]` print no offset because they have none.
+
+**Tests.** Six new cases in `vfx-scale.spec.ts`: zero returns the same frame (`toBe`, which is what catches a future rewrite
+to `mul(CFrame.Angles(0, 0, 0))`); `+90` maps `-Z` to `-X`; `-90` maps it to `+X`; `180` reverses; position and up are
+unchanged by a turn; and a 30-degree tilt keeps its own up under a 45-degree turn (the assertion that fails if the rotation is
+pre-multiplied or about world up). A seventh pins both shipped offsets at `0`. Two spec corrections came from running it:
+`Vector3` has no `Distance` member in the installed typings (`sub(...).Magnitude` instead).
+
+**Validation:** `npm run build` passed. `npm test` passed with **432 tests** across 31 files (seven new). `npm run lint` exited
+0 with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`. Every touched file passes `prettier --check`;
+the full-tree check fails only on that file. `\uXXXX` search under `src/` returned no matches; `flamework.build` is unchanged.
+
+**Studio-only:** whether `90`/`180`/`-90` land each trail pointing where the designer expects, and whether the kept `UpVector`
+makes a yaw offset read as a turn rather than a wobble; whether the two trails want the same number or different ones (they
+are separate for that reason); and whether the burst wants a belt-ward composition at all, which this round did not add.

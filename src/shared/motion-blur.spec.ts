@@ -93,9 +93,9 @@ describe("the effect's tuning", () => {
 	});
 
 	it("defaults to the asset's authored size", () => {
-		// Criterion: `MOTION_BLUR_SCALE` is **not** `VFX_SCALE_MULTIPLIER` (`0.1`) and **not** a ball ratio. `1` means the clone
-		// is drawn exactly as the designer built it, which is the only defensible default for an asset authored around a
-		// hand-placed zone rather than against a 0.5-stud ball.
+		// Criterion: `MOTION_BLUR_SCALE` is **not** any ball effect's multiplier (each is `0.1` in `shared/config/` since item
+		// 177) and **not** a ball ratio. `1` means the clone is drawn exactly as the designer built it, which is the only
+		// defensible default for an asset authored around a hand-placed zone rather than against a 0.5-stud ball.
 		expect(MOTION_BLUR_SCALE).toBe(1);
 	});
 });

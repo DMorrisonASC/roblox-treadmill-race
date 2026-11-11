@@ -3,13 +3,17 @@ import { Controller, OnStart } from "@flamework/core";
 import { HIT_EFFECT_REMOTE_NAME, REMOTES_FOLDER_NAME } from "shared/remotes";
 import { HIT_EFFECTS_FOLDER_NAME } from "shared/tuning";
 import { playHitSound } from "shared/ui/sounds";
+import { HIT_EFFECT_ASSET_NAME, HIT_EFFECT_SCALE_MULTIPLIER } from "shared/config/hitEffect.config";
+import { effectScaleForRadius, scaleEffect } from "shared/vfx-scale";
 
 /**
  * **The Studio asset's name in `ReplicatedStorage`, and the whole of the contract with it.** A `Part` containing an
  * `Attachment` containing one or more `ParticleEmitter`s. This file never creates it, never substitutes it and never
  * names an asset id: if the instance is missing, the round is misconfigured and says so.
  */
-const EFFECT_ASSET_NAME = "hitEffect";
+// **Both halves of "what is this effect" now live in its config file** (item 177): the name the Studio asset is authored
+// under, and the one scale number a designer changes. The controller keeps the behaviour.
+const EFFECT_ASSET_NAME = HIT_EFFECT_ASSET_NAME;
 
 /**
  * **Placeholder.** How long to wait for the `Remotes` folder and the hit-effect remote before giving up and saying so.
@@ -158,8 +162,12 @@ export class HitEffectController implements OnStart {
 		// event is *for*, and the sound is that same fact rendered a second time. **No client-side phase gate:** the server
 		// fires only from `onBallCollision`, which is behind `powersActive`, so this client plays what it is told. Asking
 		// the phase here would be asking a module for a fact the server already applied before it sent anything.
-		remote.OnClientEvent.Connect((position: unknown) => {
-			this.burst(position);
+		// **Two fields, and the second is optional at the type level because an older server will not send it.** `radius`
+		// arrives as `nil` from a server built before item 176, which `burst` reads as "no size reported" and draws at the
+		// asset's authored size. That is the same picture those clients had before, so a mixed deploy degrades to the old
+		// behaviour rather than to nothing.
+		remote.OnClientEvent.Connect((position: unknown, radius: unknown) => {
+			this.burst(position, radius);
 			playHitSound(os.clock());
 		});
 
@@ -185,7 +193,7 @@ export class HitEffectController implements OnStart {
 	 * own: an asset authored with `Enabled = true` and a non-zero `Rate` would otherwise have already started spitting
 	 * particles before this code could turn it off, and the burst would be a stream with a burst on top.
 	 */
-	private burst(position: unknown): void {
+	private burst(position: unknown, radius: unknown): void {
 		const asset = this.asset;
 		if (asset === undefined) {
 			return;
@@ -208,10 +216,18 @@ export class HitEffectController implements OnStart {
 		clone.Name = "Burst";
 		makeInert(clone);
 
-		// **The clone keeps the asset's own `CFrame`, and parenting does not move an anchored part.** This one line is the
-		// difference between a burst at the hit and a burst wherever the effect was authored in `ReplicatedStorage` — the
-		// template's own position, usually the origin, a hundred-odd studs from the arena. Cloning copies `CFrame`; it does
-		// not re-base it onto the new parent, and `makeInert` anchors it, so nothing else would ever move it.
+		// **The clone is placed at the contact and at the identity rotation, and both halves are deliberate.** This one line
+		// is the difference between a burst at the hit and a burst wherever the effect was authored in `ReplicatedStorage` —
+		// the template's own position, usually the origin, a hundred-odd studs from the arena. Cloning copies `CFrame`; it
+		// does not re-base it onto the new parent, and `makeInert` anchors it, so nothing else would ever move it.
+		//
+		// **The rotation half used to be described as "the asset's own `CFrame` kept", and that was wrong** (found in item
+		// 178 while asking whether this effect could take a heading offset). `carrier.CFrame` is `new CFrame(position)`, whose
+		// rotation is identity, so this assignment **discards** the asset root's rotation: the burst is drawn axis-aligned,
+		// not at the authored rotation and not belt-ward. That is why it has no heading offset — a number measured "from
+		// belt-ward" would be measuring from a direction this frame never took. What a designer still controls here is
+		// everything *inside* the asset: child parts, attachment offsets and each emitter's `EmissionDirection` survive the
+		// clone, so those are what to rotate in Studio. Making the burst belt-ward is a composition change, not a tuner.
 		clone.CFrame = carrier.CFrame;
 
 		for (const descendant of clone.GetDescendants()) {
@@ -219,6 +235,21 @@ export class HitEffectController implements OnStart {
 				makeInert(descendant);
 			}
 		}
+
+		// **The clone is scaled to the ball the contact involved (item 176).** Before this round the burst drew at whatever
+		// the asset authored, which on a 20-stud body is a dot: the pack was built against a 1-stud ball, so the authored
+		// geometry is a fraction of the thing it is supposed to describe.
+		//
+		// **Before the per-emitter `Size` loop below, and that order is load-bearing.** `scaleEffect` rebuilds each
+		// emitter's `Size` sequence from the asset's, and the loop then *replaces* that sequence with the designed ramp
+		// (`PARTICLE_SIZE_START`..`PARTICLE_SIZE_END`). That ramp is particle growth in studs and is deliberately not
+		// scaled — scaling it would make a bigger ball's particles start bigger *and* grow further, which is a different
+		// effect rather than the same one at a larger size. Reversing these two blocks would silently throw away the
+		// scaling of `Size` while keeping the scaling of `Speed`, `Acceleration` and the attachment offsets.
+		//
+		// A missing or non-positive `radius` (an older server, or a body whose `Size` had not replicated when the contact
+		// was reported) yields `1`, so the clone is drawn exactly as authored.
+		scaleEffect(clone, typeIs(radius, "number") ? effectScaleForRadius(radius, HIT_EFFECT_SCALE_MULTIPLIER) : 1);
 
 		const emitters = new Array<ParticleEmitter>();
 		for (const descendant of clone.GetDescendants()) {
@@ -268,7 +299,9 @@ export class HitEffectController implements OnStart {
 		// `[Powers] hit:` line proves the event was sent, and this one proves it arrived, where the carrier was placed and
 		// how many emitters were fired. If both print and the screen is still empty, the fault is in the asset (an emitter
 		// with no texture, or a lifetime of zero) rather than in this file.
-		print(`[HitEffect] burst at ${tostring(position)} emitters=${emitters.size()}`);
+		print(
+			`[HitEffect] burst at ${tostring(position)} emitters=${emitters.size()} radius=${tostring(radius)} scale=${tostring(typeIs(radius, "number") ? effectScaleForRadius(radius, HIT_EFFECT_SCALE_MULTIPLIER) : 1)}`,
+		);
 
 		Debris.AddItem(carrier, LIFETIME_SECONDS + CLEANUP_BUFFER_SECONDS);
 	}

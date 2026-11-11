@@ -94,7 +94,7 @@ export const SHAPE_POOL: ReadonlyArray<ShapePoolEntry> = [
 		// every future non-sphere: when a cylinder or a corner wedge is added, its behaviour is
 		// measured against this one, on this belt, at this `BeltSpeed`.
 		shape: Enum.PartType.Ball,
-		size: new Vector3(1, 1, 1),
+		size: new Vector3(20, 20, 20),
 		// **`power` used to live here and is deleted.** It was an optional `string` field, documented as "nothing
 		// reads this today", and by this round nothing still did: a body's power comes from `ChosenBallId` on the
 		// instance, through `powers.config.ts`, because the pool describes a *shape* and two balls of the same shape race

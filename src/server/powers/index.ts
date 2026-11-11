@@ -1062,7 +1062,18 @@ function broadcastHit(ball: BasePart, other: BasePart): void {
 	}
 
 	const midpoint = ball.Position.Lerp(other.Position, 0.5);
-	remote.FireAllClients(midpoint);
+
+	// **The larger of the two bodies, because a contact has two.** They can differ (a `decoy` twin is a copy, but a body
+	// can be reloaded or re-sized between rounds), and an effect smaller than the biggest thing in the contact reads as a
+	// bug — the alternative, the average, would be smaller than one of the two by construction. A radius rather than a
+	// `Size` so the client applies the same formula a trail does (`effectScaleForRadius`), instead of dividing by two in a
+	// second place.
+	//
+	// **A second argument, not a changed first one.** Lua ignores extra arguments, so a client built before this round
+	// draws an unscaled burst rather than nothing, and a client with this round's code reads `radius` and scales. The
+	// reverse pairing — an old server, a new client — reads `radius` as `nil`, which `burst` treats as "no size reported".
+	const radius = math.max(ball.Size.X, other.Size.X) / 2;
+	remote.FireAllClients(midpoint, radius);
 	print(`[Powers] hit: ball=${ball.GetFullName()} other=${other.GetFullName()} midpoint=${formatVector(midpoint)}`);
 }
 
