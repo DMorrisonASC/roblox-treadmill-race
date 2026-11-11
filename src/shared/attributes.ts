@@ -188,6 +188,23 @@ export const OWNER_USER_ID_ATTRIBUTE = "OwnerUserId";
 export const OWNER_DISPLAY_NAME_ATTRIBUTE = "OwnerDisplayName";
 
 /**
+ * The **lane this body was spawned into**, as an index into the spawner lane list — written once, at spawn, and never
+ * rewritten.
+ *
+ * ## Why it is recorded rather than derived (item 184)
+ *
+ * The question it answers is "does this lane already hold a body", and the only alternative is comparing the body's
+ * `Position` against each spawner's — which stops being true one frame after the spawn, because the whole point of a lane
+ * is that the body *leaves* it. A recorded index keeps answering after the body has ridden away, which is what makes the
+ * debug spawn's lane choice a read instead of a scene scan.
+ *
+ * It is a **label**, like `ChosenBallId`: nothing in the simulation branches on it, and no mechanic changes because of it.
+ * A body without one (a decoy twin, which never came from a lane choice of its own; or a body from an older build) simply
+ * is not counted as occupying anything.
+ */
+export const SPAWN_LANE_ATTRIBUTE = "SpawnLane";
+
+/**
  * The ball a body is racing as, this round.
  *
  * **Written before `Parent`, like the owner attributes, and for the same reason:** a body that existed in the world for

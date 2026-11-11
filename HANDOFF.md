@@ -4896,3 +4896,278 @@ the full-tree check fails only on that file. `\uXXXX` search under `src/` return
 **Studio-only:** whether `90`/`180`/`-90` land each trail pointing where the designer expects, and whether the kept `UpVector`
 makes a yaw offset read as a turn rather than a wobble; whether the two trails want the same number or different ones (they
 are separate for that reason); and whether the burst wants a belt-ward composition at all, which this round did not add.
+
+## 180. A round holds at most one competitor per bound spawner, players first
+
+**The counts as they were, from source.**
+
+| path | what it spawned | the expression | total with 1 player / 8 lanes |
+| --- | --- | --- | --- |
+| `spawnRoundCompetitors` | one body per connected (or enrolled) player | `math.min(players.size(), lanes)` | 1 |
+| `debugSpawnCompetitors` → `spawnBots` (key `4`) | one bot per bound spawner | `nextDebugOwners(spawner.getBoundSpawnerCount())` | 8 |
+| `forcePlaying` (key `3`, fresh) | players, then bots | `min(players, lanes)` **+** `lanes` | 9 |
+| `forcePlaying` (`Playing` restart) | same | same | 9 |
+| `forceWaiting` (key `2`, Live) | players (via `startWaitingRound`), then bots | same | 9 |
+| `forceWaiting` (key `2`, Studio) | players, then `spawnStudioBots` | `min(players, lanes)` + `lanes` | 9 |
+| intermission timer | `startWaitingRound("intermission elapsed", true)` → players + `spawnStudioBots` | `min(players, lanes)` + `lanes` (Studio, solo only) | 9 |
+
+**No per-round count constant exists**, and this was verified rather than repeated: `tuning.ts` has no `DEBUG_COMPETITORS`
+and no competitor-count constant of any kind; the only related number is `DEFAULT_MAX_LIVE_BALLS = 50` in
+`shared/attributes.ts`, which is a scene attribute on each spawner and a global body cap, not a round size.
+
+**One function, `remainingCompetitorSlots(liveCompetitors, spawnerCount)`** in a new pure module
+`src/server/competitor-slots.ts` — `math.max(0, spawnerCount - liveCompetitors)`. It could not live in `RoundService`
+because that file cannot be imported in the Jest runtime (its dependencies reach `DataStoreService`), which is the same
+reason `round-outcome.ts` and `debug-balls.ts` are modules. Both callers are methods of `RoundService`, so both reach it by
+`import` with no cycle.
+
+**Where the bound is applied, and why there rather than in `debugSpawnCompetitors`.** Both bounds sit in the two functions
+every path funnels through: `spawnRoundCompetitors` (players) and `spawnBots` (bots). `spawnBots` is the one funnel for
+**five** callers — key `4`, key `2` on Live, both key `3` branches, and `spawnStudioBots` — so bounding it there covers all
+of them; bounding `debugSpawnCompetitors` would have left the other four exactly as they were, which was the defect. In
+`spawnRoundCompetitors` the new bound is a **second** `math.min` term beside `min(players, lanes)`, which stays.
+
+**Decoys do not consume a competitor slot.** The live count is `getLiveBalls().size()`, and `liveBalls` is filled by
+`trackBall`, which only the player and bot paths call. A decoy is created by `BallSpawnerService.spawnDecoy`, is tracked by
+nobody, is filtered out by `getCompetitors()`, and cannot win — so a `decoy` ball makes a round spawn its **full** complement
+of real bodies. It still costs a `MaxLiveBalls` slot, which is unchanged.
+
+**The auto-bots order, verified.** In Studio `forceWaiting` calls `startWaitingRound` → `spawnRoundCompetitors` →
+`spawnStudioBots` (which fills to the cap) and then does **not** call `spawnBots` at all (`IS_STUDIO ? 0 : …`). On Live
+`spawnStudioBots` returns `0` and the later `spawnBots` sees whatever `startWaitingRound` left. So the auto-bots always run
+**first** and the second spawn finds the remainder — the reverse, which the prompt warns about, is not reachable from any
+call site. When the remainder is zero it now prints
+`[Round] debug spawn refused — no competitor slots (<reason>): live=N spawners=M` and returns `0`.
+
+**Where the prompt was wrong.** (1) **Parts 3 and 4 contradict each other**: `debugSpawnCompetitors` *is* key `4`'s handler
+(`DEBUG_SPAWN_REMOTE_NAME` → `debugSpawnCompetitors()`), so "cap `debugSpawnCompetitors`" and "key `4` bypasses the cap
+regardless" cannot both hold. Acceptance criteria 3–5 (7 / 4 / 0 for 1 / 4 / 8 players) are explicit and testable and are
+what the stated problem asks for, so they were implemented; key `4` is therefore bounded by the round's capacity, which
+still gives one per spawner on an **empty** round — the case criterion 6's "one per spawner" describes. Key `4`'s real
+remaining exemption is from the **player-count** bound: it fills every free slot rather than being limited by how many
+humans are connected. (2) The claim that two bodies land on one lane "because the spawn point's `X` is belt-derived while
+only `Z` comes from the spawner" is only half the mechanism: `spawnForRound` is **round-robin from lane `0`**, so a bot
+spawn after a player body starts at lane `0` again. Bounding the count does not fix that — with one player and seven bots the
+bodies still occupy lanes `0..6` with the player, leaving lane `7` empty — and the fix is lane choice, which was out of
+scope.
+
+**Tests.** New `src/server/test/competitor-slots.spec.ts`, six cases: empty belt, partial fill (1/4/7 live), exactly full,
+over-full (`9` and `50` live), zero lanes (including with live bodies), and a property sweep asserting the result is always
+in `0..lanes` for every pair up to `12`. No existing test asserted a count, so none changed.
+
+**Validation:** `npm run build` passed. `npm test` passed with **438 tests** across 32 files (six new). `npm run lint` exited
+0 with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`. Every touched file passes `prettier --check`;
+the full-tree check fails only on that file. `\uXXXX` search under `src/` returned no matches; `flamework.build` is unchanged
+— `competitor-slots.ts` is a plain module, not a controller or service.
+
+**Studio-only:** that 1 player + `3` gives eight bodies and 4 players + `3` gives eight; that `4` on a full belt now logs a
+refusal instead of adding a ninth; and that a solo Studio `Waiting` still fills the field to the cap rather than stopping
+short. The lane overlap persists — this item bounds how many balls may pile up, not whether two share a lane.
+
+## 181. The decoy twin spends a slot, so eight lanes means eight bodies
+
+**The report, and what the log proved.** "I see an extra ball spawn. there should be 8 ball" — and the count was correct:
+`[Round] debug spawn (debug key 3 restart): 7 competitors …, live=8` beside `[Round] spawn lane=0 owner=BestDefault …
+enrolled=true`. Eight competitors. What was nine was the **bodies**: the third press drew `decoy_ball`, and
+`[MarkerSpin] state bodies=9` with `body="Workspace.SpawnedBalls.Decoy"` names the ninth. Item 180 had decided a decoy twin
+does not *hold* a competitor slot — true, it has no owner and cannot win — while missing that it must still *spend* one from
+the lane budget. A `decoy` ball costs two bodies.
+
+**The fix is a body budget, not an owner count.** `nextDebugOwners` walked the drawn ids and charged each `decoy` id **two**,
+stopping before the budget is exceeded. Eight free slots with one decoy in the draw now yields seven owners and eight bodies.
+The cost predicate is `spawnsDecoy` — the existing definition of "this power makes a twin" — so a future power that spawns
+something extra is counted by changing one function rather than by finding every counting loop.
+
+**Two refusals, both logged.** A first drawn id that cannot fit (one slot left, a `decoy` next) returns zero with a line
+naming the slot count, because half a decoy is a twin with no parent. A full round keeps item 180's `no competitor slots`
+line. Neither is silent.
+
+**A second log defect fixed in passing, same family.** `Playing → Playing (…, restart, competitors=1)` printed `restarted`,
+which counts only the players' bodies — so the restart line said one beside a `debug spawn … live=8` two frames earlier. It
+now prints `restarted + bots`. Two lines in one log disagreeing about how full the belt is, is the reading this tree keeps
+paying for.
+
+**Tests.** `competitor-slots.spec.ts` gained a `leadingBodiesWithinBudget` block (five cases): all-unit costs, the reported
+defect (`[1,1,2,1,1,1,1,1]` in a budget of `8` takes **7** ids), a two-cost item that does not fit stops rather than
+truncates, empty/budget-zero, and a property sweep asserting `owners + twins <= budget` for four draw shapes across budgets
+`0..10`. The pure helper lives in `competitor-slots.ts` so it is assertable; `RoundService` only builds the cost array.
+
+**Validation:** `npm run build` passed. `npm test` passed with **443 tests** across 32 files (five new). `npm run lint` exited
+0 with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`; every touched file passes `prettier --check`.
+`\uXXXX` search under `src/` returned no matches; `flamework.build` unchanged.
+
+**Still Studio-only:** that a press drawing `decoy` now shows eight bodies rather than nine, and that a press whose only free
+slot draws `decoy` logs the refusal. The player path is deliberately untouched: a player who *chose* `decoy_ball` keeps their
+body and its twin even when that makes one body more than the lane count, because refusing a player their pick to satisfy a
+body cap would be a worse trade than the extra twin.
+
+**Correction (item 182): that last paragraph was wrong, and it was the remaining bug.** The Studio log separated the two cases
+cleanly — presses where the player picked a non-`decoy` ball cleared **8** bodies, and presses where the player picked
+`decoy_ball` cleared **9**:
+
+```
+[Picker] spawn player=prospeed1 ball=decoy_ball
+[Round] debug spawn (debug key 3): 6 competitors, 1 decoy twin(s) … live=7
+[Round] cleared 9 ball(s)
+```
+
+The twin was counted for bots and ignored for players, because `spawnBots` measured the **tracked competitor set** while the
+designer was counting **bodies on the belt**. Leaving the player path "alone" therefore left the extra ball in.
+
+## 182. The lane budget is charged against bodies, not tracked competitors
+
+**One cause, both reports.** A `decoy` ball spawns two bodies. `RoundService.getLiveBalls()` is the *competitor* set, which
+deliberately excludes a twin — it has no owner and cannot win — so any budget computed from it under-counts by one per decoy
+already on the belt. Item 181 charged the **bot** draw for its own twins and still measured the field with the competitor set,
+so the player's twin was invisible.
+
+**The fix is a count of every spawned body.** `BallSpawnerService.getLiveBodyCount()` returns the spawner's `liveBalls`
+filtered on `Parent` — the only list that contains twins. `spawnBots` uses it, so both decoys (player's and bot's) are charged
+before the draw is made:
+
+| scene | bodies before bots | lanes | slots | draw | bodies after |
+| --- | --- | --- | --- | --- | --- |
+| player picked `decoy_ball` | 2 (body + twin) | 8 | 6 | 5 normal + 1 `decoy` | **8** |
+| player picked anything else | 1 | 8 | 7 | 6 normal + 1 `decoy` | **8** |
+| player picked `decoy_ball`, draw has no decoy | 2 | 8 | 6 | 6 normal | **8** |
+
+**Why not change `getLiveBalls()` instead.** Because a twin is not a competitor and the winner rule depends on that: item 72
+counts the field to decide "one left, they win", and a decoy in that count would be a competitor that can neither win nor be
+eliminated. Two numbers, two questions — the competitor set for the round's *result*, the body count for the round's
+*capacity* — and the bug was using the first for the second.
+
+**Also logged now:** the debug-spawn line ends `bodies=<n>/<lanes>`, so a Studio run reads the ceiling directly instead of
+adding up competitors and twins. That is the field a reader needs to confirm this fix.
+
+**Validation:** `npm run build` passed. `npm test` passed with **443 tests** across 32 files (no test asserted a body count, so
+none changed). `npm run lint` exited 0 with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`.
+`\uXXXX` search under `src/` returned no matches; `flamework.build` unchanged.
+
+**Still Studio-only:** that every press now clears exactly 8 bodies on an eight-lane belt whatever the player picked and
+whatever the draw contains, and that `bodies=8/8` appears on the debug-spawn line.
+
+## 183. The decoy twin is born five seconds into the round, not with its parent
+
+**The third report of the same symptom, and the count was already right.** With item 182's body count, a press where the player
+picked `decoy_ball` still showed a ninth body — because the twin is a **second body for one competitor**, created in the same
+call as its parent. The round's capacity is eight bodies; a `decoy` ball makes two of them. No arrangement of the budget fixes
+that without either dropping a real ball or refusing a player their pick, and both are worse than what the designer asked for:
+
+> just spawn it 5 seconds after round starts
+
+**`DECOY_SPAWN_DELAY_SECONDS = 5`** (**Placeholder.**, `tuning.ts`). `spawnBall` no longer calls `spawnDecoy` inline; it calls
+`queueDecoy`, which records `{ spawner, parent, entry, power, startSpeed, dueAt }`. The spawner's existing 0.5 s `cleanup` loop
+calls `spawnDueDecoys`, which creates any twin whose moment has come and drops any whose parent is gone. Properties, textures,
+badges and markers are unchanged — `spawnDecoy` still owns all of them; only *when* it runs moved.
+
+**Why the delay is measured from the ball's spawn and not from `Playing` entry.** They are the same instant for a ball spawned
+at the green light, which is the reported case. For a ball spawned mid-round (key `4` in `Playing`), "five seconds after it
+appeared" is the only reading that does not make the twin instantaneous.
+
+**Why a queue and not `task.delay`.** A scheduled thread cannot be cancelled when the parent dies or the phase changes: it would
+fire into a destroyed body, or into the next round after a teardown. A queue is checked by a loop that already exists, is dropped
+wholesale by `setRoundActive(false)`, and skips entries whose parent has gone. The cost is up to one cleanup interval (0.5 s) of
+lateness on a five-second delay.
+
+**The decoy surcharge is gone with it.** Item 181 charged a `decoy` id two bodies in the debug draw so the opening field would
+not exceed the lane count. Now that the twin is not part of the spawn, a `decoy` ball puts exactly one body on the belt like any
+other, so the surcharge would leave the field one short. `leadingBodiesWithinBudget` and its five spec cases were **removed**
+rather than left inert — the tree removes dead constants, and this one had no reader left. `spawnBots` is back to one owner per
+free slot, and `remainingCompetitorSlots` (item 180) is the whole rule.
+
+**What the log now says.** The debug-spawn line ends
+`bodies=<on belt now>/<lanes>, twins=<scheduled by this draw>, pending=<queue depth>`, and each twin prints
+`[Spawner] decoy born: parent=… delay=5s bodies=N/8`. Those four numbers are what tell "spawned nothing" from "spawned a twin
+that has not been born yet".
+
+**Consequences worth stating.** A round can therefore hold `lanes` bodies at `Playing` entry and `lanes + pendingTwins`
+shortly after — that is the designer's call, not a bug: `MaxLiveBalls` is the only ceiling, as it was for key `4`. A twin whose
+parent is eliminated inside the first five seconds never appears, which is the correct outcome for an imitation. A round that
+ends inside five seconds drops the queue.
+
+**Validation:** `npm run build` passed. `npm test` passed with **438 tests** across 32 files (five removed with the inert helper,
+none changed). `npm run lint` exited 0 with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`. Every
+touched file passes `prettier --check`. `\uXXXX` search under `src/` returned no matches; `flamework.build` unchanged.
+
+**Studio-only:** that a press with `decoy_ball` in the field shows eight bodies at the green light and a ninth about five seconds
+later, and that the twin appears beside its parent's *current* position rather than where the parent spawned.
+
+## 184. The debug spawn fills free lanes, and every body records the lane it came from
+
+**The bug, from source.** Two paths chose a lane index differently:
+
+- `spawnRoundCompetitors` — `for (let lane = 0; lane < count; lane++) … this.spawner.spawnInLane(lane, owner)`. Lane = the
+  loop index, so players take `0..n-1`.
+- `debugSpawnCompetitors` → `spawnBots` → `spawnForRound(owners)` — `spawners[index % spawners.size()]`. **Index restarts at
+  `0` on every press**, so after the players' own bodies a debug body landed on lane `0` beside the player and the last lane
+  went unused. `[Ball:1] pos=(-313, 72.354, 111)` and `[Ball:2] pos=(-313, 72.551, 111)` are that: two bodies inside each
+  other, `Touched` refiring every step, and the burst and sound spam that follows.
+
+**A body now records its lane.** `SPAWN_LANE_ATTRIBUTE = "SpawnLane"`, written in `spawnInLane` — the single place that knows
+the index — and **not** derivable from `Position`, because a lane is only where a body started. `spawnForRound` was rewritten to
+take `laneIndices` and delegate to `spawnInLane`, so the attribute and the failure reporting have one implementation rather than
+two, and the docblock that claimed round-robin kept lanes unique was replaced with what actually makes them unique.
+
+**`laneIsOccupied(laneIndex, live)` and `freeLaneIndices(live, spawnerCount)`** in `competitor-slots.ts` — pure, over the
+bodies' recorded lanes. A body with no `SpawnLane` (a `decoy` twin, or an older build) occupies nothing. `spawnBots` takes the
+lowest free lanes, `min(slots, freeLanes.size())` of them, and logs a shortfall line when there are fewer free lanes than slots.
+The player's lane is skipped **because it is occupied**, not because it is lane 0 — which is what makes the restart path correct
+without a second rule.
+
+**The restart ordering was already right**, verified: `forcePlaying`'s restart branch runs `clearAllBodies` →
+`spawnRoundCompetitors` (which writes `SpawnLane` on the player's body) → `spawnBots`. The debug spawn therefore reads a belt
+that already holds the player, and skips their lane. The same holds for the fresh `forcePlaying` path and for
+`forceWaiting` → `startWaitingRound` → `spawnRoundCompetitors` → `spawnStudioBots`.
+
+**What the log now says.** The debug-spawn line gained `lanes=`, listing the indices actually used, so the fix is visible
+without comparing positions: one player must show `lanes=1,2,3,4,5,6,7`.
+
+**Where the prompt was wrong.** Bodies did **not** record a lane, so `laneIsOccupied` could not be a read until one was added —
+and a `Position` comparison, the prompt's fallback, would have reported every lane free one frame after each spawn because the
+bodies ride away. The prompt's other expectation held: the restart ordering was already correct.
+
+**Tests.** `competitor-slots.spec.ts` gained nine cases: `laneIsOccupied` at empty, one occupant (with its neighbours), a body
+that has ridden away, a body with no lane, and a full belt; `freeLaneIndices` ascending on an empty belt, skipping an occupied
+lane wherever it sits (`0` and `3` and a middle pair), empty on a full belt, and never returning an index past the spawner
+count. One spec correction came out of running them: the fake's `GetAttribute` needs two parameters, because roblox-ts compiles
+the call to a **colon call** and passes the receiver as the first argument — a one-parameter fake received the table where it
+expected the attribute name and answered `undefined`.
+
+**Validation:** `npm run build` passed. `npm test` passed with **447 tests** across 32 files (nine new). `npm run lint` exited 0
+with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`; every touched file passes `prettier --check`.
+`\uXXXX` search under `src/` returned no matches; `flamework.build` unchanged.
+
+**Studio-only:** that a debug round's bodies are spread across distinct lanes (`lanes=` on the spawn line), and that the hit
+burst and sound spam drops because no body starts inside another.
+
+## 185. The power badge was culled at 120 studs, a number sized for a 56-stud belt
+
+**Symptom:** "I can not see the name of the ball powers. It spawns then disappears."
+
+**Cause, from source.** `updateBadge` sets `badge.MaxDistance = POWER_BADGE_MAX_DISTANCE`, and that constant was `120` with a
+docblock that says so in as many words: *"The belt is ~56 studs long and the chase camera sits about 20 studs back, so 120
+covers a ball at either end from either end."* The arena is now **336 x 173 studs** � a diagonal of about `377` � and the camera
+has to sit well back to frame 20-stud balls. So a badge drew while its ball was near the camera at spawn and stopped drawing
+once the ball rode past the cutoff. Nothing destroyed it: the `BillboardGui` stayed on the body, replicated, and was simply not
+rendered.
+
+**Fix:** `POWER_BADGE_MAX_DISTANCE` is **`600`** (**Placeholder.**) � the arena diagonal with margin for a chase camera that
+trails a fast ball. The docblock now states the arithmetic instead of the 56-stud assumption, and records that the cost is draw
+calls, not correctness: one `BillboardGui` with one `TextLabel` per body, on a round capped at eight bodies.
+
+**What was checked and rules out the alternatives.** Nothing in `src/` destroys a badge except `updateBadge` with
+`power === ""`, and there are exactly two writers of it (`presentPower` and `setPower` via `presentPower`), neither of which is
+called with an empty power for a body that has one. `setPower` on a re-pick takes the "existing label" branch and only rewrites
+`label.Text`. So the badge exists on every powered body and always did � the question was only whether it is drawn.
+
+**Not changed, and why.** `POWER_BADGE_WIDTH` (96 px), `POWER_BADGE_HEIGHT` (20) and `POWER_BADGE_TEXT_SIZE` (14) are
+screen-space sizes the badge was designed at, and `powerLabelFits` asserts the width against every power's label. If the names
+are now legible but *small* at 300 studs, those three are the lever and they must move together � that is a separate judgement
+about how a label should read at the new scale, not part of "it disappeared".
+
+**Validation:** `npm run build` passed. `npm test` passed with **447 tests** across 32 files (no test asserted the distance, so
+none changed). `npm run lint` exited 0 with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`; the
+touched file passes `prettier --check`. `\uXXXX` search under `src/` returned no matches; `flamework.build` unchanged.
+
+**Studio-only:** that every powered body shows its name for the whole ride, and whether the label is legible rather than merely
+present at the far end.

@@ -171,7 +171,7 @@ Four debug keys drive it, one per phase, in phase order:
 | `1` | Force `Intermission` from any phase: belt ramp stops, simulation stops, every body is cleared, the timer re-arms                                                      |
 | `2` | Force `Waiting`: clears, then spawns one owned competitor per player and opens the picker; outside Studio it also spawns bots (in Studio they arrive automatically) |
 | `3` | Force `Playing`, with bots alongside the players' bodies. From `Playing` it restarts the competitors in place without restarting the round clock; from `PostGame` it refuses while the result is being cleared |
-| `4` | Spawn one competitor per bound spawner, each with a **different** ball, refused outside `Playing`                                                                     |
+| `4` | Spawn bots into the **free** lanes — one per remaining slot, each with a **different** ball, refused outside `Playing`/`Waiting` and refused with a log line when the round is already at capacity (item 180) |
 
 The client never decides a phase: every refusal is the server's, logged with the phase that caused
 it, so a key that "did nothing" says why in one line rather than looking broken. Input is ignored
@@ -180,6 +180,23 @@ when `gameProcessedEvent` is true, so typing a digit into chat does not drive th
 The old `SpawnBall` remote and the manual spawn key are **gone**. Bodies are created by the round —
 one per player at `Waiting`, plus whatever the debug keys draw — so `4` is the way to put a second
 body on the belt for a collision test, and there is no longer a rate limit to hold down.
+
+**A round holds at most one competitor per bound spawner** (item 180). Every spawn path reads
+`remainingCompetitorSlots(live, spawners)`, so players enrol first and debug bodies fill only what is
+left: one player on an eight-lane belt plus `3` or `4` gives eight bodies, and pressing `4` on a full
+belt logs a refusal instead of adding a ninth. `MaxLiveBalls` (50 by default) remains the only other
+ceiling.
+
+**A decoy twin is a second body, and it arrives late** (item 183). The twin is scheduled
+`DECOY_SPAWN_DELAY_SECONDS` (5 s) after its parent spawns, so the opening field is exactly one
+body per lane — one player + `3` on an eight-lane belt is eight bodies — and the twin appears once
+the race is running. `MaxLiveBalls` (50 by default) remains the only ceiling on total bodies.
+
+**Every body records the lane it spawned into** (`SpawnLane`), and the debug spawn fills the
+**lowest free lanes**, skipping any lane that already holds a body (item 184). So a debug spawn after
+the players puts no body on a player's spawn point: one player + `3` gives `lanes=1,2,3,4,5,6,7`, not a
+second body at lane `0`. A body whose lane is recorded keeps that lane until it dies, so the check still
+answers after the body has ridden away.
 
 ## Store, picker and inventory
 

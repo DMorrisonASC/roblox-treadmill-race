@@ -4,7 +4,7 @@ import { HIT_EFFECT_REMOTE_NAME, REMOTES_FOLDER_NAME } from "shared/remotes";
 import { HIT_EFFECTS_FOLDER_NAME } from "shared/tuning";
 import { playHitSound } from "shared/ui/sounds";
 import { HIT_EFFECT_ASSET_NAME, HIT_EFFECT_SCALE_MULTIPLIER } from "shared/config/hitEffect.config";
-import { effectScaleForRadius, scaleEffect } from "shared/vfx-scale";
+import { effectScaleForRadius } from "shared/vfx-scale";
 
 /**
  * **The Studio asset's name in `ReplicatedStorage`, and the whole of the contract with it.** A `Part` containing an
@@ -236,20 +236,22 @@ export class HitEffectController implements OnStart {
 			}
 		}
 
-		// **The clone is scaled to the ball the contact involved (item 176).** Before this round the burst drew at whatever
-		// the asset authored, which on a 20-stud body is a dot: the pack was built against a 1-stud ball, so the authored
-		// geometry is a fraction of the thing it is supposed to describe.
+		// **What this number scales: the particles, not the tree (item 179).** Item 176 uniformly scaled the whole clone with
+		// `scaleEffect`, which multiplies the root's `Size`, every `Attachment.Position`, every emitter's `Speed` and its
+		// `Acceleration` — and then the loop below *replaced* each emitter's `Size` with the fixed `PARTICLE_SIZE_*` ramp. So
+		// the one property that decides whether a burst is visible at all was the only one never scaled, while the offsets and
+		// speeds that position and launch it were multiplied by the ball ratio.
 		//
-		// **Before the per-emitter `Size` loop below, and that order is load-bearing.** `scaleEffect` rebuilds each
-		// emitter's `Size` sequence from the asset's, and the loop then *replaces* that sequence with the designed ramp
-		// (`PARTICLE_SIZE_START`..`PARTICLE_SIZE_END`). That ramp is particle growth in studs and is deliberately not
-		// scaled — scaling it would make a bigger ball's particles start bigger *and* grow further, which is a different
-		// effect rather than the same one at a larger size. Reversing these two blocks would silently throw away the
-		// scaling of `Size` while keeping the scaling of `Speed`, `Acceleration` and the attachment offsets.
+		// On a 20-stud ball at the old `0.1` that was a ratio of `2` and mostly harmless-looking; at the `100` a designer would
+		// reach for to fix an invisible burst it is a ratio of `2000`, which throws the emitter attachment hundreds of studs
+		// from the contact and launches its particles at thousands of studs per second for their 0.5-second life. The Studio
+		// log showed `radius=10 scale=2000` and no visible burst: the emitter fired, off screen.
 		//
-		// A missing or non-positive `radius` (an older server, or a body whose `Size` had not replicated when the contact
-		// was reported) yields `1`, so the clone is drawn exactly as authored.
-		scaleEffect(clone, typeIs(radius, "number") ? effectScaleForRadius(radius, HIT_EFFECT_SCALE_MULTIPLIER) : 1);
+		// So the multiplier now scales **the particle ramp**, which is the distance a burst actually reads by. Everything else
+		// stays as authored: attachment offsets, ejection speed and acceleration are the effect's design and are authored
+		// against a contact point that `clone.CFrame` already places correctly. A missing or non-positive `radius` (an older
+		// server, or a body whose `Size` had not replicated) yields `1`, so the burst draws exactly as authored.
+		const particleScale = typeIs(radius, "number") ? effectScaleForRadius(radius, HIT_EFFECT_SCALE_MULTIPLIER) : 1;
 
 		const emitters = new Array<ParticleEmitter>();
 		for (const descendant of clone.GetDescendants()) {
@@ -257,9 +259,13 @@ export class HitEffectController implements OnStart {
 				continue;
 			}
 
+			// The authored ramp, multiplied by the ball ratio — the same shape, proportionally bigger. `NumberSequence` is
+			// immutable in the typings, so this rebuilds it; the keypoint times stay `0` and `1` because time is not a
+			// distance. Note `ParticleEmitter.Size` is clamped by the engine (100 studs), so a multiplier above `100 / 3.22`
+			// saturates the death keypoint rather than growing further.
 			descendant.Size = new NumberSequence([
-				new NumberSequenceKeypoint(0, PARTICLE_SIZE_START, 0),
-				new NumberSequenceKeypoint(1, PARTICLE_SIZE_END, 0),
+				new NumberSequenceKeypoint(0, PARTICLE_SIZE_START * particleScale, 0),
+				new NumberSequenceKeypoint(1, PARTICLE_SIZE_END * particleScale, 0),
 			]);
 			descendant.Orientation = Enum.ParticleOrientation.FacingCamera;
 			// **`Rate = 0`, and `Enabled` left true.** Rate alone is what stops the emitter streaming on its own: an
@@ -300,7 +306,7 @@ export class HitEffectController implements OnStart {
 		// how many emitters were fired. If both print and the screen is still empty, the fault is in the asset (an emitter
 		// with no texture, or a lifetime of zero) rather than in this file.
 		print(
-			`[HitEffect] burst at ${tostring(position)} emitters=${emitters.size()} radius=${tostring(radius)} scale=${tostring(typeIs(radius, "number") ? effectScaleForRadius(radius, HIT_EFFECT_SCALE_MULTIPLIER) : 1)}`,
+			`[HitEffect] burst at ${tostring(position)} emitters=${emitters.size()} radius=${tostring(radius)} scale=${tostring(particleScale)} particle=${tostring(PARTICLE_SIZE_START * particleScale)}..${tostring(PARTICLE_SIZE_END * particleScale)}`,
 		);
 
 		Debris.AddItem(carrier, LIFETIME_SECONDS + CLEANUP_BUFFER_SECONDS);

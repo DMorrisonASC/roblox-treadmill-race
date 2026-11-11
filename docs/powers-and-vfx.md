@@ -31,7 +31,6 @@ probabilities, not ride-time values. `BALL_SPEED_MIN = 0`,
    extra decay);
 2. a **direct write to `BALL_SPEED`** from a collision handler — safe only because nothing writes between two ticks;
 3. a change to **the body itself** the model cannot overwrite (collision group, decoy twin, badge, texture).
-
 The model replaces X and the decorative sway sets Z; neither axis can carry a durable **velocity** written by a collision
 handler. Y remains outside `BALL_SPEED` and is preserved by the tick loop, so ball contacts set Y directly for the upward
 pop. Lateral motion is different: a contact leaves an **impulse** in `server/lateral-shove.ts`, and `stepBallSpeeds`
@@ -106,6 +105,10 @@ one thin imperative wrapper that touches instances.
 
 - **State:** the twin is a real body created by `BallSpawnerService.spawnDecoy` at `DECOY_OFFSET_STUDS` (2.5), **presented** with
   the power but never made live.
+- **When:** not with its parent — `queueDecoy` schedules it for `DECOY_SPAWN_DELAY_SECONDS` (5 s, **Placeholder.**) after that
+  ball spawned, and the spawner's cleanup loop creates it (`item 183`). So the opening field is exactly **one body per lane**
+  however many players picked `decoy_ball`, and the twin walks in once the race is running. A parent destroyed before its twin's
+  moment simply never gets one, and a phase change drops the queue.
 - **What breaks if edited wrong:** use `setPower` for the twin and it registers an aura and a `Touched` connection — a decoy that
   really does eclipse the field or really does steal speed. `presentPower` gives the attribute, the collision group and the badge
   (what a viewer sees); `setPower` adds the registry entry and the connection (what the simulation acts on).

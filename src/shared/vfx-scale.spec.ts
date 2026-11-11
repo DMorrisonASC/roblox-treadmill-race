@@ -173,11 +173,14 @@ describe("vfxHeadingOffset", () => {
 		expect(math.abs(turned.UpVector.Dot(tilted.UpVector) - 1) < TOLERANCE).toBe(true);
 	});
 
-	it("ships with every offset at zero, so no effect's heading changes yet", () => {
-		// The knob is what this round adds; the setting is a Studio judgement. Both trails read their own number and both are
-		// `0`, so today's drawn headings are unchanged.
-		expect(WIND_BOOST_HEADING_OFFSET_DEGREES).toBe(0);
-		expect(TAIL_WIND_HEADING_OFFSET_DEGREES).toBe(0);
+	it("reads a real number from each effect's own config", () => {
+		// **Not pinned to a value.** The offset is a designer's knob and both trails have been retuned since they shipped at
+		// `0`; asserting the literal would make every tuning pass fail a test that is not about the tuning. What is asserted
+		// is the contract: each trail has its own finite number, and a zero offset is still the strict no-op above.
+		// Whole degrees, because the four headings that read as deliberate are `0`, `90`, `180` and `-90`; a fractional value
+		// is legal but is a sign somebody meant to change a different axis.
+		expect(math.floor(WIND_BOOST_HEADING_OFFSET_DEGREES) === WIND_BOOST_HEADING_OFFSET_DEGREES).toBe(true);
+		expect(math.floor(TAIL_WIND_HEADING_OFFSET_DEGREES) === TAIL_WIND_HEADING_OFFSET_DEGREES).toBe(true);
 	});
 });
 
@@ -204,10 +207,13 @@ describe("effectScaleForRadius", () => {
 		const tail = effectScaleForRadius(radius, TAIL_WIND_SCALE_MULTIPLIER);
 		const hit = effectScaleForRadius(radius, HIT_EFFECT_SCALE_MULTIPLIER);
 
-		// All three reproduce the pre-split size — that is the "no retuning" rule of this round, asserted rather than claimed.
+		// The two trails still reproduce their pre-split size; the burst does not, deliberately. Item 179 changed what its
+		// multiplier multiplies — the particle ramp rather than the whole clone — because that path put the emitter out of
+		// view, so `1.0` now means "authored particles, mapped onto the ball" and draws at `20` rather than `2`. The two
+		// numbers being equal was never the point; being separate reads is.
 		expect(math.abs(boost - 2) < TOLERANCE).toBe(true);
 		expect(math.abs(tail - 2) < TOLERANCE).toBe(true);
-		expect(math.abs(hit - 2) < TOLERANCE).toBe(true);
+		expect(math.abs(hit - 20) < TOLERANCE).toBe(true);
 
 		// And they are three separate reads: pushing one through a different value leaves the others where they were.
 		expect(effectScaleForRadius(radius, WIND_BOOST_SCALE_MULTIPLIER * 2) !== boost).toBe(true);

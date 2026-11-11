@@ -959,6 +959,29 @@ export const BALL_PHYSICAL_ELASTICITY = 0.95;
 export const BALL_COLLISION_POP_UPWARD_SPEED = 30;
 
 /**
+ * **Placeholder.** Seconds after a `decoy` ball spawns before its twin appears, in seconds (item 183).
+ *
+ * ## Why a twin is deferred at all
+ *
+ * A `decoy` ball is **one competitor and two bodies** — the parent, which carries the owner and can win, and an ownerless
+ * twin. Spawning the pair together put nine bodies on an eight-lane belt at `Playing` entry, which read as "an extra ball"
+ * and was chased twice as a counting error. The counting was right; the twin simply belongs later in the round.
+ *
+ * Deferring it means the opening field is exactly one body per lane, and the twin arrives while the race is already moving —
+ * which is also when a decoy is *least* conspicuous, since its whole purpose is to be mistaken for a real ball.
+ *
+ * ## Why five
+ *
+ * Long enough that it is not part of the opening pile-up (the bodies are still settling for the first ~2.5 s, and
+ * `HIT_EFFECT_MIN_ROUND_AGE_SECONDS` already treats that window as noise), short enough that a round still has most of its
+ * ride left for the twin to matter. It is measured from **that ball's spawn**, so a ball spawned mid-round by key `4` gets its
+ * twin five seconds later rather than instantly.
+ *
+ * Deliberately *not* a per-power value: only one power spawns a twin, so a table would have one row.
+ */
+export const DECOY_SPAWN_DELAY_SECONDS = 5;
+
+/**
  * **Placeholder.** Peak sideways speed one contact gives each body, in studs/second.
  *
  * ## Why this is a number at all, when the engine already separates in Z

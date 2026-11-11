@@ -7,17 +7,25 @@
  * was welded to the two trails' by one shared `VFX_SCALE_MULTIPLIER`. Enlarging the burst moved both trails; the value was
  * left alone instead. Three effects, three numbers, and each config states its own reference.
  *
- * ## What this number is relative to — and the distinction that matters
+ * ## What this number is relative to (rewritten in item 179)
  *
- * **`SCALE_MULTIPLIER` multiplies every stud-valued property of the cloned `hitEffect` asset after the contact's own ratio
- * `contactRadius / BASE_BALL_RADIUS`, so its reference length is `BASE_BALL_RADIUS` (0.5 studs) exactly as the trails' is.**
- * Worked at a 20-stud ball: `10 / 0.5 = 20` design radii, and at `0.1` the clone draws at **2.0x** authored.
+ * **`SCALE_MULTIPLIER` multiplies the burst's particle size ramp, after the contact's own ratio
+ * `contactRadius / BASE_BALL_RADIUS` — so its reference length is `BASE_BALL_RADIUS` (0.5 studs), and `1.0` means "the
+ * authored particle sizes, mapped onto the ball".** Worked at a 20-stud ball: `10 / 0.5 = 20` design radii, so at `1.0` the
+ * particles run `0.5 x 20 = 10` studs at birth to `3.22 x 20 = 64.4` at death — proportionally exactly what the asset author
+ * drew against a 1-stud ball.
  *
- * **What differs from the trails is where the radius comes from, not what it means.** A trail reads `ball.Size` from a live
- * body it is attached to; the burst is drawn by a client that never sees the two bodies, so the server sends the **larger**
- * body's radius in the `HitEffect` remote payload and the client scales from that. So the same number produces the same
- * multiple of authored size in both — and a reader who assumes the burst's number is "bigger units" because its radius
- * arrives over the wire will be wrong.
+ * **It no longer scales the clone's whole tree, and that is a correction rather than a retune.** Item 176 passed this number
+ * to `scaleEffect`, which multiplies the root `Size`, every `Attachment.Position`, each emitter's `Speed` and its
+ * `Acceleration` — while the controller then *replaced* each emitter's `Size` with a fixed ramp. The only property that makes
+ * a burst visible was the one never scaled; everything that positions and launches it was. At `100` (a designer's reasonable
+ * response to an invisible burst) that threw the emitter attachment hundreds of studs from the contact and launched its
+ * particles at thousands of studs per second: `[HitEffect] burst … radius=10 scale=2000` with nothing on screen. The number
+ * now scales the particles, which is the thing a burst reads by.
+ *
+ * **What still differs from the trails is where the radius comes from, not what it means.** A trail reads `ball.Size` from a
+ * live body; the burst is drawn by a client that never sees the bodies, so the server sends the **larger** body's radius in
+ * the `HitEffect` payload. Same divisor, same meaning.
  *
  * `BASE_BALL_RADIUS` stays in `tuning.ts` as the shared divisor; only the multiplier is per effect.
  */
@@ -26,10 +34,14 @@
 export const HIT_EFFECT_ASSET_NAME = "hitEffect";
 
 /**
- * **Placeholder.** The effect's own scale multiplier. `0.1` reproduces the size the burst drew before the split.
+ * **Placeholder.** The effect's own particle-size multiplier; `1.0` = authored sizes mapped onto the ball.
  *
- * Unlike the two trails, this one is applied to a clone whose per-emitter `Size` ramp is then **overwritten** by the
- * designed particle growth — a separate property that composes with the clone's scale rather than replacing it. That is why
- * `scaleEffect` must be called before that loop; see `hit-effect-controller`.
+ * `0.5` and `2` are the useful neighbours — quarter-size and four-times-size particles, `5..32` and `20..129` studs at a
+ * 20-stud ball. Above about `31` the death keypoint saturates, because `ParticleEmitter.Size` is capped at 100 studs.
+ *
+ * The value before item 179 was `0.1`, which reproduced the size the burst drew when this number still scaled the whole
+ * clone; that path put the emitter attachment and its ejection speed out of view, so `0.1` and `100` both drew nothing and the
+ * number was never really in effect. It is `1.0` now because that is the one value with a definition that does not depend on
+ * an asset anyone has to guess at.
  */
-export const HIT_EFFECT_SCALE_MULTIPLIER = 0.1;
+export const HIT_EFFECT_SCALE_MULTIPLIER = 1;

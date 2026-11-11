@@ -301,16 +301,24 @@ export const POWER_BADGE_TEXT_SIZE = 14;
  *
  * Added to the ball's radius rather than replacing it, so a badge never sits inside the body it labels.
  */
-export const POWER_BADGE_OFFSET_STUDS = 1.5;
+export const POWER_BADGE_OFFSET_STUDS = 14;
 
 /**
  * **Placeholder.** The distance past which a badge stops drawing, in studs.
  *
  * `BillboardGui.MaxDistance` defaults to infinity, which would draw a badge for every ball on the belt from anywhere in
- * the place. The belt is ~56 studs long and the chase camera sits about 20 studs back, so 120 covers a ball at either
- * end from either end and nothing beyond the arena.
+ * the place. The arena is now **336 x 173 studs** — a diagonal of about `377` — and the camera has to sit well back to frame
+ * 20-stud balls, so a ball at the far end is several hundred studs away.
+ *
+ * **`120` was tuned for a 56-stud belt and is the reason the names "spawn then disappear" (item 185).** A badge appeared
+ * while its ball was near the camera at spawn and was culled the moment the ball rode past the cutoff — so the label
+ * existed, replicated, and was simply not drawn. `600` covers the diagonal from a camera parked outside the arena at either
+ * end, with margin for a chase camera that trails a fast ball.
+ *
+ * The cost of a large value is draw calls, not correctness: a badge is one `BillboardGui` with one `TextLabel`, and the
+ * round is capped at eight bodies, so this cannot become a field-wide flock of labels.
  */
-export const POWER_BADGE_MAX_DISTANCE = 120;
+export const POWER_BADGE_MAX_DISTANCE = 600;
 
 /** The badge's instance name, so "does this body have exactly one badge" is a name lookup rather than a walk. */
 export const POWER_BADGE_NAME = "PowerBadge";

@@ -13,6 +13,7 @@ import {
 	OWNER_DISPLAY_NAME_ATTRIBUTE,
 	OWNER_USER_ID_ATTRIBUTE,
 	hasOwnerIdentity,
+	SPAWN_LANE_ATTRIBUTE,
 	CHOSEN_BALL_ID_ATTRIBUTE,
 	SPAWNER_KILL_Y_ATTRIBUTE,
 	SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE,
@@ -50,6 +51,7 @@ import {
 	BALL_TEXTURE_OFFSET_RANGE,
 	BALL_TEXTURE_OFFSET_RANGE_V,
 	BOOST_HYSTERESIS,
+	DECOY_SPAWN_DELAY_SECONDS,
 	SPIN_DEADBAND_SPEED,
 	SWAY_AMPLITUDE,
 	SWAY_FREQUENCY_HZ,
@@ -698,6 +700,14 @@ export class BallSpawnerService implements OnStart {
 	public setRoundActive(active: boolean): void {
 		this.roundActive = active;
 
+		// **Pending twins do not survive a phase change (item 183).** A twin scheduled by a round that has ended would
+		// otherwise be born into `PostGame` or `Intermission` — a fake body in a cleared arena, which is the leftover this
+		// tree keeps removing. Dropping them here is the same rule `clearAllBodies` applies to real bodies: the round's
+		// bodies are the round's, and a queued body is one that has not arrived yet.
+		if (!active) {
+			this.pendingDecoys.clear();
+		}
+
 		// **The powers' own view of the same fact.** `onBallCollision` had no phase gate until item 80 and relied on the
 		// proportional drain to make a `PostGame` transfer a no-op; this is the signal that lets it refuse outright, and it
 		// is the same boolean `stepBallSpeeds` already trusts — so it cannot disagree with the simulation.
@@ -756,8 +766,7 @@ export class BallSpawnerService implements OnStart {
 			return;
 		}
 
-		// Leaving `Playing` stops the simulation by clearing the flag, but the attribute is the ball's own state
-		// and would otherwise keep the last value it held - a ball frozen mid-round with `BALL_SPEED = 4` reads
+		// Leaving `Playing` stops the simulation by clearing the flag, but the attribute is the ball's own state		// and would otherwise keep the last value it held - a ball frozen mid-round with `BALL_SPEED = 4` reads
 		// as "still racing, just not moving" in any log line or future consumer. Zeroing it makes the stopped
 		// state explicit, which is the same reason `Waiting` sets the belt to zero. `setRoundActive(true)`
 		// restores it, so this is a pause rather than a one-way reset.
@@ -777,9 +786,55 @@ export class BallSpawnerService implements OnStart {
 		}
 	}
 
-	/** How many parts are currently bound as spawners. `RoundService` spawns one body per spawner. */
+	/** How many parts are currently bound as spawners. A round holds at most this many competitors. */
 	public getBoundSpawnerCount(): number {
 		return this.spawnerLanes.size();
+	}
+
+	/**
+	 * How many twins are still waiting for their moment. **Instrumentation for the delayed decoy (item 183)** — a round's
+	 * opening body count is one per lane, and this is what explains the body that arrives later.
+	 */
+	public getPendingDecoyCount(): number {
+		return this.pendingDecoys.size();
+	}
+
+	/**
+	 * How many bodies are on the belt right now — **every** spawned body, including `decoy` twins.
+	 *
+	 * ## Why this is not `RoundService.getLiveBalls().size()`
+	 *
+	 * `liveBalls` here is the spawner's list of everything it made and has not yet destroyed: a player body, a bot, and the
+	 * twin a `decoy` produces. `RoundService`'s competitor set is a **subset** of that — a twin carries no owner, cannot win
+	 * and is deliberately untracked. Both numbers are right for their own question, and confusing them is what produced the
+	 * extra ball twice (items 180 and 181): the round was bounded by *competitors* while the designer was counting *bodies*.
+	 *
+	 * A `decoy` ball makes two bodies, from either path — the player's pick as well as a bot's draw — so the lane budget has
+	 * to be charged against this count, not against the tracked set.
+	 *
+	 * Filtered on `Parent`, because a body destroyed by something outside this service (a manual `Destroy`, a scene edit)
+	 * can still occupy the list until the next cleanup pass, and counting it would shrink the field for a body nobody can see.
+	 */
+	public getLiveBodyCount(): number {
+		return this.getLiveBodies().size();
+	}
+
+	/**
+	 * Every body currently on the belt, as parts — the list form of `getLiveBodyCount`, for callers that need to ask each
+	 * body a question (item 184: `laneIsOccupied` reads each body's recorded lane).
+	 *
+	 * A fresh array, filtered on `Parent`, on the same rule as the count: a body destroyed outside this service can still
+	 * occupy `liveBalls` until the next cleanup pass, and handing it to a lane check would mark a lane taken by a body
+	 * nobody can see.
+	 */
+	public getLiveBodies(): BasePart[] {
+		const bodies = new Array<BasePart>();
+		for (const ball of this.liveBalls) {
+			if (ball.Parent !== undefined) {
+				bodies.push(ball);
+			}
+		}
+		return bodies;
 	}
 
 	/**
@@ -832,51 +887,51 @@ export class BallSpawnerService implements OnStart {
 		}
 
 		this.reportRecovery(spawner);
+
+		// **The lane is recorded on the body, here, and only here (item 184).** It cannot be written in `spawnBall`, which
+		// receives a spawner part and not an index; and it cannot be re-derived later from `Position`, because a body's
+		// position stops being its spawn point one frame after it spawns. Recording it is what makes "is this lane taken" a
+		// read rather than a scan over the scene, and it is the only reason `laneIsOccupied` can answer for a body that has
+		// already ridden away.
+		if (ball !== undefined) {
+			ball.SetAttribute(SPAWN_LANE_ATTRIBUTE, laneIndex);
+		}
+
 		return ball;
 	}
 
 	/**
-	 * Spawns one body per owner, distributed round-robin across the bound spawners, and returns them.
+	 * Spawns one body per owner **into the lanes the caller names**, and returns them.
 	 *
-	 * **Owners, not a count.** The owner has to be written on the body at creation, and a count would
-	 * force the caller to re-derive which body got which owner from the returned order — a mapping that is
-	 * only correct if every spawn succeeds. Passing the owners in makes the association exact, and it is
-	 * what lets a failed spawn cost one competitor rather than shifting every later owner onto the wrong
-	 * body.
+	 * **Owners and lanes together, not a count and not round-robin (item 184).** This used to distribute owners round-robin
+	 * from lane `0` regardless of what was already on the belt, so a debug spawn after the players' own bodies put a second
+	 * body on lane `0` and left the last lane empty — two bodies inside each other, `Touched` refiring every physics step,
+	 * and the burst and sound spam that follows. A caller that names the lanes cannot have that: the choice of lane becomes
+	 * an explicit decision at the call site, where the live field is known.
 	 *
-	 * Round-robin rather than "one per spawner until the owners run out" because the two are identical
-	 * when the counts match and round-robin degrades gracefully when they do not: a scene with two
-	 * spawners asked for three bodies puts two in one lane rather than silently spawning two and
-	 * reporting success.
+	 * **Owners, not a count.** The owner has to be written on the body at creation, and a count would force the caller to
+	 * re-derive which body got which owner from the returned order — a mapping that is only correct if every spawn succeeds.
+	 * Passing the owners in makes the association exact, and it is what lets a failed spawn cost one competitor rather than
+	 * shifting every later owner onto the wrong body.
 	 *
-	 * Each spawn is individually protected: a malformed spawner must cost one body, not the round. A body
-	 * that fails is simply absent from the returned list, so `RoundService` tracks exactly what exists
-	 * rather than what was requested.
+	 * **Every lane goes through `spawnInLane`**, so the lane attribute and the failure reporting have one implementation
+	 * rather than two. A lane that fails costs its own body and nothing else: the body is simply absent from the returned
+	 * list, so `RoundService` tracks exactly what exists rather than what was requested.
+	 *
+	 * `laneIndices` shorter than `owners` spawns the shorter of the two, which is the documented truncation rather than an
+	 * error — a caller with more owners than lanes has already miscounted them.
 	 */
-	public spawnForRound(owners: ReadonlyArray<BallOwner>): BasePart[] {
+	public spawnForRound(owners: ReadonlyArray<BallOwner>, laneIndices: ReadonlyArray<number>): BasePart[] {
 		const spawned = new Array<BasePart>();
 
-		const spawners = this.spawnerLanes;
-		if (spawners.size() === 0) {
+		if (this.spawnerLanes.size() === 0) {
 			warn(`[Spawner] a round was requested but no part is tagged ${TAGS.ballSpawner}; no bodies spawned.`);
 			return spawned;
 		}
 
-		for (let index = 0; index < owners.size(); index++) {
-			const spawner = spawners[index % spawners.size()];
-			const owner = owners[index];
-
-			let ball: BasePart | undefined;
-			const failure = this.runProtected(() => {
-				ball = this.spawnBall(spawner, owner);
-			});
-
-			if (failure !== undefined) {
-				this.reportFailure(spawner, failure);
-				continue;
-			}
-
-			this.reportRecovery(spawner);
+		const count = math.min(owners.size(), laneIndices.size());
+		for (let index = 0; index < count; index++) {
+			const ball = this.spawnInLane(laneIndices[index], owners[index]);
 			if (ball !== undefined) {
 				spawned.push(ball);
 			}
@@ -1173,15 +1228,113 @@ export class BallSpawnerService implements OnStart {
 			onRoundActive(ball);
 		}
 
-		// The decoy last, so the body it copies is fully registered and so a decoy destroyed by the cap on this very spawn
-		// cannot take its parent with it.
+		// The decoy is **deferred, not spawned here** (item 183). It used to be created in this same call, which put two
+		// bodies on the belt for one competitor and made an eight-lane round show nine. It is now queued with a due time
+		// `DECOY_SPAWN_DELAY_SECONDS` from now and created by `spawnDueDecoys`, so the twin appears after the round has
+		// started rather than among the bodies the round counted.
+		//
+		// **Queued after the body is fully registered**, for the original reason: the twin copies a parent that has already
+		// been given its power, textures and markers, and a decoy destroyed by the cap cannot take its parent with it.
 		if (power !== undefined && spawnsDecoy(power)) {
-			this.spawnDecoy(spawner, ball, entry, power, startSpeed);
+			this.queueDecoy(spawner, ball, entry, power, startSpeed);
 		}
 
 		this.enforceCap();
 
 		return ball;
+	}
+
+	/**
+	 * A twin waiting to be born: everything `spawnDecoy` needs, plus the moment it becomes due.
+	 *
+	 * A plain record in an array rather than a `task.delay`, because a scheduled thread cannot be cancelled when the parent
+	 * dies — it would fire into a destroyed body, or into the *next* round after a teardown — and there is already a 0.5 s
+	 * cleanup loop that can carry this with no new machinery. The cost is up to one cleanup interval of lateness, which is
+	 * invisible for a five-second delay.
+	 */
+	private readonly pendingDecoys = new Array<{
+		readonly spawner: BasePart;
+		readonly parent: Part;
+		readonly entry: ShapePoolEntry;
+		readonly power: string;
+		readonly startSpeed: number;
+		readonly dueAt: number;
+	}>();
+
+	/**
+	 * Schedules a `decoy` ball's twin for `DECOY_SPAWN_DELAY_SECONDS` from now (item 183).
+	 *
+	 * ## Why the twin is deferred at all
+	 *
+	 * Because it is a **second body for one competitor**, and the round's capacity is counted in bodies. Spawning it inline
+	 * put nine bodies on an eight-lane belt at `Playing` entry, which read as "an extra ball" three times over and was
+	 * chased as a counting bug twice. The counting is right; the second body simply belongs later in the round. Deferring it
+	 * means the opening field is exactly one body per lane, and the twin arrives while the race is already running — which is
+	 * also better for the power, since a decoy that appears beside a stationary ball at the green light is the most
+	 * conspicuous moment it could pick.
+	 *
+	 * The delay is measured from **this ball's spawn**, not from `Playing` entry: for a ball spawned at the start of the
+	 * round those are the same instant, and for one spawned mid-round (key `4` in `Playing`) "five seconds after it appeared"
+	 * is the only reading that does not make the twin instantaneous.
+	 */
+	private queueDecoy(
+		spawner: BasePart,
+		parent: Part,
+		entry: ShapePoolEntry,
+		power: string,
+		startSpeed: number,
+	): void {
+		this.pendingDecoys.push({
+			spawner,
+			parent,
+			entry,
+			power,
+			startSpeed,
+			dueAt: os.clock() + DECOY_SPAWN_DELAY_SECONDS,
+		});
+	}
+
+	/**
+	 * Creates every twin that has come due and drops the ones whose parent is gone.
+	 *
+	 * Runs from `cleanup`, which already ticks every `CLEANUP_INTERVAL_SECONDS` and already prunes destroyed bodies — so a
+	 * parent culled by `KillY`, the belt edge or `MaxLiveBalls` before its twin's moment simply never gets one, rather than
+	 * leaving an orphan twin with no parent to imitate.
+	 *
+	 * **`os.clock` rather than accumulated `dt`**, because this is wall time measured across a task wait, not a simulation
+	 * step. Nothing here is physics.
+	 */
+	private spawnDueDecoys(): void {
+		if (this.pendingDecoys.size() === 0) {
+			return;
+		}
+
+		const now = os.clock();
+		for (let index = this.pendingDecoys.size() - 1; index >= 0; index--) {
+			const pending = this.pendingDecoys[index];
+			if (pending === undefined) {
+				continue;
+			}
+
+			// **A dead parent forfeits the twin.** The round's teardown destroys bodies without telling this list, and a twin
+			// of a destroyed body would be a fake ball nobody owns and nobody clears — the exact leftover `clearAllBodies`
+			// exists to prevent.
+			if (pending.parent.Parent === undefined) {
+				this.pendingDecoys.remove(index);
+				continue;
+			}
+
+			if (now < pending.dueAt) {
+				continue;
+			}
+
+			this.pendingDecoys.remove(index);
+			this.spawnDecoy(pending.spawner, pending.parent, pending.entry, pending.power, pending.startSpeed);
+
+			print(
+				`[Spawner] decoy born: parent=${pending.parent.GetFullName()} delay=${formatNumber(DECOY_SPAWN_DELAY_SECONDS)}s bodies=${this.getLiveBodyCount()}/${this.getBoundSpawnerCount()}`,
+			);
+		}
 	}
 
 	/**
@@ -1216,6 +1369,12 @@ export class BallSpawnerService implements OnStart {
 	 * - **`settleEliminations` sees it leave the belt** and logs an elimination with no owner. Nothing tells a player,
 	 *   because `notifyEliminated` refuses an ownerless body — but the count in the log will not match the number of
 	 *   players.
+	 *
+	 * ## It is **not** created here — see `queueDecoy` (item 183)
+	 *
+	 * This function still owns every property the twin is given. What changed is *when* it is called: a `decoy` ball now
+	 * schedules its twin for `DECOY_SPAWN_DELAY_SECONDS` later, so the round's opening body count is one per lane and the
+	 * twin walks in after the race has begun.
 	 */
 	private spawnDecoy(
 		spawner: BasePart,
@@ -1782,6 +1941,7 @@ export class BallSpawnerService implements OnStart {
 
 	private cleanup(): void {
 		this.pruneDestroyedBalls();
+		this.spawnDueDecoys();
 
 		for (let index = this.liveBalls.size() - 1; index >= 0; index--) {
 			const ball = this.liveBalls[index];

@@ -30,7 +30,7 @@ import { PickerOfferMessage, PickerResult, REROLL_COST_COINS } from "shared/pick
 import { ECONOMY_ACTION_COOLDOWN_MS } from "shared/economy.config";
 import { payoutAwards, RoundPayoutMessage } from "shared/round-payout";
 import { powerForBallId } from "shared/powers.config";
-import { lastToucherOf, setHitEffectRemote, setPower } from "server/powers";
+import { lastToucherOf, setHitEffectRemote, setPower, spawnsDecoy } from "server/powers";
 import { TAGS } from "shared/tags";
 import { ROUND_TRANSITION_ATTRIBUTE, TRANSITION_NETWORK_STEP } from "shared/constants";
 import { TRANSITION_CONFIG, coverSeconds, holdSeconds, openSeconds } from "shared/config/transition.config";
@@ -48,6 +48,7 @@ import { BallOwner, BallSpawnerService } from "./ball-spawner-service";
 import { EconomyService } from "./economy-service";
 import { isStudioSession } from "./player-data-store";
 import { decideRoundOutcome } from "../round-outcome";
+import { freeLaneIndices, remainingCompetitorSlots } from "../competitor-slots";
 import { decideDecoyOutline } from "../decoy-outline";
 import { EliminationCause, splashTargetUserId } from "../elimination-signal";
 import { shouldPlayEliminationSound } from "../elimination-sound";
@@ -484,7 +485,7 @@ export class RoundService implements OnStart {
 			// sits after the empty-belt guard so that a key press with no player body still leaves the belt empty rather than
 			// leaving bots on it, which is the same rule the fresh path below follows. Unconditional rather than Studio-gated:
 			// key `3` is a debug verb somebody pressed on purpose, exactly like key `2` on Live.
-			this.spawnBots("debug key 3 restart");
+			const bots = this.spawnBots("debug key 3 restart");
 
 			// A fresh competitor set means a fresh "nothing has happened" window. Without this reset a restart
 			// pressed 50 s into a quiet round would inherit the old clock and print the idle warning 10 s later,
@@ -492,7 +493,11 @@ export class RoundService implements OnStart {
 			this.lastProgressAt = os.clock();
 			this.idleWarned = false;
 
-			print(`[Round] Playing → Playing (${reason}, restart, competitors=${restarted})`);
+			// **`restarted + bots`, not `restarted` (item 181).** The field is named `competitors` and used to print only the
+			// player bodies, so a restart with one player and seven bots logged `competitors=1` beside a
+			// `debug spawn … live=8` line two frames earlier. Two lines in the same log disagreeing about how full the belt
+			// is, is the reading this tree keeps paying for; the count is now the whole field.
+			print(`[Round] Playing → Playing (${reason}, restart, competitors=${restarted + bots})`);
 			return;
 		}
 
@@ -562,6 +567,12 @@ export class RoundService implements OnStart {
 	 * single line naming how many were wanted and how many exist, because a per-player "you were dropped"
 	 * line would multiply with the player count and say the same thing each time.
 	 *
+	 * **Two bounds now, and the second one is new (item 180).** `min(players, lanes)` remains the "no more players than
+	 * lanes" bound. On top of it the spawn is bounded by `remainingCompetitorSlots(live, lanes)` — the round's capacity —
+	 * so this path cannot push a round past `boundSpawnerCount` competitors even when something else spawned first. On a
+	 * normal call it arrives after `clearAllBodies`, so `live` is `0` and the second bound is inert; it is a floor under the
+	 * pathological call, not a change to the ordinary one.
+	 *
 	 * ## `drawBallIds`, and why it is a parameter rather than the default
 	 *
 	 * A real round has a pick: `Waiting` rolls an offer per player, so `chosenBallIdFor` answers and the body races the
@@ -611,9 +622,26 @@ export class RoundService implements OnStart {
 			return 0;
 		}
 
-		const count = math.min(wanted, lanes);
+		// **Two bounds, and the second one is the round's capacity (item 180).** `min(wanted, lanes)` answers "one player per
+		// lane, and no more players than there are lanes". `remaining` answers "how many bodies may this round still hold",
+		// counting what is already on the belt — which matters when a caller reaches here after something else has already
+		// spawned, rather than after `clearAllBodies`. It is always `lanes` on a freshly cleared round, so this changes
+		// nothing on the normal path and only bounds the pathological one.
+		const live = this.getLiveBalls().size();
+		const remaining = remainingCompetitorSlots(live, lanes);
+		const count = math.min(wanted, lanes, remaining);
+
 		if (wanted > lanes) {
-			print(`[Round] spawn capped: wanted ${wanted}, spawners=${lanes}, spawned ${lanes}`);
+			print(`[Round] spawn capped: wanted ${wanted}, spawners=${lanes}, spawned ${count}`);
+		}
+
+		// **Said separately from the line above, because it is a different refusal.** That one means "more players than
+		// lanes the scene has"; this one means "the round is already at capacity" — and if it is the line a reader sees,
+		// the interesting fact is `live`, which the first line does not print.
+		if (remaining < math.min(wanted, lanes)) {
+			print(
+				`[Round] spawn capped by round capacity: wanted=${wanted} lanes=${lanes} live=${live} remaining=${remaining} spawning=${count} (${reason})`,
+			);
 		}
 
 		// **The debug draw, and only the debug draw.** A real round enters `Waiting` first, where the picker writes a pick
@@ -697,6 +725,17 @@ export class RoundService implements OnStart {
 	 * `forceWaiting` calls it to populate a solo session automatically, and its transition line prints `competitors=<n>`. If
 	 * the bots were spawned without being counted that line would say `competitors=1` in a round with five bodies, and a log
 	 * that disagrees with the world is worse than no log.
+	 *
+	 * ## Key `4` is bounded by the round's capacity, and `MaxLiveBalls` is the only ceiling beyond it (item 180)
+	 *
+	 * This key used to be the one path with no bound at all: one body per bound spawner, every press, however full the belt
+	 * already was. It now spawns `remainingCompetitorSlots(live, lanes)` — which is one per **free** lane, and is therefore
+	 * the same "fill the field" behaviour on an empty round, seven on a round holding one player body, and a refusal on a
+	 * round already at capacity.
+	 *
+	 * **No second guard is added on top.** Pressing `4` repeatedly can still exceed the lane count only through the
+	 * `MaxLiveBalls` eviction timing — a body destroyed by the cap mid-press leaves a slot this counted as taken — and that
+	 * is the designer's decision, not a bug for a later reader to "fix" by adding a cooldown or a stricter comparison.
 	 */
 	public debugSpawnCompetitors(reason = "debug key 4"): number {
 		if (this.phase !== "Playing" && this.phase !== "Waiting") {
@@ -719,8 +758,19 @@ export class RoundService implements OnStart {
 	 * `playEliminationSound` shape: the rule lives where it can be read once, and each caller states its own precondition
 	 * by having passed one.
 	 *
-	 * **The body is unchanged from item 131:** the count is `getBoundSpawnerCount()`, the owners are synthetic
-	 * `Debug#N`, every body is tracked, and the log line is the one key `4` has always printed.
+	 * **The count is no longer `getBoundSpawnerCount()` (item 180).** It is `remainingCompetitorSlots(live, lanes)` — one
+	 * bot per **free** lane, so a round that already holds the players' bodies is filled to the cap rather than doubled past
+	 * it. With eight lanes and one player body this spawns seven, not eight; with eight players it spawns none and says so.
+	 * The owners are still synthetic `Debug#N`, every body is still tracked, and the log line is the one key `4` has always
+	 * printed.
+	 *
+	 * **A full round is a refusal with a reason, not a silent no-op.** `slots=0` prints `live=` and `spawners=` together,
+	 * because a scene with no spawners tagged and a round already at capacity are the same zero and need opposite fixes.
+	 *
+	 * **What this does *not* fix: the lanes the bots land in.** `spawnForRound` walks lanes from index `0`, so a bot spawn
+	 * after a player body starts at lane `0` again and shares the player's lane while leaving the last lane empty. That is a
+	 * spawn-geometry question (a lane's `X` is belt-derived and only its `Z` comes from the spawner part), not a counting
+	 * one; this bound decides how many bodies a round may hold, not whether two of them occupy one lane.
 	 *
 	 * ## The log line
 	 *
@@ -737,8 +787,65 @@ export class RoundService implements OnStart {
 	 * with no body behind it would be worse than no log.
 	 */
 	private spawnBots(reason: string): number {
-		const owners = this.nextDebugOwners(this.spawner.getBoundSpawnerCount());
-		const spawned = this.spawner.spawnForRound(owners);
+		// **The round's capacity, checked here because this is the one funnel (item 180).** Every bot path goes through this
+		// method — key `4`, key `2` on Live, both `3` branches and the automatic solo-Studio population — so the bound is
+		// stated once. Putting it in `debugSpawnCompetitors` instead would have left the four other callers unbounded, which is
+		// exactly the state this item found: a `3` key with one player made one player body plus eight bots.
+		//
+		// **`getLiveBodyCount()`, not the tracked competitor set (item 182).** The question is "how many bodies are on the
+		// belt", and a body the round does not track still occupies a lane. The spawner's list is the only count that knows
+		// what it actually made.
+		//
+		// **Pending twins are not in it, and that is now correct (item 183).** A twin sits in `pendingDecoys` for
+		// `DECOY_SPAWN_DELAY_SECONDS` and is not on the belt, so it does not occupy a lane while this draw is happening —
+		// which is what lets the opening field be exactly one body per lane whatever was picked.
+		const lanes = this.spawner.getBoundSpawnerCount();
+		const bodies = this.spawner.getLiveBodies();
+		const live = bodies.size();
+		const slots = remainingCompetitorSlots(live, lanes);
+
+		// **Said rather than silently skipped.** A debug key that does nothing is the failure this tree keeps re-learning,
+		// and the two ways to reach here want different responses: `slots=0` with `lanes=0` is a scene with no spawners
+		// tagged, and `slots=0` with `live=lanes` is a round already full. One line naming both numbers distinguishes them.
+		if (slots === 0) {
+			print(`[Round] debug spawn refused — no competitor slots (${reason}): live=${live} spawners=${lanes}`);
+			return 0;
+		}
+
+		// **Free lanes, lowest first (item 184).** The bodies already on the belt hold lanes, and a debug body must not be
+		// dropped on top of one: `spawnForRound` used to number its bodies from lane `0` every press, so after the players'
+		// own bodies a debug body landed beside the player — two bodies inside each other, `Touched` refiring every physics
+		// step, and the burst and sound spam that comes with it. The lane the player holds is skipped because `SpawnLane`
+		// says it is taken, not because it happens to be lane `0`, which is what keeps a restart (and any future change to
+		// player placement) correct without a second rule.
+		const freeLanes = freeLaneIndices(bodies, lanes);
+
+		// **Fewer free lanes than slots is a real state, and it is logged rather than silently truncated.** It means the
+		// belt holds bodies this round did not track — a body spawned before the round, or a twin that has since been born —
+		// so the shortfall is the interesting fact, not a number to swallow.
+		if (freeLanes.size() < slots) {
+			print(
+				`[Round] debug spawn bounded by free lanes: slots=${slots} free=${freeLanes.size()} live=${live} spawners=${lanes} (${reason})`,
+			);
+		}
+
+		const count = math.min(slots, freeLanes.size());
+		if (count === 0) {
+			print(`[Round] debug spawn refused — every lane occupied (${reason}): live=${live} spawners=${lanes}`);
+			return 0;
+		}
+
+		const owners = this.nextDebugOwners(count);
+
+		// **The lowest-numbered free lanes, taken in order.** `freeLaneIndices` returns ascending indices, so the first
+		// `count` of them are the lowest free lanes — which is the "fill from the front, skipping what is taken" rule the
+		// debug key has always looked like it had.
+		const chosenLanes = new Array<number>();
+		for (let index = 0; index < count; index++) {
+			chosenLanes.push(freeLanes[index]);
+		}
+
+		const spawned = this.spawner.spawnForRound(owners, chosenLanes);
 		for (const ball of spawned) {
 			this.trackBall(ball);
 		}
@@ -746,16 +853,30 @@ export class RoundService implements OnStart {
 		const first = owners[0];
 		const last = owners[owners.size() - 1];
 
+		// **Counted off what was actually spawned**, not off the draw: a failed spawn leaves a body out of `spawned`, and a
+		// twin count computed from the drawn ids would describe a body that does not exist.
+		let twins = 0;
 		const ballIds = new Array<string>();
 		for (const ball of spawned) {
 			const ballId = ball.GetAttribute(CHOSEN_BALL_ID_ATTRIBUTE);
 			if (typeIs(ballId, "string")) {
 				ballIds.push(ballId);
+
+				if (spawnsDecoy(powerForBallId(ballId) ?? "")) {
+					twins++;
+				}
 			}
 		}
 
+		// `twins=` is how many twins the draw **scheduled**, not how many exist yet: they arrive after
+		// `DECOY_SPAWN_DELAY_SECONDS`. `pending=` is the queue depth, and `bodies=` is what is on the belt now — the three
+		// numbers a reader needs to tell "spawned nothing" from "spawned a twin that has not been born yet".
+		//
+		// **`lanes=` is the placement (item 184).** It prints the lane indices the bodies actually went to, and it is the
+		// field that proves this round's fix: a run with one player must show `lanes=1,2,3,4,5,6,7` rather than a repeat of
+		// `0`, which is the collision the spawn log used to hide behind two identical positions.
 		print(
-			`[Round] debug spawn (${reason}): ${spawned.size()} competitors (${first === undefined ? "none" : first.displayName}..${last === undefined ? "none" : last.displayName}) balls=${ballIds.join(",")}, live=${this.liveBalls.size()}`,
+			`[Round] debug spawn (${reason}): ${spawned.size()} competitors (${first === undefined ? "none" : first.displayName}..${last === undefined ? "none" : last.displayName}) balls=${ballIds.join(",")}, lanes=${chosenLanes.join(",")}, live=${this.liveBalls.size()}, bodies=${this.spawner.getLiveBodyCount()}/${lanes}, twins=${twins}, pending=${this.spawner.getPendingDecoyCount()}`,
 		);
 
 		return spawned.size();
@@ -777,6 +898,14 @@ export class RoundService implements OnStart {
 	 * The ids come from `pickDistinctBallIds`, so one press never produces two bodies of the same ball — which is the
 	 * whole point of the debug spawn, since a Studio session watching four identical powers has learned nothing. The draw
 	 * is per press and does not consult the live field; see that function for why.
+	 *
+	 * ## Why this is one owner per free slot, with no decoy surcharge (item 183)
+	 *
+	 * A `decoy` ball used to spawn its twin inline, so the draw charged it two bodies and a press that drew `decoy` took one
+	 * owner fewer. The twin is now **deferred** by `DECOY_SPAWN_DELAY_SECONDS`, so a drawn `decoy` puts exactly **one** body
+	 * on the belt at spawn — the same as any other ball — and a surcharge here would leave the opening field one body short of
+	 * the lane count. The twin still costs a body, but it costs it five seconds later, which is the point of the delay: the
+	 * opening field is exactly one body per lane, whoever picked what.
 	 *
 	 * **Nothing here writes a `Power` attribute.** `spawnBall` derives it from `chosenBallId` through `setPower`, so the
 	 * badge, the collision group and the `Touched` connection all follow from the id. A second write here would be a second
