@@ -396,6 +396,59 @@ export function collisionGroupFor(power: string): string {
 	return power === "ghost" ? GHOST_GROUP : BALL_GROUP;
 }
 
+/**
+ * Whether physics allows these two groups to collide at all — **the pair table from `ensureCollisionGroups`, as a predicate**
+ * (item 189).
+ *
+ * ## Why this exists when the groups already answer it
+ *
+ * They should. `GHOST_GROUP`/`BALL_GROUP` and `GHOST_GROUP`/`GHOST_GROUP` are registered non-collidable, so `Touched` ought
+ * never to fire for those pairs and `onBallCollision` ought never to see them. A Studio report says otherwise: a ghost drew
+ * bursts, sounds and shoves while the boot line showed the five pairs applied and the spawn line showed `group=GhostBall`.
+ * Those two facts cannot both be true of a working engine, so one of them is not what it looks like — and this guard is what
+ * makes the handler safe either way. It is a **belt**, not a substitute for the table: the table is still what makes a ghost
+ * intangible, and if it works this function is never consulted with a false.
+ *
+ * ## The two groups are enough
+ *
+ * Three of the five registered pairs are collidable and two are not, and every one of them is decided by **whether a ghost is
+ * involved and what it is facing**: `CompetitorBall`/`CompetitorBall` collides, `GhostBall`/`GhostBall` does not, and
+ * `GhostBall`/`CompetitorBall` does not. No third group is needed, because nothing in this game distinguishes "which kind of
+ * solid thing" — the belt, the walls and the floor are all `Default` and all collide with both.
+ *
+ * ## `Default` collides, and that is the assertion that matters
+ *
+ * `CompetitorBall`/`Default` and `GhostBall`/`Default` are both registered `true`: the belt surface, the walls and the
+ * invisible floor are `Default`, and a ghost still lands on them. **Any answer other than `true` for a `Default` pair would
+ * break every real collision in the game**, which would read as "the physics is gone" rather than as "the ghost guard is
+ * wrong" — so the rule is written as "only a ghost-versus-a-ball is refused", and everything unknown defaults to collidable.
+ * An unrecognised group is therefore treated as solid, which is the fail-safe direction: the worst outcome is an effect that
+ * should not have fired, never a ball that falls through the world.
+ *
+ * ## Why it is exported and pure
+ *
+ * The table lives in `ensureCollisionGroups`, which needs `PhysicsService` and therefore cannot run in the Jest runtime. As a
+ * pure function over two strings it can be asserted for every pair the game has, including the `Default` cases, which is the
+ * only way to be sure the guard does not disable collisions for ordinary balls.
+ */
+export function pairCanCollide(a: string, b: string): boolean {
+	if (a === GHOST_GROUP && b === GHOST_GROUP) {
+		return false;
+	}
+
+	// A ghost against anything else: refused only when the other side is a competitor ball. A ghost against `Default` (belt,
+	// walls, floor) is a real collision and must stay one.
+	if (a === GHOST_GROUP) {
+		return b !== BALL_GROUP;
+	}
+
+	if (b === GHOST_GROUP) {
+		return a !== BALL_GROUP;
+	}
+
+	return true;
+}
+
 let groupsRegistered = false;
 
 /**
@@ -412,16 +465,46 @@ function ensureCollisionGroups(): void {
 	}
 	groupsRegistered = true;
 
-	pcall(() => PhysicsService.RegisterCollisionGroup(BALL_GROUP));
-	pcall(() => PhysicsService.RegisterCollisionGroup(GHOST_GROUP));
+	// **The applied/failed report (item 188).** Every call below is `pcall`-guarded, which is right — `RegisterCollisionGroup`
+	// errors if the name already exists, and a designer may have made the groups by hand — but a guard with no report turns
+	// "the pair was never disabled" into silence. A ghost that sparks a hit burst is exactly that symptom, and this line is
+	// the only place that can distinguish "the pair failed to apply" from "the group assignment is wrong".
+	//
+	// One line, at boot, on the server. `ok`/`FAILED` per step rather than a count, because *which* step failed is the fact
+	// that decides the fix.
+	const applied = new Array<string>();
+	const step = (label: string, run: () => void) => {
+		const [success] = pcall(run);
+		applied.push(success ? label : `${label}:FAILED`);
+	};
+
+	step(`register=${BALL_GROUP}`, () => PhysicsService.RegisterCollisionGroup(BALL_GROUP));
+	step(`register=${GHOST_GROUP}`, () => PhysicsService.RegisterCollisionGroup(GHOST_GROUP));
 
 	// Explicitly true rather than left to the default, so the intent is in the file: these are the pairs that must keep
 	// colliding, and a designer reading the groups in Studio sees why `Default` is untouched.
-	pcall(() => PhysicsService.CollisionGroupSetCollidable(BALL_GROUP, "Default", true));
-	pcall(() => PhysicsService.CollisionGroupSetCollidable(GHOST_GROUP, "Default", true));
-	pcall(() => PhysicsService.CollisionGroupSetCollidable(BALL_GROUP, BALL_GROUP, true));
-	pcall(() => PhysicsService.CollisionGroupSetCollidable(GHOST_GROUP, GHOST_GROUP, false));
-	pcall(() => PhysicsService.CollisionGroupSetCollidable(GHOST_GROUP, BALL_GROUP, false));
+	step(`${BALL_GROUP}/${"Default"}=true`, () =>
+		PhysicsService.CollisionGroupSetCollidable(BALL_GROUP, "Default", true),
+	);
+	step(`${GHOST_GROUP}/${"Default"}=true`, () =>
+		PhysicsService.CollisionGroupSetCollidable(GHOST_GROUP, "Default", true),
+	);
+	step(`${BALL_GROUP}/${BALL_GROUP}=true`, () =>
+		PhysicsService.CollisionGroupSetCollidable(BALL_GROUP, BALL_GROUP, true),
+	);
+	step(`${GHOST_GROUP}/${GHOST_GROUP}=false`, () =>
+		PhysicsService.CollisionGroupSetCollidable(GHOST_GROUP, GHOST_GROUP, false),
+	);
+	step(`${GHOST_GROUP}/${BALL_GROUP}=false`, () =>
+		PhysicsService.CollisionGroupSetCollidable(GHOST_GROUP, BALL_GROUP, false),
+	);
+
+	// The read-back, because a successful `CollisionGroupSetCollidable` is not proof the pair took: `IsCollisionGroupRegistered`
+	// answers whether the names exist at all, and the pair list above answers whether each call was accepted. Between them a
+	// run can say whether a ghost should be intangible *at all* before blaming the burst.
+	print(
+		`[Powers] collision groups: ${applied.join(" ")} ${GHOST_GROUP}Registered=${tostring(PhysicsService.IsCollisionGroupRegistered(GHOST_GROUP))} ${BALL_GROUP}Registered=${tostring(PhysicsService.IsCollisionGroupRegistered(BALL_GROUP))}`,
+	);
 }
 
 // #endregion
@@ -941,7 +1024,7 @@ function maybePop(ball: BasePart, other: BasePart): void {
 	writePopY(ball, ballVelocity, BALL_COLLISION_POP_UPWARD_SPEED);
 	writePopY(other, otherVelocity, BALL_COLLISION_POP_UPWARD_SPEED);
 	print(
-		`[Powers] pop: ball=${ball.GetFullName()} other=${other.GetFullName()} chance=${chance} roll=${roll} y=${BALL_COLLISION_POP_UPWARD_SPEED}`,
+		`[Powers] pop: ball=${ball.GetFullName()} other=${other.GetFullName()} ballGroup=${ball.CollisionGroup} otherGroup=${other.CollisionGroup} chance=${chance} roll=${roll} y=${BALL_COLLISION_POP_UPWARD_SPEED}`,
 	);
 }
 
@@ -993,7 +1076,7 @@ function maybeShove(ball: BasePart, other: BasePart): void {
 	shoveLateral(ball, direction.mul(-BALL_COLLISION_SHOVE_SPEED));
 	shoveLateral(other, direction.mul(BALL_COLLISION_SHOVE_SPEED));
 	print(
-		`[Powers] shove: ball=${ball.GetFullName()} other=${other.GetFullName()} speed=${BALL_COLLISION_SHOVE_SPEED} dir=${formatVector(direction)}`,
+		`[Powers] shove: ball=${ball.GetFullName()} other=${other.GetFullName()} ballGroup=${ball.CollisionGroup} otherGroup=${other.CollisionGroup} speed=${BALL_COLLISION_SHOVE_SPEED} dir=${formatVector(direction)}`,
 	);
 }
 
@@ -1074,7 +1157,9 @@ function broadcastHit(ball: BasePart, other: BasePart): void {
 	// reverse pairing — an old server, a new client — reads `radius` as `nil`, which `burst` treats as "no size reported".
 	const radius = math.max(ball.Size.X, other.Size.X) / 2;
 	remote.FireAllClients(midpoint, radius);
-	print(`[Powers] hit: ball=${ball.GetFullName()} other=${other.GetFullName()} midpoint=${formatVector(midpoint)}`);
+	print(
+		`[Powers] hit: ball=${ball.GetFullName()} other=${other.GetFullName()} ballGroup=${ball.CollisionGroup} otherGroup=${other.CollisionGroup} midpoint=${formatVector(midpoint)}`,
+	);
 }
 
 /**
@@ -1136,6 +1221,19 @@ function broadcastHit(ball: BasePart, other: BasePart): void {
  * **Gate (3) is why a pair with no colliding power produces no burst.** That is now a property of this handler alone: since
  * item 87 every body carries a `Touched` connection (see `setPower`), and the colliding-power check moved from the
  * connection to here.
+ *
+ * ## The ladder, with the group guard in it (item 189)
+ *
+ * 1. `powersActive` — the round is live.
+ * 2. `other` carries the `Ball` tag.
+ * 3. **`pairCanCollide(ball.CollisionGroup, other.CollisionGroup)`** — the pair is one physics allows. This is the guard the
+ *    docblock above assumes when it says a ghost's `Touched` should never arrive; it is here because that assumption was
+ *    reported false, and it is above every effect so none of them can fire for a pair the table forbids.
+ * 4. `rememberTouch`.
+ * 5. `maybePop` → `maybeShove` → `maybeBurst` (shared contact clock).
+ * 6. This body's state exists and its power is a colliding one.
+ * 7. `POWER_COLLISION_COOLDOWN`.
+ * 8. The transfer has somewhere to go.
  */
 export function onBallCollision(ball: BasePart, other: BasePart): void {
 	if (!powersActive) {
@@ -1143,6 +1241,20 @@ export function onBallCollision(ball: BasePart, other: BasePart): void {
 	}
 
 	if (!other.HasTag(TAGS.ball)) {
+		return;
+	}
+
+	// **A pair the group table forbids is not a contact, and nothing below may treat it as one (item 189).** Placed here —
+	// above `rememberTouch` and above all three effects, below the `Ball` tag test — because everything past this point assumes
+	// two balls actually met. `pairCanCollide` returns `true` for any pair involving `Default`, so the belt, the walls and the
+	// floor are untouched; only a ghost against a ball or another ghost is refused.
+	//
+	// **The `Touched` connection stays on every body** (item 87). Removing it for a ghost would make the last-touch record and
+	// the elimination-sound attribution incomplete for the bodies a ghost *does* collide with, and a guard inside one handler
+	// is a smaller change than a second connection policy. The cost is one attribute read and two string comparisons per
+	// `Touched` event that should never have arrived — cheaper than the proximity scan that would replace `Touched`, which
+	// would be a query per ball per frame to re-answer a question the physics broadphase already answered.
+	if (!pairCanCollide(ball.CollisionGroup, other.CollisionGroup)) {
 		return;
 	}
 

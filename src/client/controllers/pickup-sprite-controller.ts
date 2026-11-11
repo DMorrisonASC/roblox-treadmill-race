@@ -1,5 +1,7 @@
 import { CollectionService, ContentProvider, ReplicatedStorage, TweenService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
+import { PICKUP_SCALE_MULTIPLIER, pickupDiscDiameter } from "shared/config/pickup.config";
+import { poolBallRadius } from "shared/shape-pool";
 import { TAGS } from "shared/tags";
 import {
 	PICKUP_SIZE,
@@ -15,6 +17,7 @@ import {
 	RING_THICKNESS_STUDS,
 	RING_TRANSPARENCY,
 } from "shared/tuning";
+import { effectScaleForRadius } from "shared/vfx-scale";
 
 /**
  * **The Studio instance that may supply the sprite's image instead of the id in `tuning.ts`.** A `Decal`, a `Texture` or an
@@ -87,6 +90,16 @@ export class PickupSpriteController implements OnStart {
 	private imageUri?: string;
 
 	/**
+	 * The computed size ratio for this client's pickups — `effectScaleForRadius(ballRadius, PICKUP_SCALE_MULTIPLIER)`
+	 * (item 188).
+	 *
+	 * Computed once at boot from the **shape pool's** ball radius rather than from any live body: a pickup exists before the
+	 * first ball spawns and outlives the last, so a scene scan would answer `undefined` on exactly the frames a pad is built.
+	 * Every pad on a belt is the same size, so one number for the controller is also the honest model.
+	 */
+	private pickupScale = 1;
+
+	/**
 	 * Whether the first sprite has already reported its size. One line per session, not one per pad: the interesting fact is
 	 * "a sprite was built at all, and this is how big it came out", which cannot change between pads — they share the same
 	 * constants.
@@ -95,6 +108,7 @@ export class PickupSpriteController implements OnStart {
 
 	public onStart(): void {
 		this.imageUri = this.resolveImage();
+		this.pickupScale = effectScaleForRadius(poolBallRadius(), PICKUP_SCALE_MULTIPLIER);
 
 		if (this.imageUri === undefined) {
 			// **One line, no throw, and the pads still work.** A missing sprite is a cosmetic failure: the collider is the
@@ -124,7 +138,7 @@ export class PickupSpriteController implements OnStart {
 		CollectionService.GetInstanceRemovedSignal(TAGS.pickup).Connect((instance) => this.detach(instance));
 
 		print(
-			`[PickupSprite] mounted image=${this.imageUri} studs=${PICKUP_SPRITE_STUDS} spin=${this.spinSeconds()}s (turns) throttle=${PICKUP_SPIN_MIN_INTERVAL_SECONDS}s`,
+			`[PickupSprite] mounted image=${this.imageUri} studs=${PICKUP_SPRITE_STUDS} scale=${this.pickupScale} drawn=${PICKUP_SPRITE_STUDS * this.pickupScale} spin=${this.spinSeconds()}s (turns) throttle=${PICKUP_SPIN_MIN_INTERVAL_SECONDS}s`,
 		);
 		// The ring's constants have no per-pad measurement to report - its size is the pad's, which the first-attach line
 		// prints - so this line is the look itself: what shape it is, its colour, how much of it lands, how finely it is
@@ -228,6 +242,12 @@ export class PickupSpriteController implements OnStart {
 	 * square are inside the collider and outside the ring, so the ring understates the volume — the forgiving direction, since
 	 * a player who aims at the ring collects.
 	 *
+	 * **"Inscribed" was only half true until item 190.** The diameter was `min(X, Z) * PICKUP_SCALE_MULTIPLIER`, so at a
+	 * 20-stud pad and a scale of `4` the ring was drawn **80** studs across around a **20**-stud collider — circumscribed
+	 * four times over, and a ball inside the paint collected nothing. The disc now takes **no** multiplier: it is
+	 * `pickupDiscDiameter(padSize)`, which is the collider's own inscribed circle, and a spec asserts that equality. The
+	 * paragraph above is therefore true now rather than aspirational, and it is the sentence the bug contradicted.
+	 *
 	 * ## Cylinder geometry, and which face the ring is drawn on
 	 *
 	 * `Enum.PartType.Cylinder` is *"a cylinder shape oriented along the **X** axis"* (the typings, and the same finding
@@ -254,7 +274,16 @@ export class PickupSpriteController implements OnStart {
 	 */
 	private buildFootprint(pickup: BasePart): FootprintInfo {
 		const padSize = pickup.Size;
-		const diameter = math.min(padSize.X, padSize.Z);
+
+		// **The disc is the collider's inscribed circle, and it does not take the scale multiplier (item 190).** It used to be
+		// `min(padSize.X, padSize.Z) * scale`, which at a 20-stud pad and a scale of `4` painted an **80**-stud ring around a
+		// **20**-stud collider: a ball visibly inside the paint did not collect, because the paint was decoration with no
+		// collision and the real reach was a quarter of what it showed.
+		//
+		// The distinction this line now encodes: the disc is a **promise about reach**, so it follows the collider and nothing
+		// else; the sprite is a **picture** and keeps its own tuner. A disc that could be tuned independently of the box it
+		// describes is a disc that can lie.
+		const diameter = pickupDiscDiameter(padSize);
 
 		const ring = new Instance("Part");
 		ring.Name = "PickupFootprint";
@@ -405,6 +434,9 @@ export class PickupSpriteController implements OnStart {
 			return undefined;
 		}
 
+		const scale = this.pickupScale;
+		const spriteStuds = PICKUP_SPRITE_STUDS * scale;
+
 		const billboard = new Instance("BillboardGui");
 		billboard.Name = "PickupSprite";
 		// **`fromScale`, because that is the component that means studs (item 145).** A `BillboardGui`'s `Size` is not a
@@ -412,7 +444,7 @@ export class PickupSpriteController implements OnStart {
 		// *offset* components are screen pixels pinned to a fixed on-screen size. This line first read
 		// `UDim2.fromOffset(PICKUP_SPRITE_STUDS, ...)`, which built a 2.6-**pixel** billboard — the pale dot a playtest
 		// reported instead of a sprite. The constant is unchanged; the component it is fed through is the fix.
-		billboard.Size = UDim2.fromScale(PICKUP_SPRITE_STUDS, PICKUP_SPRITE_STUDS);
+		billboard.Size = UDim2.fromScale(spriteStuds, spriteStuds);
 		// Above the pad, so a ball sitting on it does not hide the marker. The pad is `PICKUP_SIZE.Y` tall and centred on its
 		// own position, so the top face is half that above the origin.
 		billboard.StudsOffsetWorldSpace = new Vector3(0, PICKUP_SIZE.Y / 2 + PICKUP_SPRITE_LIFT_STUDS, 0);

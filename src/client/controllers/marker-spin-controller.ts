@@ -612,10 +612,15 @@ export class MarkerSpinController implements OnStart {
 					omega = 0;
 					rateSource = "phantom";
 					axisSource = "phantom";
+					// **Reported, not applied (item 188).** `omega` stays `0` because the phantom's own roll is the picture, but
+					// the log used to print `omegaVisual=0 angle=0` on this path for that reason alone — a reader could not tell
+					// "the skin is not turning" from "this field only exists on the fallback branch". Printing the rate the
+					// skin is using makes the log answer the question it looks like it answers.
+					omegaThisFrame = apparentSpinRate(ballSpeed);
 				} else if (ballSpeed > SPIN_DEADBAND_SPEED) {
 					// One formula, in `shared/apparent-spin.ts`, so this path and the skin cannot disagree about the rate even
 					// though only one of them is accumulating an angle.
-					omega = apparentSpinRate(ballSpeed, state.radius);
+					omega = apparentSpinRate(ballSpeed);
 					rateSource = "attribute";
 				} else {
 					omega = 0;

@@ -514,10 +514,21 @@ export const SPIN_DEADBAND_SPEED = 0.5;
  * unambiguous. The report that motivated this was "sliding forward while rotating far too slowly", which is exactly what
  * that fold looks like.
  *
+ * **Item 188 reverted it to `1` for a second reason.** The rate used to divide by the **actual** radius, so a 20-stud ball
+ * drew `3 * 10 / 10 = 3 rad/s` - half a revolution per second, i.e. visibly creeping. `apparentSpinRate` now divides by
+ * `BASE_BALL_RADIUS` (the pack's design radius) instead, so this gain means "no-slip *at the design size*" and the drawn
+ * rate no longer collapses as the ball grows. At `BALL_SPEED = 10` that is `20 rad/s` whatever the ball's size, and at
+ * `20` it is `40` - comfortably under `APPARENT_SPIN_MAX_RAD_PER_SEC`.
+ *
+ * **The literal "20x faster" was tried and rejected on arithmetic, not taste.** Twenty times the old `3.3 rad/s` is
+ * `66 rad/s`, which is the *same* 9.5 rev/s aliasing regime described above - the very defect `3` was rolled back for. The
+ * size-relative form at gain `1` gives `6x` the old rate and lands exactly on the number that was legible when the ball was
+ * one stud.
+ *
  * **The rest of the visual coupling lives in `BELT_TEXTURE_SCROLL_MULTIPLIER`.** No ball rotation can match a tread drawn
  * faster than the belt model's `BELT_SPEED`; the two only agree at `1`.
  */
-export const APPARENT_SPIN_GAIN = 3;
+export const APPARENT_SPIN_GAIN = 2;
 
 /**
  * **Placeholder, and not read by anything.** Kept as the placeholder for a multiplier on a body's *own*
@@ -648,7 +659,7 @@ export const APPARENT_SPIN_SIGN = -1;
  * collider behind a billboard, `Y = 1` still matters - it is what a ball's height has to intersect - but nothing about the
  * *appearance* depends on it.
  */
-export const PICKUP_SIZE = new Vector3(2, 1, 2);
+export const PICKUP_SIZE = new Vector3(20, 20, 20);
 
 /**
  * **Placeholder.** The random band a pickup's `X` is chosen from, in the belt's **local** `X`, in studs.
@@ -778,7 +789,7 @@ export const RING_PIXELS_PER_STUD = 200;
  * twentieth of a stud: thin enough that the ring reads as paint on the floor rather than as a plate, thick enough that the
  * disc it makes is not degenerate.
  */
-export const RING_THICKNESS_STUDS = 0.05;
+export const RING_THICKNESS_STUDS = 1;
 
 /**
  * **Placeholder.** How far above the pad's bottom face the ring floats, in studs.
@@ -788,7 +799,7 @@ export const RING_THICKNESS_STUDS = 0.05;
  * belt. A ring at exactly that height z-fights with the thing it is lying on: two coplanar surfaces, decided per frame, per
  * pixel. `0.02` studs is below the perceptual floor and above the depth buffer's.
  */
-export const RING_LIFT_STUDS = 0.02;
+export const RING_LIFT_STUDS = 0.12;
 
 /**
  * **Placeholder.** How long one collection spin takes, in seconds.
@@ -956,7 +967,7 @@ export const BALL_PHYSICAL_FRICTION = 0.05;
 export const BALL_PHYSICAL_ELASTICITY = 0.95;
 
 /** **Placeholder.** Minimum upward velocity for a successful contact pop, in studs/second. */
-export const BALL_COLLISION_POP_UPWARD_SPEED = 30;
+export const BALL_COLLISION_POP_UPWARD_SPEED = 80;
 
 /**
  * **Placeholder.** Seconds after a `decoy` ball spawns before its twin appears, in seconds (item 183).
@@ -1005,7 +1016,7 @@ export const DECOY_SPAWN_DELAY_SECONDS = 5;
  * The sway's own position correction (`SWAY_TRACK_SECONDS = 1.5`) then walks the ball back to its wave, so the shove
  * settles instead of permanently changing lane.
  */
-export const BALL_COLLISION_SHOVE_SPEED = 10;
+export const BALL_COLLISION_SHOVE_SPEED = 80;
 
 /**
  * **Placeholder.** Time constant of a contact shove, in seconds.

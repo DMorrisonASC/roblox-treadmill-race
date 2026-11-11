@@ -134,6 +134,22 @@ export function poolMaxExtent(): number {
 }
 
 /**
+ * The radius of a pooled ball, in studs — `Size.X / 2` of the pool's first entry.
+ *
+ * Added by item 188 for the pickup, which is **not attached to a ball** and therefore has no body to read a radius from. A
+ * scene scan for any `Ball`-tagged part would answer the same number today and would answer `undefined` before the first
+ * spawn, which is exactly the frame a pickup can be created in. The pool is the one place that already says how big a ball
+ * is, so the pickup reads it there and gets a stable answer at every moment of a client's life.
+ *
+ * `0` for an empty pool rather than an error: the caller passes this to `effectScaleForRadius`, which treats a
+ * non-positive radius as "no size reported" and draws the effect at its authored size.
+ */
+export function poolBallRadius(): number {
+	const entry = SHAPE_POOL[0];
+	return entry === undefined ? 0 : entry.size.X / 2;
+}
+
+/**
  * A uniformly random rotation, returned as the two basis vectors `CFrame.fromMatrix` takes.
  *
  * ## This is currently inert, on purpose

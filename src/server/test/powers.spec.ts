@@ -24,6 +24,7 @@ import {
 	collisionGroupFor,
 	drawTimers,
 	GHOST_GROUP,
+	pairCanCollide,
 	NO_TIMERS,
 	onBallCollision,
 	PowerAura,
@@ -452,6 +453,45 @@ describe("collision groups", () => {
 		expect(BALL_GROUP !== GHOST_GROUP).toBe(true);
 		expect(BALL_GROUP === "Default").toBe(false);
 		expect(GHOST_GROUP === "Default").toBe(false);
+	});
+});
+
+describe("pairCanCollide", () => {
+	it("allows two competitor balls", () => {
+		// The pair that must keep working: a belt of ordinary bodies collides as it always has.
+		expect(pairCanCollide(BALL_GROUP, BALL_GROUP)).toBe(true);
+	});
+
+	it("refuses a competitor ball against a ghost, either way round", () => {
+		// The pair the report is about. Symmetric, because a collision group pair is symmetric — the argument order is an
+		// accident of which body's `Touched` fired.
+		expect(pairCanCollide(BALL_GROUP, GHOST_GROUP)).toBe(false);
+		expect(pairCanCollide(GHOST_GROUP, BALL_GROUP)).toBe(false);
+	});
+
+	it("refuses two ghosts", () => {
+		expect(pairCanCollide(GHOST_GROUP, GHOST_GROUP)).toBe(false);
+	});
+
+	it("allows a ball against Default, both ways round", () => {
+		// **The case that would break the game if it were wrong.** The belt surface, the walls and the invisible floor are all
+		// `Default`; a guard that returned false here would drop every ball through the world, and the symptom would read as
+		// "physics is gone" rather than as "the ghost guard is wrong".
+		expect(pairCanCollide(BALL_GROUP, "Default")).toBe(true);
+		expect(pairCanCollide("Default", BALL_GROUP)).toBe(true);
+	});
+
+	it("allows a ghost against Default, both ways round", () => {
+		// The other half of the same fact: a ghost is intangible to *balls*, not to the belt it stands on.
+		expect(pairCanCollide(GHOST_GROUP, "Default")).toBe(true);
+		expect(pairCanCollide("Default", GHOST_GROUP)).toBe(true);
+	});
+
+	it("treats an unknown group as solid", () => {
+		// Fail-safe direction: a group this build has never heard of can produce an effect that should not have fired, but it
+		// can never make a body fall through the world.
+		expect(pairCanCollide(BALL_GROUP, "SomethingElse")).toBe(true);
+		expect(pairCanCollide("SomethingElse", GHOST_GROUP)).toBe(true);
 	});
 });
 

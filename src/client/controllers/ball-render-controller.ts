@@ -212,7 +212,7 @@ export class BallRenderController implements OnStart {
 			// fresh ball holds station: that identity only exists because `BALL_SPEED` measures travel *through the
 			// belt's reference* rather than across the ground. Subtracting the belt here as well would draw a ball that
 			// holds station as motionless *and unrotating* while the tread runs underneath it, which is sliding.
-			const omega = apparentSpinRate(speed, ball.Size.Y / 2);
+			const omega = apparentSpinRate(speed);
 
 			if (omega !== 0) {
 				state.spin = CFrame.fromAxisAngle(axis, omega * frameDt).mul(state.spin);

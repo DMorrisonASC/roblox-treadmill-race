@@ -2158,7 +2158,7 @@ export class BallSpawnerService implements OnStart {
 		// same-tick pair reports 1 on the second ball. `laneRadius` is printed so the occupancy threshold
 		// (`2 * laneRadius + OCCUPANCY_MARGIN_STUDS`) can be reconstructed from the line itself.
 		print(
-			`[Ball:${id}] spawn shape=${entry.shape.Name} size=${formatVector(entry.size)} pos=${formatVector(ball.Position)} mass=${formatNumber(ball.AssemblyMass)} ${this.describeOwner(ball)} occupants=${occupancy.count} nearest=${occupancy.nearest} laneRadius=${formatNumber(laneRadius(entry.size))} belt=${belt === undefined ? "none" : `"${belt.GetFullName()}"`} spawner="${spawner.GetFullName()}"`,
+			`[Ball:${id}] spawn shape=${entry.shape.Name} size=${formatVector(entry.size)} pos=${formatVector(ball.Position)} mass=${formatNumber(ball.AssemblyMass)} ${this.describeOwner(ball)} group=${ball.CollisionGroup} occupants=${occupancy.count} nearest=${occupancy.nearest} laneRadius=${formatNumber(laneRadius(entry.size))} belt=${belt === undefined ? "none" : `"${belt.GetFullName()}"`} spawner="${spawner.GetFullName()}"`,
 		);
 	}
 

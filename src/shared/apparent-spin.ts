@@ -1,4 +1,10 @@
-import { APPARENT_SPIN_GAIN, APPARENT_SPIN_MAX_RAD_PER_SEC, APPARENT_SPIN_SIGN, SPIN_DEADBAND_SPEED } from "./tuning";
+import {
+	APPARENT_SPIN_GAIN,
+	APPARENT_SPIN_MAX_RAD_PER_SEC,
+	APPARENT_SPIN_SIGN,
+	BASE_BALL_RADIUS,
+	SPIN_DEADBAND_SPEED,
+} from "./tuning";
 
 /**
  * The **apparent** spin of a ball: one rate and one axis, both derived from the model rather than from physics.
@@ -23,22 +29,37 @@ import { APPARENT_SPIN_GAIN, APPARENT_SPIN_MAX_RAD_PER_SEC, APPARENT_SPIN_SIGN, 
  */
 
 /**
- * The drawn angular rate for a ball of `radius` travelling at `speed`, in radians/second.
+ * The drawn angular rate for a ball travelling at `speed`, in radians/second.
  *
- * `min(APPARENT_SPIN_MAX_RAD_PER_SEC, APPARENT_SPIN_GAIN * speed / radius)` above `SPIN_DEADBAND_SPEED`, and exactly `0`
- * at or below it. The deadband is a real hold rather than a near-miss: `0` here feeds `CFrame.fromAxisAngle(axis, 0)`,
- * which is the identity, so a parked ball's pose is preserved bit-for-bit instead of drifting by a thousandth of a degree
- * per frame.
+ * `min(APPARENT_SPIN_MAX_RAD_PER_SEC, APPARENT_SPIN_GAIN * speed / BASE_BALL_RADIUS)` above `SPIN_DEADBAND_SPEED`, and
+ * exactly `0` at or below it. The deadband is a real hold rather than a near-miss: `0` here feeds
+ * `CFrame.fromAxisAngle(axis, 0)`, which is the identity, so a parked ball's pose is preserved bit-for-bit instead of
+ * drifting by a thousandth of a degree per frame.
  *
- * `radius <= 0` is treated as `0` rather than dividing by zero: a body whose `Size.Y` has not replicated yet would
- * otherwise produce `inf` and poison the accumulated pose with a `NaN`, which is unrecoverable once multiplied in.
+ * ## Why the divisor is `BASE_BALL_RADIUS` and not the body's radius (item 188)
+ *
+ * It used to be the actual radius, which is **physically** correct and **visually** wrong: the rate is inversely
+ * proportional to radius, so a 20-stud ball at the same `BALL_SPEED` drew **20x less rotation** than a 1-stud one. The roll
+ * the designer tuned and liked at one stud became a visible creep - `3 rad/s`, half a turn a second - at twenty.
+ *
+ * Dividing by the design radius instead makes the drawn rate a function of **speed alone**, so the picture is the same at
+ * any ball size and a future size change needs no retuning of this. **The cost, stated:** this is no longer a rolling rate.
+ * A 20-stud ball drawn at the 1-stud rate *is* slipping: its surface does not move at the belt's speed, and a reader who
+ * derives the contact speed from it will get a different number than the tread shows. That is the deliberate trade - the
+ * belt's own texture scroll (`BELT_TEXTURE_SCROLL_MULTIPLIER`) is the number that owns "how fast the ground looks", and it
+ * was already decoupled from the model for exactly this reason.
+ *
+ * ## Why the zero-radius guard is gone with it
+ *
+ * It existed to stop `speed / 0` producing `inf` from a body whose `Size` had not replicated, which would poison the
+ * accumulated pose with a `NaN`. The divisor is now a constant, so there is nothing to divide by zero.
  */
-export function apparentSpinRate(speed: number, radius: number): number {
-	if (!(speed > SPIN_DEADBAND_SPEED) || !(radius > 0)) {
+export function apparentSpinRate(speed: number): number {
+	if (!(speed > SPIN_DEADBAND_SPEED)) {
 		return 0;
 	}
 
-	return math.min(APPARENT_SPIN_MAX_RAD_PER_SEC, (APPARENT_SPIN_GAIN * speed) / radius);
+	return math.min(APPARENT_SPIN_MAX_RAD_PER_SEC, (APPARENT_SPIN_GAIN * speed) / BASE_BALL_RADIUS);
 }
 
 /**

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@rbxts/jest-globals";
 import { apparentSpinAxis, apparentSpinRate } from "./apparent-spin";
-import { APPARENT_SPIN_GAIN, APPARENT_SPIN_MAX_RAD_PER_SEC, SPIN_DEADBAND_SPEED } from "./tuning";
+import { APPARENT_SPIN_GAIN, APPARENT_SPIN_MAX_RAD_PER_SEC, BASE_BALL_RADIUS, SPIN_DEADBAND_SPEED } from "./tuning";
 
 /**
  * The two numbers a ball's visible roll is built from: a rate and an axis.
@@ -16,26 +16,35 @@ import { APPARENT_SPIN_GAIN, APPARENT_SPIN_MAX_RAD_PER_SEC, SPIN_DEADBAND_SPEED 
 describe("apparentSpinRate", () => {
 	it("is exactly zero inside the deadband", () => {
 		// Not "very small": `0` is what makes the pose hold bit-for-bit rather than drift.
-		expect(apparentSpinRate(SPIN_DEADBAND_SPEED, 0.5)).toBe(0);
-		expect(apparentSpinRate(0, 0.5)).toBe(0);
+		expect(apparentSpinRate(SPIN_DEADBAND_SPEED)).toBe(0);
+		expect(apparentSpinRate(0)).toBe(0);
 	});
 
 	it("is the gain term just above the deadband", () => {
 		// The first sample above the band, so the discontinuity at the deadband is visible: the rate jumps from 0 to the
 		// gain term rather than easing in. That is intended — a ball that is moving is drawn rolling.
 		const speed = SPIN_DEADBAND_SPEED + 0.001;
-		expect(apparentSpinRate(speed, 0.5)).toBeCloseTo((APPARENT_SPIN_GAIN * speed) / 0.5, 5);
+		expect(apparentSpinRate(speed)).toBeCloseTo((APPARENT_SPIN_GAIN * speed) / BASE_BALL_RADIUS, 5);
 	});
 
 	it("clamps at the legibility ceiling", () => {
 		// A huge speed must not produce a huge rate: past the clamp the drawn rotation aliases.
-		expect(apparentSpinRate(1000, 0.5)).toBe(APPARENT_SPIN_MAX_RAD_PER_SEC);
+		expect(apparentSpinRate(1000)).toBe(APPARENT_SPIN_MAX_RAD_PER_SEC);
 	});
 
-	it("refuses a radius it cannot divide by", () => {
-		// A body whose `Size.Y` has not replicated reads 0 here, and `inf` would poison the accumulated pose permanently.
-		expect(apparentSpinRate(12, 0)).toBe(0);
-		expect(apparentSpinRate(12, -1)).toBe(0);
+	it("does not depend on the ball's size (item 188)", () => {
+		// **The change that round made.** The rate used to be `gain * speed / radius`, so a 20-stud ball drew twenty times
+		// less rotation than a 1-stud one at the same speed — the "creeping" roll the designer reported. There is no radius
+		// parameter any more, which is the strongest form of the assertion: it cannot vary with size.
+		//
+		// **Derived, not pinned.** An earlier version asserted the literal `20` and broke the moment the gain was retuned to
+		// `2` — a test that fails on a designer's tuning is testing the tuning, not the rule. What is asserted is the
+		// *shape*: linear in speed, scaled by the gain over the design radius, and strictly under the clamp at `BALL_SPEED_MAX`.
+		const perSpeed = APPARENT_SPIN_GAIN / BASE_BALL_RADIUS;
+
+		expect(apparentSpinRate(10)).toBeCloseTo(10 * perSpeed, 5);
+		expect(apparentSpinRate(20)).toBeCloseTo(20 * perSpeed, 5);
+		expect(apparentSpinRate(20) < APPARENT_SPIN_MAX_RAD_PER_SEC).toBe(true);
 	});
 });
 

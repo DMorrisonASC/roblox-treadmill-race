@@ -5273,3 +5273,215 @@ the authored part's `CFrame` actually frames the belt — the one number a designe
 **Validation:** `npm run build` passed and regenerated `flamework.build`; `npm run lint` exited 0 with the same 55 pre-existing
 Prettier warnings in `src/shared/ui/viewport.ts`; `prettier --check "src/**/*.ts"` fails only on that file. `\uXXXX` search under
 `src/` returned no matches. **`npm test` was not run**, per the constraint.
+
+## 187. Three fixes: a ghost diagnostic, a size-relative roll, and a scaled pickup
+
+**Part 1 — the ghost: cause not established, so nothing was fixed.** Read from source, the group assignment and the pair table are
+both present and correct: `presentPower` calls `ensureCollisionGroups()` then sets
+`ball.CollisionGroup = collisionGroupFor(power)`, and `collisionGroupFor("ghost")` returns `GhostBall`; the five-pair table is
+registered exactly as docs/powers-and-vfx.md §4 describes, including `GHOST_GROUP`/`BALL_GROUP = false`. `onBallCollision` returns
+before the burst unless `other.HasTag(TAGS.ball)`, and `maybeBurst` is called from nowhere else. So candidates (1) and (3) have no
+source-level defect, and (4) is ruled out by the burst being the only `[HitEffect]` producer. **What remains is (2): whether the
+pair was actually applied at runtime** — the calls are `pcall`-guarded and a failure was silent.
+
+Two diagnostics added, one line each, both of which answer that:
+
+- `ensureCollisionGroups` now reports every step: `[Powers] collision groups: register=CompetitorBall register=GhostBall
+  CompetitorBall/Default=true GhostBall/Default=true CompetitorBall/CompetitorBall=true GhostBall/GhostBall=false
+  GhostBall/CompetitorBall=false GhostBallRegistered=true CompetitorBallRegistered=true`, with `:FAILED` appended to any step
+  whose `pcall` returned false. Its docblock said the guard was safe because the names might pre-exist; it now also says the
+  report is what makes a failure visible.
+- The existing `[Ball:N] spawn` line gained `group=<CollisionGroup>` — it did **not** print one. A ghost that reads
+  `group=Default` is candidate (1); one that reads `group=GhostBall` beside `…=false` applied is a physics question for Studio.
+
+**No speculative pair change was made.** Disabling a pair on a guess could break real collisions for every ball, and the prompt's
+own rule is fix only what the diagnosis proves.
+
+**Part 2 — the roll. The phantom *is* advancing; `omegaVisual=0 angle=0` is a stale field, not a stopped skin.** In
+`marker-spin-controller` the rate branch is `if (phantom !== undefined) { omega = 0; rateSource = "phantom" }`, and the whole
+`state.spin` / `state.angle += …` block sits inside `if (phantom === undefined)`. So with a skin present — which every client has
+— `angle` never advances **by design**, because the skin's own `state.spin` in `ball-render-controller` is the picture and a second
+rotation on top would double it. The log now prints `omegaVisual` from `apparentSpinRate(ballSpeed)` on the phantom path too, so
+the next run shows the rate actually in use instead of a field that cannot answer.
+
+**The rate was `min(90, GAIN * speed / radius)` with `GAIN = 3`, which divides by the ball's own radius** — so at radius `10` and
+`speed 11` it drew `3.3 rad/s` (half a turn a second), against `66 rad/s` at radius `0.5`. That is the reported creeping, and the
+arithmetic is exactly the 20x ratio the designer estimated.
+
+**The fix is the size-relative form, at the no-slip gain.** `apparentSpinRate(speed)` now divides by `BASE_BALL_RADIUS` (the
+pack's design radius) instead of the body's, and `APPARENT_SPIN_GAIN` is back to `1`:
+
+| | before | after |
+| --- | --- | --- |
+| `speed 10`, radius 10 | `3 * 10 / 10 = 3.0 rad/s` | `1 * 10 / 0.5 = **20.0 rad/s**` (`3.2 rev/s`, `19 deg/frame`) |
+| `speed 20`, radius 10 | `6.0 rad/s` | `40.0 rad/s` |
+| clamp `APPARENT_SPIN_MAX_RAD_PER_SEC = 90` | never binds | never binds |
+
+`1` is not a new number: `APPARENT_SPIN_GAIN`'s own docblock argues for it as the no-slip value and records that `3` "shipped for
+one round and produced the very symptom it was meant to cure" — at radius `0.5` it drew `60 rad/s`, which is `57 deg` between
+frames on a six-textured sphere, aliasing into a slow crawl. **The literal 20x (`66 rad/s` at radius 10) lands back in that same
+regime**, so it was rejected on the tree's own measured arithmetic rather than on taste; the shipped rate is exactly the number
+that was legible when the ball was one stud. The cost is stated in the docblock: **this is no longer a rolling rate** — a 20-stud
+ball drawn at the 1-stud rate is slipping — and a future ball resize needs no retuning because of it.
+
+**Part 3 — the pickup.** Current sizes as a ratio of a 20-stud ball's width:
+
+| thing | constant | studs | ball-widths |
+| --- | --- | --- | --- |
+| pad collider | `PICKUP_SIZE = (2, 1, 2)` | 2 | **0.10** |
+| sprite | `PICKUP_SPRITE_STUDS = 2.6` | 2.6 | **0.13** |
+| footprint disc | `min(padX, padZ)` | 2 | **0.10** |
+
+New `src/shared/config/pickup.config.ts` holds `PICKUP_SCALE_MULTIPLIER = 0.2` (**Placeholder.**, item 177's shape: one
+multiplier, own file, docblock stating the reference length). The sprite and the disc both go through
+`effectScaleForRadius(poolBallRadius(), PICKUP_SCALE_MULTIPLIER)`:
+
+| multiplier | scale | sprite | disc | sprite in ball-widths |
+| --- | --- | --- | --- | --- |
+| `0.05` | 1 | 2.6 studs | 2 studs | 0.13 (**reproduces the old size**) |
+| `0.1` | 2 | 5.2 | 4 | 0.26 |
+| **`0.2` (shipped)** | 4 | **10.4** | 8 | **0.52** |
+| `1.0` | 20 | 52 | 40 | 2.6 |
+
+`poolBallRadius()` was added to `shape-pool.ts` — the radius from the pool's first entry, because a pickup is **not attached to a
+ball** and a scene scan would answer `undefined` on exactly the frames a pad is built.
+
+**The pad collider was not changed.** Scaling `PICKUP_SIZE` makes pickups easier to hit and therefore changes the race, which is a
+designer's decision. **Recommendation: scale it to match the disc** (`PICKUP_SIZE` x4 to `(8, 1, 8)`), because until then the painted
+target **overhangs the actual collider by 4x** and teaches the player a target that does not exist. The sprite/docblock states that
+consequence rather than hiding it, and `[PickupSprite] first visuals …` now prints `sprite=<drawn> ring=<diameter>` from the scaled
+values.
+
+**Where the prompt was wrong.** (1) The `[Ball:N] spawn` line did **not** print a `CollisionGroup`; it does now. (2) The phantom
+**is** advancing — `omegaVisual`/`angle` are fallback-branch fields that cannot answer the question, which is the trap the prompt
+suspected but for the opposite reason. (3) Part 2's "20x" is not the safe read: the tree had already documented that a rate above
+about `31 rad/s` aliases on this render, so `66 rad/s` would have reproduced a fixed bug. (4) Part 3's premise that the ring is a
+separate size from the pad is wrong — the disc is `min(padSize.X, padSize.Z)` read at creation, so scaling it makes it overhang
+the collider until the pad is scaled too.
+
+**Validation:** `npm run build` passed; `npm run lint` exited 0 with the same 55 pre-existing Prettier warnings in
+`src/shared/ui/viewport.ts`; every touched file passes `prettier --check`. `npm test` passed with **447 tests** across 32 files —
+`apparent-spin.spec.ts` was rewritten for the one-argument signature (four cases: deadband, gain term, clamp, and the new
+size-independence case asserting `20 rad/s` at speed `10` and `40` at `20`), which is the only spec whose values changed.
+`\uXXXX` search under `src/` returned no matches. `flamework.build` is unchanged — no controller added.
+
+**Studio-only:** the ghost (does `group=GhostBall` and `…=false` appear, and does the burst stop — or is this its own round); whether
+`20 rad/s` reads as fast as the old one-stud roll without strobing; and whether a `10.4`-stud sprite beside a 20-stud ball is
+visible and hittable, and whether the disc's overhang misleads.
+
+## 189. The collision handler refuses pairs the group table forbids, and every effect line names its groups
+
+**The log, read against the table.** `[Powers] collision groups: … GhostBall/GhostBall=false GhostBall/CompetitorBall=false
+GhostBallRegistered=true` and `[Ball:2] spawn … group=GhostBall` are both present and correct, and yet effect lines kept firing.
+They could not say *which* bodies were involved, because every body is named `Workspace.SpawnedBalls.Ball`. So the report could
+not distinguish "the guard is missing" from "the burst was two ordinary balls". Both halves are now answerable.
+
+**Part 1 — the lines.** `[Powers] pop`, `[Powers] shove` and `[Powers] hit` each gained `ballGroup=<group> otherGroup=<group>`,
+one field each on lines that already existed. A burst near a ghost now reads `ballGroup=GhostBall` (the guard is missing) or
+`ballGroup=CompetitorBall otherGroup=CompetitorBall` (no bug — the report was two ordinary balls).
+
+**Part 2 — the predicate.** `pairCanCollide(a, b)`, exported and pure, built from `BALL_GROUP` and `GHOST_GROUP` rather than
+string literals. **Two groups are enough:** every one of the five registered pairs is decided by whether a ghost is involved and
+what it faces — competitors collide, ghost/ghost does not, ghost/competitor does not. No third group is needed because nothing
+here distinguishes kinds of solid thing; the belt, the walls and the floor are all `Default`. An unrecognised group returns
+`true`, which is the fail-safe direction: the worst outcome is an effect that should not have fired, never a body falling
+through the world.
+
+**`Default` collides, both ways round, and it is asserted.** `pairCanCollide(BALL_GROUP, "Default")` and its mirror, plus the
+`GHOST_GROUP`/`Default` pair — the belt surface, walls and invisible floor. That is the case whose failure would read as "the
+physics is gone" rather than "the ghost guard is wrong", so it is the one under test.
+
+**Part 3 — where the guard sits.** In `onBallCollision`, after `other.HasTag(TAGS.ball)` and **before `rememberTouch` and all
+three effects**, so the full ladder is now:
+
+1. `powersActive` ? 2. `other` carries the `Ball` tag ? **3. `pairCanCollide`** ? 4. `rememberTouch` ? 5. `maybePop` ?
+`maybeShove` ? `maybeBurst` ? 6. body state + colliding power ? 7. `POWER_COLLISION_COOLDOWN` ? 8. the transfer has somewhere to
+go.
+
+It sits beside the tag test rather than above the whole ladder because `powersActive` and the tag test are about *what is being
+talked about*, while everything from 3 down assumes two balls actually met.
+
+**The `Touched` connection stays on every body** (item 87). Removing it for a ghost would make the last-touch record — which
+feeds the elimination sound — incomplete for the bodies a ghost *does* collide with, and a guard in one handler is a smaller
+change than a second connection policy. The cost is one attribute read and two string comparisons per stray event; the
+alternative, a proximity scan, would be a query per ball per frame to re-answer a question the physics broadphase already
+answered.
+
+**The docblock was rewritten to match.** `onBallCollision` argued that a ghost's `Touched` "cannot arrive"; it now carries the
+ladder above and says the guard exists because that assumption was reported false.
+
+**Where the prompt was wrong.** The prompt expected one of "a third group is needed", "the guard belongs above the whole ladder",
+or "a decoy's group is set by `setPower`". None held: two groups suffice, the guard belongs beside the tag test, and a decoy's
+group comes from `presentPower` — `spawnDecoy` calls `presentPower(decoy, power, …)`, which sets `ball.CollisionGroup =
+collisionGroupFor(power)` with the **parent's** power, so **a twin is in the same group as its parent** and a ghost's twin is
+itself a ghost. `setPower` would also set the group, but a decoy deliberately never uses it, because that path would register an
+aura and a `Touched` connection the twin must not have.
+
+**Validation:** `npm run build` passed; `npm test` passed with **453 tests** across 32 files (six new `pairCanCollide` cases);
+`npm run lint` exited 0 with the same 55 pre-existing Prettier warnings in `src/shared/ui/viewport.ts`; both touched files pass
+`prettier --check`. `\uXXXX` search under `src/` returned no matches; `flamework.build` unchanged — no controller or service added.
+
+**Studio-only:** that a ghost now passes through balls with no burst, no sound and no shove; that ordinary balls still collide
+and still shove; and whether the group fields show a `GhostBall` on a line that still fires, which would prove the physics pair
+is not being honoured and make this its own round.
+
+## 190. The painted pickup disc is the collider's inscribed circle again, and the sprite keeps the tuner
+
+**The claim, quoted from source.** `buildFootprint` sized the disc as
+`const diameter = math.min(padSize.X, padSize.Z) * scale;` where `scale = effectScaleForRadius(poolBallRadius(),
+PICKUP_SCALE_MULTIPLIER)` — `(10 / 0.5) * 0.2 = 4`. Meanwhile `PickupService.createPickup` sets `pickup.Size = PICKUP_SIZE`
+(`20 x 20 x 20`) and `positionFor` only lifts it. So the paint was `4x` the thing it described:
+
+| thing | expression | studs | ÷ collider width |
+| --- | --- | --- | --- |
+| collider | `PICKUP_SIZE.X` | **20** | 1.00 |
+| painted disc | `min(padSize.X, padSize.Z) * scale` | **80** | **4.00** |
+| sprite | `PICKUP_SPRITE_STUDS * scale` | **10.4** | **0.52** |
+
+The collection rule was never wrong — the log shows `[Pickup] collected … BALL_SPEED 6.4 -> 12` the instant the collider was
+touched. The picture was the only liar, and it lied by exactly the scale multiplier.
+
+**The disc no longer takes the multiplier.** `pickupDiscDiameter(padSize)` in `shared/config/pickup.config.ts` returns
+`math.min(padSize.X, padSize.Z)` — the collider's own inscribed circle, `20` studs, ratio `1.00`. A function rather than an
+inline `min` because the equality with the collider is the whole rule and a spec should hold it:
+
+| thing | expression | studs | ÷ collider width |
+| --- | --- | --- | --- |
+| collider | `PICKUP_SIZE.X` | 20 | 1.00 |
+| painted disc | `pickupDiscDiameter(padSize)` | **20** | **1.00** |
+| sprite | `PICKUP_SPRITE_STUDS * scale` | **10.4** | 0.52 |
+
+**Why the disc and not the sprite keeps the raw value.** The disc is the only pickup visual that makes a claim about
+*reach* — "put the ball's centre in here and it collects" — so it cannot be tuned independently of the box it describes. The
+sprite is an **icon**, and an icon may be authored at whatever reads well. That is the split the docblocks now state, in both
+directions: `PICKUP_SCALE_MULTIPLIER` says it governs the sprite and *not* the disc, and `pickupDiscDiameter` says the disc
+follows `PICKUP_SIZE` and nothing else.
+
+**The sprite is already inside the disc** — `10.4` against `20` — so its value did not change. `0.4` would draw it at `20.8`,
+larger than the disc, which is the contradiction this round removed; that is named in the multiplier's docblock as the value
+not to use.
+
+**The docblock that was contradicted was rewritten in place.** `buildFootprint` had argued the disc was "inscribed in that
+square cross-section" and that "every point inside the ring is inside the collider" — true of the *formula*, false of the
+*scaled result*. It now says that was only half true until this item, quotes the `80`-versus-`20` failure, and states that the
+disc takes no multiplier.
+
+**Where the prompt was wrong.** (1) `PICKUP_SIZE` is `(20, 20, 20)`, not the `(2, 1, 2)` a previous report recorded — the pad
+has **already** been made 20 studs wide, so "the collider is right" is true and the `80`-stud ring is the whole bug. (2) The
+disc *already* reads the pad rather than a constant, so the fix was to remove the multiplier from that expression rather than
+to re-source the number. (3) The prompt expected the sprite might have to shrink; it does not — it was already half the disc,
+and only looked proportionate because the disc was four times too big.
+
+**A stale pin in another spec was found by this round's run.** `apparent-spin.spec.ts` asserted the literal `20` rad/s at
+`speed 10`, which broke when `APPARENT_SPIN_GAIN` was retuned from `1` to `2`. It now derives the expectation from
+`APPARENT_SPIN_GAIN / BASE_BALL_RADIUS` and still asserts the rate stays under the clamp at `BALL_SPEED 20` — a test that fails
+on a designer's tuning is testing the tuning, not the rule.
+
+**Validation:** `npm run build` passed; `npm test` passed with **456 tests** across 33 files (three new disc cases; one
+`apparent-spin` case rewritten, named above); `npm run lint` exited 0 with the same 55 pre-existing Prettier warnings in
+`src/shared/ui/viewport.ts`; every touched file passes `prettier --check`. `\uXXXX` search under `src/` returned no matches;
+`flamework.build` unchanged.
+
+**Studio-only:** that a ball whose centre is inside the paint now collects and one outside it does not, and that a `20`-stud
+disc is still legible from the game camera. **If it reads as a dot, the honest next step is a larger `PICKUP_SIZE` — a bigger
+collider — not a bigger picture**, because the paint is the promise and the collider is the fact.
