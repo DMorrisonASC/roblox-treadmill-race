@@ -42,8 +42,20 @@ export interface PickupFootprint {
 }
 
 /**
- * The band of pad centres for which the pad is wholly on the belt: **the belt's half-extents minus the pad's**, on both
- * horizontal axes.
+ * The band of pad centres for which **everything a pad draws** is still on the belt: the belt's half-extents minus the
+ * **largest drawn radius** on each axis.
+ *
+ * ## It is the *picture's* radius, not the collider's (item 199)
+ *
+ * The bound subtracts `math.max(padSize.X / 2, drawRadius)` on `X` and the same on `Z`. `drawRadius` is
+ * `pickupDrawRadius(PICKUP_SIZE, PICKUP_SCALE_MULTIPLIER)` — the largest of the pad's own footprint, the painted disc and the
+ * sprite. A bound derived from the pad alone keeps the *collider* on the belt and says nothing about what is drawn around it;
+ * the disc used to be scaled by the effect multiplier while the collider was not, so a pad placed legally near an edge painted
+ * a ring hanging over the side. That bug is fixed, and this signature is what keeps it fixed if either number is retuned.
+ *
+ * **Today the pad's own half-width still wins**, because the disc is the collider's inscribed circle (item 190) and the sprite
+ * is smaller than both. That is why the numbers on the shipped belt do not move — the derivation exists so that the *next*
+ * retune cannot move them silently in the wrong direction.
  *
  * ## Why the subtraction is in `Size` and not in `PICKUP_X_MIN`-style constants
  *
@@ -62,14 +74,17 @@ export interface PickupFootprint {
  *
  * ## The clamp, and the scene it refuses to pretend about
  *
- * `math.max(0, …)` collapses the band to the belt's centre when the pad is wider than the belt. There is no position at which
- * such a pad is wholly on the belt, so the honest answers are "the centre, and say so in the log" or an exception at boot;
- * returning an *inverted* band (`maxX < minX`) is the one that would be silently wrong, because the caller's `min + random *
- * (max - min)` would then place pads beyond the edge with a negative span that looks like a bug in the random draw.
+ * `math.max(0, …)` collapses the band to the belt's centre when the drawn radius is wider than the belt. There is no position
+ * at which such a pad is wholly on the belt, so the honest answers are "the centre, and say so in the log" or an exception at
+ * boot; returning an *inverted* band (`maxX < minX`) is the one that would be silently wrong, because the caller's
+ * `min + random * (max - min)` would then place pads beyond the edge with a negative span that looks like a bug in the random
+ * draw.
  */
-export function pickupBounds(beltSize: Vector3, padSize: Vector3): PickupBounds {
-	const reachX = math.max(0, beltSize.X / 2 - padSize.X / 2);
-	const reachZ = math.max(0, beltSize.Z / 2 - padSize.Z / 2);
+export function pickupBounds(beltSize: Vector3, padSize: Vector3, drawRadius: number): PickupBounds {
+	// Per axis: the pad's own half-extent or the drawn circle's radius, whichever reaches further. On a pad that is not square the
+	// wide axis keeps its own half-width, and the circular things are bounded by the narrow one.
+	const reachX = math.max(0, beltSize.X / 2 - math.max(padSize.X / 2, drawRadius));
+	const reachZ = math.max(0, beltSize.Z / 2 - math.max(padSize.Z / 2, drawRadius));
 
 	// `0 - reach` rather than `-reach`: negating zero gives `-0`, which is equal to `0` everywhere except the one place it
 	// would be read — a log field, where `tostring` prints it as `-0` and a collapsed band looks like a broken sign.

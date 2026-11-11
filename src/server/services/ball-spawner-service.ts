@@ -53,7 +53,7 @@ import {
 	BALL_TEXTURE_OFFSET_RANGE_V,
 	BOOST_HYSTERESIS,
 	DECOY_SPAWN_DELAY_SECONDS,
-	SPIN_DEADBAND_SPEED,
+	TAIL_WIND_MIN_BALL_SPEED,
 	SWAY_AMPLITUDE,
 	SWAY_FREQUENCY_HZ,
 	SWAY_FREQUENCY_JITTER,
@@ -187,6 +187,15 @@ function laneRadius(size: Vector3): number {
  * between cleanup passes.
  */
 const CLEANUP_INTERVAL_SECONDS = 0.5;
+
+/**
+ * **Placeholder.** Horizontal speed below which `holdBodies` treats a body as at rest, in studs/second (item 198).
+ *
+ * `1e-3` is far below anything the eye can see (a stud every thousand seconds) and far above the contact solver's residual on a
+ * body resting on the slab, which the `spin-probe` log reports as `~0.003`. It exists so the hold stops writing velocity the
+ * moment a body has settled, instead of replicating the same near-zero vector for the rest of the phase.
+ */
+const HOLD_VELOCITY_EPSILON = 1e-3;
 
 /**
  * Gap between the bottom of a spawned ball and the spawner's own origin Y, in studs. The ball's
@@ -555,6 +564,15 @@ export class BallSpawnerService implements OnStart {
 	 */
 	private roundActive = false;
 
+	/**
+	 * Whether the inactive-round hold has reported itself this phase, and how many bodies it has caught (item 198).
+	 *
+	 * Reset in `setRoundActive`, so "hold engaged" prints once per `Waiting`/`PostGame` stretch rather than once per session,
+	 * and a second round says so again.
+	 */
+	private holdReported = false;
+	private heldThisPhase = 0;
+
 	/** TEMPORARY INSTRUMENTATION. Bodies whose texture creation has logged; see `BALL_TEXTURE_LOG_LIMIT`. */
 	private ballTextureLogs = 0;
 	/** Stable ids so two Ctrl+D clones, which share a name and a `GetFullName()`, stay distinguishable. */
@@ -700,6 +718,8 @@ export class BallSpawnerService implements OnStart {
 	 */
 	public setRoundActive(active: boolean): void {
 		this.roundActive = active;
+		this.holdReported = false;
+		this.heldThisPhase = 0;
 
 		// **Pending twins do not survive a phase change (item 183).** A twin scheduled by a round that has ended would
 		// otherwise be born into `PostGame` or `Intermission` — a fake body in a cleared arena, which is the leftover this
@@ -1634,19 +1654,24 @@ export class BallSpawnerService implements OnStart {
 	 * back edge), and positive only after a pickup (the ball drifts back toward the front edge, away from
 	 * elimination). The sign is the whole design: **negative loses ground, positive gains it.**
 	 *
-	 * ## Which way is which — the axis, stated once
+	 * ## Which way is which ? the axis, stated once
 	 *
-	 * **Along-belt is world X**, and in this scene the belt's `RightVector` is `+X`. That is the naming trap, and it
-	 * is worth the paragraph: `RightVector` *sounds* lateral and is not. For a part whose long axis is X, `RightVector`
-	 * is the **long** axis, and this tree uses it for exactly that everywhere — this loop, and every log field that
-	 * measures a ball's along-belt velocity as a dot product with it. A reader who assumes "right = lateral" gets the sign of
-	 * `relative` backwards and writes a ball that moves across the belt instead of along it. **Lateral is world Z**,
-	 * and the only code that touches it is the decorative sway below, on `RightVector:Cross(UpVector)` — which for
-	 * `RightVector = +X` is `+Z`.
+	 * **Along-belt is the belt's `RightVector`**, whatever that vector happens to be in world space: this scene's belt runs
+	 * along **world `-Z`** (`rightVector=(0, 0, -1)` in the bind line), and an earlier fixture ran along `+X`. Every number
+	 * here is therefore expressed as a dot product with `getBeltRightVector()` and never as a world axis ? a sign written
+	 * against `X` would be silently wrong on the next scene, which is the class of bug `PICKUP_X_MIN` was deleted for.
 	 *
-	 * In this model **`+X` is toward the back** — the exit end, where a ball is eliminated — and **`-X` is toward the
-	 * front**, the spawn end. Decay therefore moves a ball toward the back and a boost moves it toward the front, which
-	 * is why the write below multiplies by `-relative`: a positive `RELATIVE_SPEED` must become motion toward `-X`.
+	 * That is the naming trap worth the paragraph: `RightVector` *sounds* lateral and is not. For a part whose long axis is
+	 * its local `X`, `RightVector` is the **long** axis, and this tree uses it for exactly that everywhere ? this loop, and
+	 * every log field that measures a ball's along-belt velocity as a dot product with it. A reader who assumes
+	 * "right = lateral" gets the sign of `relative` backwards and writes a ball that moves across the belt instead of along
+	 * it. **Lateral is `RightVector:Cross(UpVector)`** ? world `+X` on this scene's belt ? and the only code that touches it
+	 * is the decorative sway below.
+	 *
+	 * In this model **`+RightVector` is toward the back** ? the exit end, where a ball is eliminated ? and **`-RightVector` is
+	 * toward the front**, the spawn end. Decay therefore moves a ball toward the back and a boost moves it toward the front,
+	 * which is why the write below multiplies by `-relative`: a positive `RELATIVE_SPEED` must become motion toward
+	 * `-RightVector`.
 	 *
 	 * ## The two frames, and why every number here says which
 	 *
@@ -1683,6 +1708,24 @@ export class BallSpawnerService implements OnStart {
 	 * `AssemblyLinearVelocity` along `±X` between two ticks is overwritten here before it can accumulate, which is why the
 	 * `BALL_SPEED` attribute is the only lever any other module has over a ball's motion.
 	 *
+	 * ## The inactive round writes nothing, and that is the whole of the freeze
+	 *
+	 * **`if (!this.roundActive) { return; }` is the first line, so an inactive round writes no along-belt velocity, no
+	 * sway, no `BALL_SPEED` decay and no `tickDelta`.** The flag is set in `enterPlaying` and cleared in `PostGame` and on
+	 * every teardown, so it is false for all of `Waiting` (see `enterWaiting`: "Not `true` any more").
+	 *
+	 * It is worth writing down because the *opposite* change is the tempting one, and it is a bug: **zeroing the along-belt
+	 * component instead of skipping the write would produce the maximum drift.** `setRoundActive(false)` zeroes
+	 * `BALL_SPEED`, and the write is `right.mul(-(BALL_SPEED - BELT_SPEED))`, so `BALL_SPEED = 0` yields
+	 * `-(-10) = +10` toward the exit ? full belt speed, in the direction of elimination, produced by the call that was meant
+	 * to stop the ball. "No write" and "a zero write" are different states and only one of them leaves the body to gravity.
+	 *
+	 * **The arithmetic that proved it is in the sample line, and it was misread once.** That line used to print
+	 * `RELATIVE_SPEED=${'$'}{ballSpeed - beltSpeed}`, which reads `-10` on a `Waiting` body that is not moving at all ? it is
+	 * the velocity the model *would* write if it ran. It now prints the honest pair: `MODEL_RELATIVE=` for that arithmetic
+	 * and `along=` for the body's own velocity projected on the belt's axis, plus `roundActive=`. One run settles it:
+	 * `along` sits at `0.012`, then `0.019`, then `0.000` for the rest of `Waiting`.
+	 *
 	 * ## Why the attribute and not a service-side map
 	 *
 	 * The attribute is on the body, replicates with it, and dies with it — no cleanup on any of the four death paths, and
@@ -1694,8 +1737,80 @@ export class BallSpawnerService implements OnStart {
 	 * body destroyed by `RoundService` between two frames, which would otherwise have its velocity written after the
 	 * engine had already removed it.
 	 */
+	/**
+	 * **Stops a body travelling horizontally while the round is not running** (item 198).
+	 *
+	 * ## The bug this fixes, measured
+	 *
+	 * `stepBallSpeeds` returns while inactive, so the *model* writes nothing -- and that was not enough. Bodies spawn a few
+	 * studs above the invisible floor slab and fall onto it during `Waiting`, and the landing itself moves them along the
+	 * belt: the client probe added in item 197 caught four of eight bodies sliding **1.0-2.1 studs in world `Z`** in the
+	 * first second, and `spin-probe` still read `|v| = 6.605` two seconds in. That is the "balls slide in `Waiting`" report,
+	 * and gating the model's own write could never have fixed it: the velocity came from contact resolution, not from
+	 * `BALL_SPEED`.
+	 *
+	 * ## What it does, and what it deliberately leaves alone
+	 *
+	 * It removes the **horizontal** part of the velocity -- along `RightVector` and along `right x up` -- and writes nothing
+	 * else. **`Y` is untouched**, so gravity still pulls a body down and one spawned into `Waiting` still lands instead of
+	 * hanging. That is the difference between this and a freeze: a freeze needs an `Anchored` toggle and a second thing to get
+	 * wrong on every death path.
+	 *
+	 * **It is not a second model of motion.** It reads the same two axes the active path decomposes with, and it computes no
+	 * `relative`, no decay and no sway -- which is why it cannot reproduce the trap this file's docblock records: writing
+	 * `right x -(BALL_SPEED - BELT_SPEED)` with a zeroed attribute is `+10` toward the exit, while writing **nothing along the
+	 * belt at all** is the only expression of "not moving".
+	 *
+	 * ## Why it costs nothing
+	 *
+	 * A resting body's horizontal velocity is contact noise (~1e-4), which the threshold skips, so after the first couple of
+	 * seconds of a phase this writes no properties at all.
+	 */
+	private holdBodies(): void {
+		const frame = this.treadmill.getBeltFrame();
+		if (frame === undefined) {
+			return;
+		}
+
+		const right = frame.RightVector;
+		const across = right.Cross(frame.UpVector).Unit;
+		let held = 0;
+
+		for (const ball of this.liveBalls) {
+			if (ball.Parent === undefined) {
+				continue;
+			}
+
+			const velocity = ball.AssemblyLinearVelocity;
+			const along = velocity.Dot(right);
+			const lateral = velocity.Dot(across);
+
+			if (math.abs(along) < HOLD_VELOCITY_EPSILON && math.abs(lateral) < HOLD_VELOCITY_EPSILON) {
+				continue;
+			}
+
+			// `sub` twice, keeping every other component: `Y` is gravity's, and on a belt that is not level the belt's own up is
+			// not world `Y`, so subtracting the two horizontal axes is the form that stays correct for any fixture.
+			ball.AssemblyLinearVelocity = velocity.sub(right.mul(along)).sub(across.mul(lateral));
+			held++;
+		}
+
+		// One line per inactive stretch, not per frame: this reports that the hold engaged and how many bodies it caught, which
+		// is the number that proves the settling slide happened at all.
+		if (held > 0) {
+			this.heldThisPhase += held;
+			if (!this.holdReported) {
+				this.holdReported = true;
+				print(
+					`[Spawner] hold engaged: ${held} body/bodies had horizontal velocity with the round inactive (along-belt motion from settling, removed; Y left to gravity)`,
+				);
+			}
+		}
+	}
+
 	private stepBallSpeeds(dt: number): void {
 		if (!this.roundActive) {
+			this.holdBodies();
 			return;
 		}
 
@@ -1885,8 +2000,8 @@ export class BallSpawnerService implements OnStart {
 	}
 
 	/**
-	 * Settles a ball's `TailWind` attribute: the trail for a ball that is **in regular motion** — losing ground, visibly rolling,
-	 * and not boosted.
+	 * Settles a ball's `TailWind` attribute: the trail for a ball that is **in regular motion** — losing ground, actually
+	 * travelling through the world, and not boosted.
 	 *
 	 * ## The condition, and why each term is there
 	 *
@@ -1894,10 +2009,14 @@ export class BallSpawnerService implements OnStart {
 	 * motion" and it is the opposite of a boost; a ball holding station (`relative = 0`) or gaining ground is not in the state
 	 * this effect describes.
 	 *
-	 * `speed > SPIN_DEADBAND_SPEED` — the ball is rolling fast enough for the roll to be drawn at all. Below it
-	 * `apparentSpinRate` returns `0`, so the skin is visibly still; a trail on a motionless ball would be describing something
-	 * that is not happening. **This is the same threshold the roll renders at, imported rather than restated**, so "visibly
-	 * rolling" means one thing in the tree.
+	 * `speed > TAIL_WIND_MIN_BALL_SPEED` ? the ball is actually moving through the world rather than parked. A trail on a ball
+	 * that is not going anywhere would be describing something that is not happening.
+	 *
+	 * **This used to read `SPIN_DEADBAND_SPEED`, and it is now its own constant (item 196).** The two questions were the same
+	 * while the spin rate returned `0` at rest; they are not any more, because the rate is base-plus-speed and a ball at
+	 * `BALL_SPEED = 0` **is** rolling (it is sliding across the tread). Sharing one number would make a retune of a spin
+	 * constant silently move the threshold at which a trail appears ? the coupling item 177 spent a round undoing for the
+	 * effect scales.
 	 *
 	 * `boosted === false` — **the precedence rule, and it lives here because this is the only place that knows both facts in the
 	 * same tick.** `windBoost` and `tailWind` must never both play, and a client cannot enforce that without a second copy of
@@ -1913,13 +2032,13 @@ export class BallSpawnerService implements OnStart {
 	 * Every term is monotone between events. `BALL_SPEED` only decays, so it crosses `BELT_SPEED` once on the way down; the
 	 * `Boosted` term already carries `BOOST_HYSTERESIS`, which holds it true until `BELT_SPEED - 0.5`, so the handover from
 	 * `windBoost` to `tailWind` happens once, at `9.5`, rather than at the `10` boundary where a one-tick dither would have
-	 * shown. `SPIN_DEADBAND_SPEED` is crossed once per ride in the same direction. A pickup or a rocket raises the speed and
+	 * shown. `TAIL_WIND_MIN_BALL_SPEED` is crossed once per ride in the same direction. A pickup or a rocket raises the speed and
 	 * hands the state back, which is an event and not a boundary flicker.
 	 */
 	private writeTailWind(ball: BasePart, relative: number, speed: number, boosted: boolean | undefined): void {
 		const raw = ball.GetAttribute(TAIL_WIND_ATTRIBUTE);
 		const current = typeIs(raw, "boolean") ? raw : undefined;
-		const wanted = relative < 0 && speed > SPIN_DEADBAND_SPEED && boosted === false;
+		const wanted = relative < 0 && speed > TAIL_WIND_MIN_BALL_SPEED && boosted === false;
 
 		if (wanted !== current) {
 			ball.SetAttribute(TAIL_WIND_ATTRIBUTE, wanted);
@@ -2741,13 +2860,17 @@ export class BallSpawnerService implements OnStart {
 		}
 
 		const velocity = ball.AssemblyLinearVelocity;
-		// The three numbers that describe this model, all in one line: the ball's own speed from its
-		// attribute, the reference belt speed, and the difference ? which is the velocity the physics engine
-		// is being handed every tick. `velocity=` stays because it is the *observed* value from the engine, so
-		// a disagreement between it and `RELATIVE_SPEED` is visible rather than hidden.
 		const ballSpeed = this.readNumber(ball, BALL_SPEED_ATTRIBUTE, 0);
-		// The model's reference, so `RELATIVE_SPEED` in the line is the number the simulation used.
 		const beltSpeed = this.treadmill.getReferenceBeltSpeed();
+
+		// **`MODEL_RELATIVE`, not `RELATIVE_SPEED` (item 196).** The old field was `BALL_SPEED - BELT_SPEED`, which is the
+		// along-belt velocity the model *would* write if the round were active. During `Waiting` it reads `-10` on a body that
+		// is not moving at all, and that field is what produced the report this round exists to answer: "the ball drifts
+		// during `Waiting`, `RELATIVE_SPEED = -10`". The model does not run outside `Playing` — `stepBallSpeeds` returns on
+		// its first line — so the ball was still and the number was arithmetic. The rename makes the field say what it is, and
+		// `along=` is the measurement that can contradict it: the body's own velocity projected on the belt's axis.
+		const along = velocity.Dot(this.treadmill.getBeltRightVector());
+
 		// The sway, so the lateral motion is readable from the log rather than only from the screen: `localZ` is where
 		// the ball is across the belt, `swayPhase` where in its own wave it is. The two together tell a ball that is
 		// tracking its wave from one that has not found it yet.
@@ -2755,7 +2878,7 @@ export class BallSpawnerService implements OnStart {
 		const sway = this.lateral.get(ball);
 		const swayPhase = sway === undefined ? "none" : formatNumber(sway.phase);
 		print(
-			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(localPoint)} localZ=${formatNumber(localPoint.Z)} swayPhase=${swayPhase} velocity=${formatVector(velocity)} BALL_SPEED=${formatNumber(ballSpeed)} BELT_SPEED=${formatNumber(beltSpeed)} RELATIVE_SPEED=${formatNumber(ballSpeed - beltSpeed)} ${this.describeOwner(ball)}`,
+			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(localPoint)} localZ=${formatNumber(localPoint.Z)} swayPhase=${swayPhase} velocity=${formatVector(velocity)} along=${formatNumber(along)} BALL_SPEED=${formatNumber(ballSpeed)} BELT_SPEED=${formatNumber(beltSpeed)} MODEL_RELATIVE=${formatNumber(ballSpeed - beltSpeed)} roundActive=${tostring(this.roundActive)} ${this.describeOwner(ball)}`,
 		);
 	}
 

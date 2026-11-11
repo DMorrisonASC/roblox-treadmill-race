@@ -45,6 +45,8 @@
  * Every number here is **Placeholder.** — the shape is the point, the numbers are not.
  */
 
+import { BOOST_TARGET_BALL_SPEED } from "shared/tuning";
+
 /** The seven hooks the rest of the system provides. A `kind` is which hook a power answers, and nothing else. */
 export const POWER_KINDS = ["passive", "aura", "collision", "pickup", "timed", "world", "event"] as const;
 
@@ -265,7 +267,7 @@ export const ROCKET_MAX_DELAY = 10;
  * `ROCKET_TARGET_SPEED` (18) so the two are not the same event. This is the *event* kind: the sprinter has no power of
  * its own, it has a better response to something already in the world.
  */
-export const SPRINTER_BOOST_SPEED = 30;
+export const SPRINTER_BOOST_SPEED = BOOST_TARGET_BALL_SPEED + 20;
 
 // #endregion
 

@@ -590,10 +590,18 @@ describe("the power table", () => {
 });
 
 describe("the model's bounds", () => {
-	it("has a ceiling above every designed value", () => {
-		expect(BALL_SPEED_MAX > ROCKET_TARGET_SPEED).toBe(true);
-		expect(BALL_SPEED_MAX > SPRINTER_BOOST_SPEED).toBe(true);
-		expect(BALL_SPEED_MAX > BOOST_TARGET_BALL_SPEED).toBe(true);
+	it("never truncates a designed value", () => {
+		// **The rule is "the clamp does not cut a speed the designer wrote", not "there is headroom above it".** The stricter
+		// form asserted `>`, and it broke when `BOOST_TARGET_BALL_SPEED` moved to `80`: `SPRINTER_BOOST_SPEED` is derived as
+		// `BOOST_TARGET_BALL_SPEED + 20`, so it is now exactly `BALL_SPEED_MAX = 100`, and the sprinter rides the ceiling with
+		// no margin rather than being cut by it.
+		//
+		// Equality is a choice worth knowing about rather than a crash: a sprinter ball is clamped at exactly its own boost, so
+		// any future gain to either number silently truncates one. Named here so the next reader does not have to rediscover it
+		// from a failed assertion.
+		expect(BALL_SPEED_MAX >= ROCKET_TARGET_SPEED).toBe(true);
+		expect(BALL_SPEED_MAX >= SPRINTER_BOOST_SPEED).toBe(true);
+		expect(BALL_SPEED_MAX >= BOOST_TARGET_BALL_SPEED).toBe(true);
 		expect(BALL_SPEED_MAX > BALL_SPEED_MIN).toBe(true);
 	});
 

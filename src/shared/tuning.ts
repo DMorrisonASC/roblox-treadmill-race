@@ -450,85 +450,99 @@ export const POST_GAME_SECONDS = 5;
 export const INTERMISSION_SECONDS = 30;
 
 /**
- * **Placeholder.** Speed below which the markers do not turn at all, in studs/s.
+ * **Placeholder.** The drawn rate at `BALL_SPEED = 0`, in radians/second: **the part of the roll that does not depend on
+ * the attribute.**
  *
- * ## The offset it replaces, and the reversal
+ * ## Why a base term exists at all (item 196)
  *
- * The previous model was `SPIN_RATE_OFFSET + gain x |omegaPhysical|` with the offset at `8 rad/s`,
- * chosen so that a ball with zero physical spin still showed movement. **The offset is deleted and this
- * deadband takes its place**, because the user's requirement reversed: a *parked* ball must show
- * stationary markers. The constant was deleted rather than set to `0` because nothing else read it, and
- * this file's own rule is that a visible-but-inert constant is worse than none — `0` would have left a
- * knob that reads as tunable and does nothing.
+ * `apparentSpinRate` used to be `GAIN x BALL_SPEED / BASE_BALL_RADIUS` and nothing else, so `BALL_SPEED = 0` gave no
+ * rotation — and `BALL_SPEED = 0` does **not** mean "not moving". It means the ball is travelling at exactly the belt's own
+ * speed *through* the tread, which is the ordinary state of a ball that has decayed for a few seconds: the log shows one at
+ * `RELATIVE_SPEED = +10` toward the exit with a completely still skin. **A ball sliding across the floor with a frozen
+ * texture is the most obvious render bug in the game**, and no gain can fix it, because the term that would fix it
+ * (`BALL_SPEED`) is zero by definition in exactly that case.
  *
- * ## Why a deadband and not just "small"
+ * The physical reading is the argument: rolling speed equals **speed relative to the surface**, and on a treadmill a ball
+ * holding station in the world is moving at `BELT_SPEED` relative to the tread under it. That component is a constant, so
+ * the term is a constant.
  *
- * The `spin-probe` log reports `|v| = 0.003` studs/s on a ball that is sitting still: contact solver
- * noise and replication residual, not motion. Fed through the velocity branch at `4 x |v| / 0.5` that
- * is `0.024 rad/s` — utterly invisible as a rate, and yet it accumulates: `0.024 rad/s` is one full
- * revolution every 260 seconds, so a ball parked for a minute rotates its markers ~1.4 degrees. That is
- * not a visual artefact anyone would notice on its own, but it is *the marker angle drifting while the
- * ball is still*, which is a state nobody can explain from the picture and which would slowly desync
- * two balls parked side by side. Below the deadband the rate is exactly zero, so the angle is exactly
- * preserved.
+ * ## Why `10` and not the full `BELT_SPEED` worth
  *
- * `0.5` studs/s is two orders of magnitude above the park noise and an eighth of the belt's steady-state
- * ~4 studs/s, so there is no chance of a genuinely moving ball falling inside it.
+ * A base of the full belt speed would draw `20 rad/s` for a ball that is merely holding station, leaving the whole
+ * `BALL_SPEED` range an addition on top of a rate that already looks fast. `10` is **half** the spawn rate: a sliding ball
+ * reads as rolling (about `1.6` revolutions a second) and a ball at full `BALL_SPEED_START` still reads as the fastest
+ * thing on screen. The split is what makes the two states distinguishable at a glance, which is the whole point of drawing
+ * the spin.
  */
-export const SPIN_DEADBAND_SPEED = 0.5;
+export const SPIN_BASE_RAD_PER_SEC = 30;
 
 /**
- * **Placeholder.** Multiplier on `speed / radius` - the drawn rate, and the number that decides whether a ball looks like
- * it is *rolling on the belt* or *sliding across it*.
+ * **Placeholder.** Speed below which a ball is treated as not moving **for the tail-wind trail**, in studs/s.
  *
- * ## The formula, as it actually runs
+ * ## Why this is its own constant (item 196)
  *
- * `apparentSpinRate` returns `min(APPARENT_SPIN_MAX_RAD_PER_SEC, APPARENT_SPIN_GAIN * speed / radius)` above
- * `SPIN_DEADBAND_SPEED`, where `speed` is the body's `BALL_SPEED` attribute and `radius` its `Size.Y / 2`. At this game's
- * `0.5`-stud radius that is `2 * GAIN * BALL_SPEED`, i.e. `20 rad/s` at spawn with `GAIN = 1`.
+ * This threshold used to be `SPIN_DEADBAND_SPEED`, borrowed from the spin rate because both wanted "is the ball actually
+ * moving". The spin rate no longer has a deadband — a ball at `BALL_SPEED = 0` rolls at `SPIN_BASE_RAD_PER_SEC`, because it
+ * *is* moving relative to the tread — so the two questions have come apart and must not share a name. A trail is about the
+ * ball losing ground in the world; a roll is about the ball meeting the floor. They coincide today and the constant is
+ * named for the one that still needs it.
  *
- * ## Why the input is `BALL_SPEED` and **not** `RELATIVE_SPEED` (item 108)
+ * ## The value, and what it protects
  *
- * `BALL_SPEED` **is** the belt-relative speed in this model, by construction rather than by convention. `stepBallSpeeds`
- * writes the along-belt velocity as `-(BALL_SPEED - BELT_SPEED)`, and `BALL_SPEED_START` is literally
- * `DEFAULT_BELT_SPEED` - the ball starts at the belt's own speed so that it **holds station** (plus up to
- * `BALL_SPEED_START_JITTER`, so a fresh ball is holding station or gaining slightly). A ball whose *world* velocity is zero
- * on a moving belt is travelling at `BELT_SPEED` relative to the surface under it.
+ * `0.5` studs/s is two orders of magnitude above the `0.003` studs/s park residual the `spin-probe` log reports on a
+ * resting body, and an eighth of the belt's steady-state drift, so a genuinely moving ball never falls inside it. Above it
+ * `writeBoosted` may raise `TailWind`; below it the trail is off, which is what stops a parked ball trailing wind it is not
+ * generating.
+ */
+export const TAIL_WIND_MIN_BALL_SPEED = 0.5;
+
+/**
+ * **Placeholder.** Multiplier on `BALL_SPEED / BASE_BALL_RADIUS` — the **speed-following part** of the drawn rate.
  *
- * `RELATIVE_SPEED = BALL_SPEED - BELT_SPEED` is the world velocity (negated), so driving the roll from it would draw a
- * ball that is motionless **and not rotating** while the tread streams past underneath - which is the definition of
- * sliding, not the cure for it. Rolling speed equals world speed on static ground; on a treadmill it equals speed relative
- * to the *belt*, and this game is a treadmill.
+ * ## The formula, as it actually runs (rewritten in place, item 196)
  *
- * ## Why `1`, and what `3` did
+ * `apparentSpinRate` returns
+ * `min(APPARENT_SPIN_MAX_RAD_PER_SEC, SPIN_BASE_RAD_PER_SEC + APPARENT_SPIN_GAIN * speed / BASE_BALL_RADIUS)`,
+ * where `speed` is the body's `BALL_SPEED` attribute. At the `0.5`-stud design radius the second term is
+ * `2 * GAIN * speed`, so with `GAIN = 0.5` **the drawn rate is simply `10 + BALL_SPEED`**: `10 rad/s` at rest, `20` at the
+ * spawn speed of `10`, `28` at a rocket's `18`.
  *
- * `1` is the **no-slip** rate. The surface under the ball is drawn travelling at `BELT_SPEED` toward `+X` (the scroll
- * sign, item 103), so for the contact point to keep up with it, its velocity must be `BALL_SPEED` toward `+X` - and that
- * is `omega * radius`, exactly. `GAIN = 1` satisfies it; nothing else does.
+ * **There is no deadband any more.** The old model returned exactly `0` below `SPIN_DEADBAND_SPEED`, which was the right
+ * answer to "should a *parked* ball spin" and the wrong answer to "should a *sliding* ball roll" — and `BALL_SPEED = 0` is
+ * the sliding case, not the parked one. The phase now decides: `ball-render-controller` and `marker-spin-controller` stop
+ * accumulating rotation outside `Playing`, so a ball in `Waiting` or `PostGame` is still, and a ball inside `Playing` always
+ * turns. `SPIN_DEADBAND_SPEED` is deleted; its one remaining reader (the tail-wind gate) now reads
+ * `TAIL_WIND_MIN_BALL_SPEED`, its own constant with its own reason.
  *
- * `3` shipped for one round and produced the very symptom it was meant to cure. At `BALL_SPEED = 10` it drew
- * `3 * 10 / 0.5 = 60 rad/s`, which is **9.5 revolutions per second** - and at 60 Hz that is **`57` degrees of rotation
- * between consecutive frames**. A sphere carrying six face textures only repeats every `90` degrees, so `57` degrees is
- * more than half a symmetry period: neither the sign nor the rate is recoverable from two neighbouring frames, and the eye
- * resolves it as a slow crawl, often backwards. `1` draws `20 rad/s` (`19` degrees per frame, `3.2` rev/s), which is
- * unambiguous. The report that motivated this was "sliding forward while rotating far too slowly", which is exactly what
- * that fold looks like.
+ * ## Why `0.5` and not `1` — the no-slip argument does not survive a base term
  *
- * **Item 188 reverted it to `1` for a second reason.** The rate used to divide by the **actual** radius, so a 20-stud ball
- * drew `3 * 10 / 10 = 3 rad/s` - half a revolution per second, i.e. visibly creeping. `apparentSpinRate` now divides by
- * `BASE_BALL_RADIUS` (the pack's design radius) instead, so this gain means "no-slip *at the design size*" and the drawn
- * rate no longer collapses as the ball grows. At `BALL_SPEED = 10` that is `20 rad/s` whatever the ball's size, and at
- * `20` it is `40` - comfortably under `APPARENT_SPIN_MAX_RAD_PER_SEC`.
+ * `1` was chosen as the **no-slip** rate: the tread is drawn travelling at `BELT_SPEED`, so for the contact point to keep up
+ * its velocity must be `BALL_SPEED`, i.e. `omega * radius`, i.e. `GAIN = 1`. That argument is only about the
+ * speed-following term, and adding a constant term means the *total* is no longer the rolling rate no matter what the gain
+ * is. The total is the thing that has to be legible, and `0.5 + base 10` puts every speed in the range the eye can read:
+ *
+ * - **`20 rad/s` at `BALL_SPEED = 10`**, which is the anchor the earlier rounds established as the legible rate — about
+ *   `3.2` rev/s, `19` degrees per frame at 60 Hz, unambiguous on a six-textured sphere.
+ * - **`28 rad/s` at a rocket's `ROCKET_TARGET_SPEED = 18`**, still inside the legible band.
+ *
+ * **Above `BALL_SPEED ≈ 21` the rate is inside the aliasing fold**, and that is stated rather than hidden: a sprinter's
+ * `30` draws `40 rad/s`, and the `BALL_SPEED_MAX = 50` safety ceiling draws `60`. No base-plus-linear split can put `20` at
+ * speed `10` *and* `31` at speed `50`; the anchor is what matters because almost every drawn frame of a round is between
+ * the seeded start and a few points of decay. A rate that folds during a boosted second is a smaller fault than one that
+ * folds at the green light, which is what the previous gain of `3` did.
+ *
+ * **The anchor was not actually being met before this change, and that is worth recording.** `APPARENT_SPIN_GAIN` was `3`,
+ * so `BALL_SPEED = 10` drew `60 rad/s` — `9.5` rev/s, `57` degrees per frame, which is exactly the aliasing regime `3` was
+ * rolled back for twice. Halving the gain and adding the base is what lands the ordinary range back inside the legible band.
  *
  * **The literal "20x faster" was tried and rejected on arithmetic, not taste.** Twenty times the old `3.3 rad/s` is
- * `66 rad/s`, which is the *same* 9.5 rev/s aliasing regime described above - the very defect `3` was rolled back for. The
- * size-relative form at gain `1` gives `6x` the old rate and lands exactly on the number that was legible when the ball was
- * one stud.
+ * `66 rad/s`, the same fold — the defect `3` was rolled back for.
  *
  * **The rest of the visual coupling lives in `BELT_TEXTURE_SCROLL_MULTIPLIER`.** No ball rotation can match a tread drawn
- * faster than the belt model's `BELT_SPEED`; the two only agree at `1`.
+ * faster than the belt model's `BELT_SPEED`; the two only agree at a gain of `1` with no base term, which is a painting no
+ * longer strictly true and is called out here rather than silently abandoned.
  */
-export const APPARENT_SPIN_GAIN = 3;
+export const APPARENT_SPIN_GAIN = 0.3;
 
 /**
  * **Placeholder, and not read by anything.** Kept as the placeholder for a multiplier on a body's *own*
@@ -545,20 +559,31 @@ export const APPARENT_SPIN_GAIN = 3;
 export const APPARENT_SPIN_GAIN_OMEGA = 3;
 
 /**
- * **Placeholder.** Ceiling on the drawn angular rate, radians/second.
+ * **Placeholder.** Ceiling on the drawn angular rate, radians/second ? **and it is now the aliasing fold itself, not a distant
+ * safety net (item 200).**
  *
- * **A safety net now, not a rate.** With `APPARENT_SPIN_GAIN = 1` and a `0.5`-stud radius the drawn rate is
- * `2 * BALL_SPEED`, so this value is only reached at `BALL_SPEED = 45` - above `BALL_SPEED_MAX` (`20`), i.e. never. It
- * stays because a future gain, radius or speed range must not be able to produce an `inf` or a meaningless number, and
- * because `apparentSpinRate` reads it on every call.
+ * ## The arithmetic that sets it
  *
- * **It does not police legibility, deliberately.** Past roughly `5` revolutions a second (about `31 rad/s`) a textured
- * ball on a 60 Hz display aliases - consecutive frames land features more than half a symmetry period apart and the eye
- * reads the ball as turning backwards. That is `BALL_SPEED ~ 15.7` at this radius. Clamping *at* that point would make a
- * fast ball stop matching the tread while it kept moving, which looks worse than the alias; the earlier `60 rad/s`
- * problem came from the gain (`3`), not from this ceiling being absent.
+ * A sphere carrying six face textures repeats every `90` degrees, so a 60 Hz frame may advance it **at most `45` degrees**
+ * before two neighbouring frames land on the same-looking face and the eye reads the ball as *not turning at all* ? the report
+ * that has come back more than once. `45` degrees a frame is `2700` degrees/second, `47` rad/s; `31` draws `29.6` degrees a
+ * frame, which leaves margin for a hitch.
+ *
+ * ## Why `90` was wrong
+ *
+ * It was described as "a safety net, not a rate", which was defensible while the fastest ball drew `40` rad/s. It stopped
+ * being defensible when `BOOST_TARGET_BALL_SPEED` moved to `80`: the rate is then `10 + 80 = 90` ? **86 degrees of rotation per
+ * frame**, deep inside the fold. An aliased ball is not "a fast ball", it is a ball that appears frozen, which is the symptom
+ * this ceiling exists to prevent.
+ *
+ * ## Clamping is not the compromise the earlier docblock claimed
+ *
+ * That note argued clamping "would make a fast ball stop turning while it kept moving, which looks worse than the alias". The
+ * comparison is between a ball drawn at a constant, obviously-fast rate and a ball drawn as a still image; the still image is
+ * worse, and it is also the state that becomes a bug report. The speed-following part is what gives, and only above about
+ * `BALL_SPEED = 21` ? a boosted ball rather than an ordinary one.
  */
-export const APPARENT_SPIN_MAX_RAD_PER_SEC = 90;
+export const APPARENT_SPIN_MAX_RAD_PER_SEC = 31;
 
 /**
  * **Placeholder.** Physical angular speed above which the drawn axis is taken from the body's own spin.
@@ -568,22 +593,25 @@ export const APPARENT_SPIN_MAX_RAD_PER_SEC = 90;
  * whatever direction the last float bit happened to point. 0.05 rad/s is ~0.008 rev/s: far below any
  * real rotation, far above solver noise.
  *
- * When the spin is below this the axis falls back to the direction of travel, and then to the belt's
- * own `+RightVector` when the body is not moving either. That chain still matters even though a parked
- * ball no longer rotates (`SPIN_DEADBAND_SPEED` holds the angle): the axis is computed every frame so
- * the log line can name which source it used, and because a ball that starts moving must begin turning
- * about a defined axis on its first moving frame rather than one frame later, when the previous frame's
- * zero rate would otherwise have left no axis at all.
+ * When the spin is below this the axis falls back to the direction of travel, and then to the belt's own
+ * `+RightVector` when the body is not moving either. That chain still matters now that the rate has no deadband and the
+ * *phase* holds the angle instead: the axis is computed every frame so the log line can name which source it used, and
+ * because a ball that starts moving must begin turning about a defined axis on its first moving frame rather than one
+ * frame later.
  */
 export const SPIN_AXIS_SOURCE_MIN_RAD_PER_SEC = 0.05;
 
 /**
  * **Placeholder.** Speed above which the fallback axis prefers the ball's travel over the belt's axis.
  *
- * `0.5` studs/s — the same number as `SPIN_DEADBAND_SPEED` above, but a different job: that one decides
- * whether the markers turn at all, this one decides *which way* they turn once they do. They coincide
- * because both answer "is the ball really moving", and there is no reason for a ball to be turning while
- * its direction is still being taken from the belt rather than from itself.
+ * `0.5` studs/s — the same number as `TAIL_WIND_MIN_BALL_SPEED`, but a different job: that one decides whether a trail is
+ * drawn at all, this one decides *which way* the markers turn once they do. They coincide because both answer "is the ball
+ * really moving", and there is no reason for a ball to be turning while its direction is still being taken from the belt
+ * rather than from itself.
+ *
+ * **This was `SPIN_DEADBAND_SPEED`'s number until item 196**, when the spin rate's deadband was deleted: the rate no
+ * longer asks whether the ball is moving (a ball at `BALL_SPEED = 0` is sliding and must roll), so the two questions came
+ * apart and this one kept its own name.
  *
  * The two fallbacks agree for a ball travelling straight down the belt, so this threshold only decides
  * *which* they agree on when the ball is deflected by a wall or a collision: a moving ball should read
@@ -607,9 +635,9 @@ export const SPIN_FALLBACK_MIN_SPEED = 0.5;
  * ball grazes a wall.
  *
  * Note what this smoothing now feeds, which differs from the previous two models: it produces the `|v|`
- * that the velocity branch of the rate reads (`min(MAX, GAIN x |v| / radius)`) as well as the fallback
- * axis. It therefore *is* part of the rate path again — and that is why `SPIN_DEADBAND_SPEED` has to
- * exist, since a smoothed speed still settles to the `0.003` studs/s park residual rather than to zero.
+ * that the fallback axis reads (`SPIN_FALLBACK_MIN_SPEED`) rather than a rate. The rate is a function of `BALL_SPEED`
+ * alone, so the smoothed speed no longer has a path into it — and that is why the `SPIN_DEADBAND_SPEED` this docblock used
+ * to justify is gone (item 196).
  */
 export const APPARENT_SPIN_SMOOTHING_SECONDS = 0.15;
 
@@ -687,6 +715,29 @@ export const PICKUP_SIZE = new Vector3(20, 20, 20);
 export const PICKUP_MAX_COUNT = 12;
 
 /**
+ * **Placeholder.** How far the drawn disc's edge is kept from the belt's edge, in studs — a margin *beyond* the arithmetic
+ * that keeps the picture on the belt.
+ *
+ * ## Why a margin exists at all (item 201)
+ *
+ * `pickupBounds` subtracts the largest drawn radius, which makes a pad at the region's corner have its disc **tangent** to the
+ * belt edge — geometrically inside, and visually indistinguishable from hanging over. Two reports in a row described pads "off
+ * the belt" while every placement was, by arithmetic, inside by up to `2.2` studs, and the tangency is why: a circle that
+ * touches a boundary has no visible belt between it and the drop, and at the game camera's shallow angle the far edge is
+ * compressed to a few pixels.
+ *
+ * So the bound subtracts `drawRadius + PICKUP_EDGE_MARGIN`. The margin is the width of belt a player can see *between* the
+ * paint and the edge, which is the thing that makes "on the belt" legible rather than merely true.
+ *
+ * ## Why `12`
+ *
+ * Wider than the disc's own radius (`10`) by a little, so a pad near the region's corner still shows a gap at least as wide as
+ * the pad is from the edge. On a `333 x 173` belt that leaves `+-144.5` and `+-64.5` — still a `289 x 129` band, which packs
+ * `12` pads with room to spare (`14 x 6 = 84` grid cells at a 20-stud pad).
+ */
+export const PICKUP_EDGE_MARGIN = 12;
+
+/**
  * **Placeholder.** Draws allowed per pad before that pad is reported as unplaceable.
  *
  * ## Why a bound, and why the bound is not the mechanism
@@ -748,7 +799,7 @@ export const PICKUP_SPRITE_STUDS = 2.6;
  * The pad is `PICKUP_SIZE.Y` tall and a ball is a stud across, so a sprite sitting at the pad's origin would be behind the
  * ball that is collecting it. This lifts it clear without putting it above the camera's eye line.
  */
-export const PICKUP_SPRITE_LIFT_STUDS = 1.2;
+export const PICKUP_SPRITE_LIFT_STUDS = 3;
 
 /**
  * The pickup footprint ring's colour: `#00BFFF`, "deep sky blue" in the web palette — the user's hex, not a placeholder.
@@ -804,7 +855,7 @@ export const RING_PIXELS_PER_STUD = 200;
  * twentieth of a stud: thin enough that the ring reads as paint on the floor rather than as a plate, thick enough that the
  * disc it makes is not degenerate.
  */
-export const RING_THICKNESS_STUDS = 1;
+export const RING_THICKNESS_STUDS = 2;
 
 /**
  * **Placeholder.** How far above the pad's bottom face the ring floats, in studs.
@@ -952,7 +1003,7 @@ export const BALL_SPEED_MIN = 0;
  * **This is a safety net, not a balance guard.** Nothing derives a power's magnitude from it, and the designer tunes the
  * powers.
  */
-export const BALL_SPEED_MAX = 50;
+export const BALL_SPEED_MAX = 100;
 
 /** **Placeholder.** Density shared by every spawned body; this matches Plastic's current default density. */
 export const BALL_PHYSICAL_DENSITY = 0.7;
@@ -1060,7 +1111,7 @@ export const BALL_COLLISION_SHOVE_DECAY_SECONDS = 1;
  * forward until its decay brings `BALL_SPEED` back under the reference, at which point it turns around and
  * resumes losing ground.
  */
-export const BOOST_TARGET_BALL_SPEED = 20;
+export const BOOST_TARGET_BALL_SPEED = 80;
 
 /**
  * **Placeholder.** How often a ball sways across the belt: **full left-right cycles per second**.

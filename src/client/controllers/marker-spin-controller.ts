@@ -1,4 +1,4 @@
-import { CollectionService, Players, RunService } from "@rbxts/services";
+import { CollectionService, Players, ReplicatedStorage, RunService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
 import {
 	MARKER_LOCAL_POSITION_ATTRIBUTE,
@@ -8,12 +8,8 @@ import {
 import { BALL_SPEED_ATTRIBUTE } from "shared/attributes";
 import { TAGS } from "shared/tags";
 import { apparentSpinRate } from "shared/apparent-spin";
-import {
-	APPARENT_SPIN_SIGN,
-	APPARENT_SPIN_SMOOTHING_SECONDS,
-	BALL_PHANTOM_NAME,
-	SPIN_DEADBAND_SPEED,
-} from "shared/tuning";
+import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
+import { APPARENT_SPIN_SIGN, APPARENT_SPIN_SMOOTHING_SECONDS, BALL_PHANTOM_NAME } from "shared/tuning";
 
 /** One marker and the pose it holds relative to its body, read once when the marker is first seen. */
 interface TrackedMarker {
@@ -108,6 +104,18 @@ const STATE_LOG_INTERVAL_SECONDS = 1;
  * correctly still reported nothing about them. That was a defect in the logging, not the controller.
  */
 const STATE_LOG_LIMIT = 12;
+
+/** How long to wait for `RoundState` before giving up and saying so; the tree's bounded-wait convention (item 13). */
+const MARKER_PHASE_WAIT_SECONDS = 10;
+
+/**
+ * The one phase the markers turn in (item 196).
+ *
+ * The rate is base plus speed now, so `BALL_SPEED = 0` is a real roll — correct during `Playing`, where the ball is sliding
+ * across the tread, and wrong in `Waiting`/`PostGame`, where the belt is stopped and the ball is at rest. The phase is the
+ * fact that separates the two; the old speed deadband could not, which is why a sliding ball had frozen markers.
+ */
+const ROLLING_PHASE = "Playing";
 
 /**
  * Frames between re-orthonormalisations of a ball's accumulated spin rotation.
@@ -219,10 +227,21 @@ export class MarkerSpinController implements OnStart {
 		let discoveryTimedOut = false;
 
 		/**
+		 * The phase the server last published; `""` until `RoundState` replicates.
+		 *
+		 * **The marker controller's own gate (item 196).** The fallback path (a client with no skin) accumulates an angle the
+		 * same way the phantom accumulates a frame, so it needs the same rule: outside `Playing` nothing turns. Read once and
+		 * subscribed rather than polled, and the same `StringValue` the other controllers read — one source, no second answer to
+		 * "what phase is it".
+		 */
+		let phase = "";
+
+		/**
 		 * Whether the steady-state budget has been re-armed for the round that is now running (item 194).
 		 *
-		 * Latched, not a phase read: the first frame any body reports a speed above `SPIN_DEADBAND_SPEED` is the moment
-		 * the belt is driving the field, and it is the only moment at which the twelve lines become interesting.
+		 * Latched, not a phase read: the first frame any body reports a nonzero `BALL_SPEED` is the moment the belt is
+		 * driving the field, and it is the only moment at which the twelve lines become interesting. (It used to be "above
+		 * `0`"; that constant is gone ? item 196 ? and "moving at all" is the same question asked of `0`.)
 		 */
 		let raceLoggingStarted = false;
 
@@ -388,6 +407,18 @@ export class MarkerSpinController implements OnStart {
 		connections.push(CollectionService.GetInstanceRemovedSignal(TAGS.ballDecoration).Connect(untrack));
 		connections.push(CollectionService.GetInstanceAddedSignal(TAGS.ball).Connect(noteBall));
 
+		// **The phase, read once and then subscribed.** Bounded wait for item 13's reason; a failure is non-fatal — the markers
+		// are still posed, they simply never turn, which is the honest degraded state and is visible in `rateSource=phase`.
+		const state = ReplicatedStorage.WaitForChild(ROUND_STATE_VALUE_NAME, MARKER_PHASE_WAIT_SECONDS);
+		if (state === undefined || !state.IsA("StringValue")) {
+			warn(
+				`[MarkerSpin] no ${ROUND_STATE_VALUE_NAME} after ${MARKER_PHASE_WAIT_SECONDS}s — markers will not turn (no phase to allow it).`,
+			);
+		} else {
+			phase = state.Value;
+			connections.push(state.GetPropertyChangedSignal("Value").Connect(() => (phase = state.Value)));
+		}
+
 		task.spawn(() => {
 			while (true) {
 				task.wait(TRACK_RESCAN_SECONDS);
@@ -490,7 +521,7 @@ export class MarkerSpinController implements OnStart {
 					const raw = candidate.GetAttribute(BALL_SPEED_ATTRIBUTE);
 					const speed = typeIs(raw, "number") && raw === raw ? raw : 0;
 
-					if (speed > SPIN_DEADBAND_SPEED) {
+					if (speed > 0) {
 						raceLoggingStarted = true;
 						stateLogCount = 0;
 						nextStateLogAt = now;
@@ -618,12 +649,18 @@ export class MarkerSpinController implements OnStart {
 				// this frame, which of the three axis sources produced it, and which branch set the rate.
 				let omegaThisFrame = 0;
 				let axisSource = "none";
-				let rateSource = "deadband";
+				let rateSource = "phase";
+
+				// One read of the phase latch per body per frame, so the branch below is a boolean test rather than a string
+				// comparison four times.
+				const rolling = phase === ROLLING_PHASE;
 
 				// ## The model, and why it is one branch now
 				//
-				// The rate is `min(MAX, APPARENT_SPIN_GAIN x BALL_SPEED / radius)`, or `0` below
-				// `SPIN_DEADBAND_SPEED`. That is the whole thing.
+				// The rate is `min(MAX, SPIN_BASE_RAD_PER_SEC + APPARENT_SPIN_GAIN x BALL_SPEED / BASE_BALL_RADIUS)`,
+				// and it is applied only in `Playing` (item 196). That is the whole thing. **`BALL_SPEED = 0` is a real
+				// roll**, not a stop -- a ball at zero attribute speed is sliding across the tread -- so the phase, not the
+				// speed, decides whether anything turns.
 				//
 				// Earlier versions chained branches: a physical-spin branch first (draw the body's own rotation
 				// if it has any), then a velocity branch, then the deadband. The physical branch was there so a
@@ -660,15 +697,20 @@ export class MarkerSpinController implements OnStart {
 					// the log used to print `omegaVisual=0 angle=0` on this path for that reason alone — a reader could not tell
 					// "the skin is not turning" from "this field only exists on the fallback branch". Printing the rate the
 					// skin is using makes the log answer the question it looks like it answers.
-					omegaThisFrame = apparentSpinRate(ballSpeed);
-				} else if (ballSpeed > SPIN_DEADBAND_SPEED) {
+					//
+					// **Reported as the rate the skin *is* using, which is zero outside `Playing` (item 196).** The skin has its
+					// own phase gate; when the phase is not `Playing` it holds its frame, so the honest number here is `0` rather
+					// than the rate the formula would produce. See the gate in `ball-render-controller.step`.
+					omegaThisFrame = rolling ? apparentSpinRate(ballSpeed) : 0;
+				} else if (rolling) {
 					// One formula, in `shared/apparent-spin.ts`, so this path and the skin cannot disagree about the rate even
-					// though only one of them is accumulating an angle.
+					// though only one of them is accumulating an angle. **No speed condition any more**: the rate is base plus
+					// speed, so `BALL_SPEED = 0` is a real roll (item 196) and the phase is what decides whether anything turns.
 					omega = apparentSpinRate(ballSpeed);
 					rateSource = "attribute";
 				} else {
 					omega = 0;
-					rateSource = "deadband";
+					rateSource = "phase";
 				}
 
 				// ## Axis: always the belt's, never the body's
@@ -682,16 +724,12 @@ export class MarkerSpinController implements OnStart {
 				// **Fallback only.** With a skin present the markers are posed inside its frame below, and this whole block is
 				// skipped - running it would be a second rotation stacked on the one the phantom already carries.
 				if (phantom === undefined) {
-					let axis: Vector3 | undefined;
-
-					if (axis === undefined) {
-						// Neither spinning nor moving: a ball at rest on the belt. The rate is `0` here, so nothing
-						// rotates — but the axis is still resolved because the log line reports which source it
-						// came from, and because a ball that starts moving must turn about a defined axis on its
-						// first moving frame rather than one frame later.
-						axis = beltSpinAxis();
-						axisSource = "belt";
-					}
+					// The rate is resolved from `BALL_SPEED` and the phase, above; this branch only names the axis. It is
+					// resolved even when nothing turns, so the log reports which source the axis came from and so a ball
+					// that starts moving begins on a defined axis rather than one frame later.
+					const axisResolved: Vector3 = beltSpinAxis();
+					let axis: Vector3 | undefined = axisResolved;
+					axisSource = "belt";
 
 					// One sign for all three sources, so a ball crossing from sliding to rolling does not reverse.
 					axis = axis.mul(APPARENT_SPIN_SIGN);
@@ -809,7 +847,7 @@ export class MarkerSpinController implements OnStart {
 					for (const [candidate] of bodies) {
 						const rawSpeed = candidate.GetAttribute(BALL_SPEED_ATTRIBUTE);
 						const speed = typeIs(rawSpeed, "number") && rawSpeed === rawSpeed ? rawSpeed : 0;
-						if (speed > SPIN_DEADBAND_SPEED) {
+						if (speed > 0) {
 							spinning++;
 						}
 						speeds.push(describeNumber(speed));

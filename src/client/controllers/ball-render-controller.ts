@@ -1,6 +1,7 @@
-import { CollectionService, RunService } from "@rbxts/services";
+import { CollectionService, ReplicatedStorage, RunService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
 import { BALL_SPEED_ATTRIBUTE } from "shared/attributes";
+import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import { TAGS } from "shared/tags";
 import { BALL_PHANTOM_NAME } from "shared/tuning";
 import { apparentSpinAxis, apparentSpinRate } from "shared/apparent-spin";
@@ -12,6 +13,25 @@ import { apparentSpinAxis, apparentSpinRate } from "shared/apparent-spin";
  * breathe. The same number the marker controller uses, because it is the same accumulation.
  */
 const NORMALIZE_EVERY_FRAMES = 300;
+
+/** How long to wait for `RoundState` before giving up and saying so; the tree's bounded-wait convention (item 13). */
+const ROUND_STATE_WAIT_SECONDS = 10;
+
+/** TEMPORARY INSTRUMENTATION (item 197). Seconds between `probe` samples. */
+const PROBE_INTERVAL_SECONDS = 1;
+
+/** TEMPORARY INSTRUMENTATION (item 197). Total `probe` lines this session, so the diagnostic cannot flood. */
+const PROBE_LINE_LIMIT = 16;
+
+/**
+ * The one phase the ball rolls in.
+ *
+ * **A phase gate, not a speed gate (item 196).** The rate is `SPIN_BASE_RAD_PER_SEC + gain x BALL_SPEED`, so `0` speed is a
+ * real rate — and that is correct during `Playing`, where a ball at `BALL_SPEED = 0` is sliding across the tread and must
+ * roll. It is wrong in `Waiting` and `PostGame`, where the belt is stopped and the ball is genuinely at rest. The old model
+ * answered both with one deadband on the speed, which is why a sliding ball had a frozen skin.
+ */
+const ROLLING_PHASE = "Playing";
 
 /** One body's visible stand-in, and the roll it has accumulated. */
 interface PhantomState {
@@ -69,6 +89,22 @@ export class BallRenderController implements OnStart {
 	/** The belt the roll is taken about; resolved by tag and cached. See `beltRight`. */
 	private cachedBelt?: BasePart;
 
+	/**
+	 * The phase the server last published, kept rather than re-read per frame.
+	 *
+	 * Read once in `onStart` and then subscribed — the same shape `marker-spin-controller` and `decoy-outline-controller` use,
+	 * and the same `StringValue`, so there is one source and no second reader of the phase. Defaults to `""`, which is not
+	 * `Playing`, so a client whose `RoundState` has not replicated yet draws no rotation rather than a gate that opens by
+	 * accident.
+	 */
+	private phase = "";
+
+	/** TEMPORARY INSTRUMENTATION (item 197). Last `probe` time and line count. */
+	private probeAt = 0;
+	private probeLines = 0;
+	/** TEMPORARY INSTRUMENTATION (item 197). Each body's position at the previous `probe`. */
+	private readonly probePrevious = new Map<BasePart, Vector3>();
+
 	public onStart(): void {
 		// Both discovery paths, for the reason `marker-spin-controller` keeps both: the tag signal is the one that works, and
 		// the startup scan is what catches a client joining mid-`Playing` with bodies already in the world. Without the scan a
@@ -89,7 +125,24 @@ export class BallRenderController implements OnStart {
 		);
 		this.connections.push(RunService.RenderStepped.Connect((dt) => this.step(dt)));
 
-		print(`[BallRender] watching ${TAGS.ball}; phantoms=${this.phantoms.size()}`);
+		// **The phase, read once and then subscribed.** Bounded wait for the tree's usual reason: an unbounded `WaitForChild`
+		// turns "the server never created it" into a silent infinite yield. A failure is non-fatal — the phantoms are still
+		// built, they simply never roll, which is the honest degraded state.
+		const state = ReplicatedStorage.WaitForChild(ROUND_STATE_VALUE_NAME, ROUND_STATE_WAIT_SECONDS);
+		if (state === undefined || !state.IsA("StringValue")) {
+			warn(
+				`[BallRender] no ${ROUND_STATE_VALUE_NAME} after ${ROUND_STATE_WAIT_SECONDS}s — the roll stays off (no phase to allow it).`,
+			);
+		} else {
+			this.phase = state.Value;
+			this.connections.push(
+				state.GetPropertyChangedSignal("Value").Connect(() => {
+					this.phase = state.Value;
+				}),
+			);
+		}
+
+		print(`[BallRender] watching ${TAGS.ball}; phantoms=${this.phantoms.size()} phase=${this.phase}`);
 	}
 
 	/**
@@ -198,6 +251,13 @@ export class BallRenderController implements OnStart {
 	private step(frameDt: number): void {
 		const axis = apparentSpinAxis(this.beltRight());
 		const dead = new Array<BasePart>();
+		// **The phase gate, and it holds the accumulated frame rather than resetting it.** Outside `Playing` the position is still
+		// copied onto the phantom — a frozen ball must stay where its body is, and a body spawned into `Waiting` must be drawn at
+		// all — but `spin` is not advanced. Holding is the right answer: a ball frozen on a stopped belt has no canonical facing,
+		// so snapping it to the identity would spin the texture by up to a quarter turn at `PostGame` entry and again at the next
+		// `Playing`, which is two visible jumps for no information. The accumulator survives because it is this controller's own
+		// state and nothing about a phase change invalidates a rotation.
+		const rolling = this.phase === ROLLING_PHASE;
 
 		for (const [ball, state] of this.phantoms) {
 			if (ball.Parent === undefined || state.phantom.Parent === undefined) {
@@ -205,16 +265,16 @@ export class BallRenderController implements OnStart {
 				continue;
 			}
 
-			const raw = ball.GetAttribute(BALL_SPEED_ATTRIBUTE);
-			const speed = typeIs(raw, "number") && raw === raw ? raw : 0;
-			// **`BALL_SPEED` is the belt-relative speed, not the world speed** - see `APPARENT_SPIN_GAIN`. The server
-			// writes the world velocity as `BELT_SPEED - BALL_SPEED`, and `BALL_SPEED_START` equals the belt speed so a
-			// fresh ball holds station: that identity only exists because `BALL_SPEED` measures travel *through the
-			// belt's reference* rather than across the ground. Subtracting the belt here as well would draw a ball that
-			// holds station as motionless *and unrotating* while the tread runs underneath it, which is sliding.
-			const omega = apparentSpinRate(speed);
+			if (rolling) {
+				const raw = ball.GetAttribute(BALL_SPEED_ATTRIBUTE);
+				const speed = typeIs(raw, "number") && raw === raw ? raw : 0;
+				// **`BALL_SPEED` is the belt-relative speed, not the world speed** - see `APPARENT_SPIN_GAIN`. The server
+				// writes the world velocity as `BELT_SPEED - BALL_SPEED`, and `BALL_SPEED_START` equals the belt speed so a
+				// fresh ball holds station: that identity only exists because `BALL_SPEED` measures travel *through the
+				// belt's reference* rather than across the ground. Subtracting the belt here as well would draw a ball that
+				// holds station as motionless *and unrotating* while the tread runs underneath it, which is sliding.
+				const omega = apparentSpinRate(speed);
 
-			if (omega !== 0) {
 				state.spin = CFrame.fromAxisAngle(axis, omega * frameDt).mul(state.spin);
 				state.framesSinceNormalize++;
 
@@ -231,6 +291,58 @@ export class BallRenderController implements OnStart {
 		// would look exactly like the bug this map exists to avoid.
 		for (const ball of dead) {
 			this.phantoms.delete(ball);
+		}
+
+		this.probe(frameDt, rolling);
+	}
+
+	/**
+	 * TEMPORARY INSTRUMENTATION (item 197). **What this client actually draws, versus what the server actually has.**
+	 *
+	 * The report is "the balls travel along the belt during `Waiting`", and the server disagrees flatly: the sample line from
+	 * the same run shows one body's `along=0`, `velocity=(0, 0, 0)` and a position that does not change by a thousandth of a
+	 * stud for twenty-seven seconds with `roundActive=false`. So either a *client-side* object is moving, or the movement is
+	 * something other than a body — and the only client-side object that can be mistaken for a ball is this phantom.
+	 *
+	 * One line per second while the roll is gated, carrying three facts that separate the possibilities:
+	 *
+	 * - `ballΔ` — how far the replicated ball moved this second. Zero means the server is frozen, as the sample says.
+	 * - `phantomΔ` — how far the phantom moved. **A non-zero value beside a zero `ballΔ` is the bug**: the client is drawing
+	 *   motion that does not exist, and nothing but this loop writes that part.
+	 * - `drift` — the distance between the phantom and its ball, which should be exactly `0`: the phantom's `CFrame` is
+	 *   rebuilt from `ball.Position` every frame, so anything else means the pose is not the one this loop just wrote.
+	 *
+	 * Capped and phased like every other diagnostic here: a handful of lines, then silence.
+	 */
+	private probe(frameDt: number, rolling: boolean): void {
+		if (rolling || this.probeLines >= PROBE_LINE_LIMIT) {
+			return;
+		}
+
+		const now = os.clock();
+		if (now - this.probeAt < PROBE_INTERVAL_SECONDS) {
+			return;
+		}
+
+		const elapsed = this.probeAt === 0 ? 0 : now - this.probeAt;
+		this.probeAt = now;
+
+		for (const [ball, state] of this.phantoms) {
+			const previous = this.probePrevious.get(ball);
+			this.probePrevious.set(ball, ball.Position);
+
+			const ballDelta = previous === undefined ? 0 : ball.Position.sub(previous).Magnitude;
+			const phantomDelta = previous === undefined ? 0 : state.phantom.Position.sub(previous).Magnitude;
+			const drift = state.phantom.Position.sub(ball.Position).Magnitude;
+
+			this.probeLines++;
+			print(
+				`[BallRender] probe phase=${this.phase} body="${ball.GetFullName()}" dt=${tostring(math.round(elapsed * 100) / 100)}s ballDelta=${tostring(math.round(ballDelta * 1000) / 1000)} phantomDelta=${tostring(math.round(phantomDelta * 1000) / 1000)} drift=${tostring(math.round(drift * 1000) / 1000)} ballLocal=${tostring(ball.Position)} phantom=${tostring(state.phantom.Position)}`,
+			);
+
+			if (this.probeLines >= PROBE_LINE_LIMIT) {
+				return;
+			}
 		}
 	}
 

@@ -5633,3 +5633,401 @@ Build exit 0; **`npm test` = 487 passed in 36 files** (16 new cases: 7 in `ball-
 **Validation:** `npm run build` exit 0; **`npm test` = 487 passed in 36 files** (no test changed -- the builder is not constructible in the Jest runtime, and no spec asserted a palate); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all five touched files pass `prettier --check`; `\uXXXX` search under `src/` is zero; `flamework.build` unchanged -- no controller added or removed.
 
 **Studio-only:** that the store, the inventory, the picker, the payout, the toast and the banner all read as a deliberate flat panel rather than as "the shadow failed to draw", and that the chip's black top-right line is gone (it should be: there is no plate left to leak).
+
+## 196. Spin is base-plus-speed and only inside `Playing`; the `Waiting` drift was already fixed and the log field that hid it is renamed
+
+**Four parts, three of them shipped as asked and one of them not done at all, because it was already done.** The last part is the interesting one: the report's evidence is a diagnostic field that measures nothing.
+
+### Parts 1-2 -- the rate, and the numbers before and after
+
+**The formula before this round was `min(90, APPARENT_SPIN_GAIN x speed / BASE_BALL_RADIUS)` above a `0.5` deadband, else `0`.** With `APPARENT_SPIN_GAIN = 3` (not `1` -- the docblock had been stale since item 187) and `BASE_BALL_RADIUS = 0.5` that is `min(90, 6 x speed)`, so the anchor was **not** being met: the rate at `BALL_SPEED = 10` was **`60 rad/s`**, which is `9.5` rev/s and **`57` degrees of rotation per frame** at 60 Hz -- the aliasing fold the gain of `3` was rolled back for twice. The prompt's "20 rad/s is the approved rate" was right about the *intent* and wrong about the code.
+
+| `BALL_SPEED` | before (gain `3`) | after (base `10` + gain `0.5`) |
+| --- | --- | --- |
+| `0` | **0** -- the sliding-ball bug | **10** |
+| `10` | 60 (aliased) | **20** -- the approved anchor |
+| `20` | 90 (clamped) | **30** |
+| rocket `18` | 90 (clamped) | 28 |
+| `BALL_SPEED_MAX = 50` | 90 (clamped) | 60 (aliased) |
+
+**The split is `SPIN_BASE_RAD_PER_SEC = 10` and `APPARENT_SPIN_GAIN = 0.5`**, and that choice makes the whole thing `10 + BALL_SPEED` -- one number a reader can hold. `10` is half the spawn rate: a sliding ball reads as rolling (about `1.6` rev/s), and a ball at full `BALL_SPEED_START` still reads as the fastest thing on screen, so the two states are distinguishable at a glance. The gain had to come down from `1` because the base is carrying part of the total; **the no-slip argument that produced `1` is about the speed-following term only and does not survive a constant term**, which is stated in the constant's docblock rather than quietly dropped.
+
+**`SPIN_DEADBAND_SPEED` is deleted, and it had a second reader.** It was not only the spin path: `writeTailWind` gated the trail on `speed > SPIN_DEADBAND_SPEED`. That use is now `TAIL_WIND_MIN_BALL_SPEED` (same `0.5`, its own name and its own docblock): a trail is about the ball losing ground in the *world*, a roll is about the ball meeting the *floor*, and the two coinciding was an accident of the old formula. Two retunes that had to move together were one retune that could move alone.
+
+### Part 3 -- the phase gate, and the frame holds
+
+Both controllers read `ReplicatedStorage.RoundState` once at `onStart` and subscribe — the same `StringValue` `RoundStateController` prints, read the way `decoy-outline-controller` and the camera already read it, so there is no second source. `BallRenderController` gains a `phase` field and skips the accumulation when it is not `Playing`; `MarkerSpinController` gains the same latch for its fallback path.
+
+**The phantom's frame holds, it does not reset**, and that is the right answer: a ball frozen on a stopped belt has no canonical facing, so snapping to the identity would rotate the texture by up to a quarter turn at `PostGame` entry and again at the next `Playing` — two visible jumps carrying no information. The accumulator is this controller's own state, and nothing about a phase change invalidates a rotation. The position is still copied every frame, so a body spawned into `Waiting` is drawn where it is.
+
+### Part 4 -- what the log says now
+
+`rateSource` reads **`phase`** outside `Playing` (it used to read `deadband`, which described a speed condition that no longer exists). `omegaVisual` reports `0` there — because the skin *is* applying zero, not because the field is empty — and reports `SPIN_BASE_RAD_PER_SEC` at `BALL_SPEED = 0` **during `Playing`**, which is the field finally answering the question it looks like it answers.
+
+### Part 5 -- the body was already not drifting, and the field that said otherwise is renamed
+
+**`stepBallSpeeds`' first line is already `if (!this.roundActive) { return; }`** — every write in the method (along-belt velocity, sway, `tickDelta`, `writeBoosted`, `writeTailWind`) is behind it, and `enterWaiting` sets the flag **`false`**, with a docblock that reads *"Not `true` any more … the flag is now set in `enterPlaying` and nowhere else"*. That is exactly the bug the prompt describes, and it was fixed in an earlier round.
+
+**The `RELATIVE_SPEED = -10` in the report is `ballSpeed - beltSpeed`, an arithmetic field, not motion.** It reads `-10` on a body that is not moving because `BALL_SPEED` is `0` and the belt reference is `10`; it is the velocity the model *would* write if it ran. The same run's `velocity=` field is the measurement, and it settles it:
+
+```
+t=0.395  velocity=(-0, 33.036, 0.012)     <- bouncing, along-belt 0.012
+t=0.931  velocity=(-0, 15.61,  0.019)
+t=1.480  velocity=(-0, -12.407, 0.025)
+t=3.646  velocity=(0, 0, 0)                <- and stays exactly zero for 13 s of Waiting
+t=17.878 velocity=(-15.658, -0.001, 9.291) <- the model, after Waiting -> Playing
+```
+
+So **no change was made to the gate** — writing one would have been a second, redundant guard, and the tempting "zero the along-belt component instead" is a *bug*: `setRoundActive(false)` zeroes `BALL_SPEED`, and the write is `right x -(BALL_SPEED - BELT_SPEED)`, so a zero write produces `+10` toward the exit. That arithmetic is now in `stepBallSpeeds`' docblock, because it is the trap.
+
+**What was fixed is the field that hid this.** The sample line now prints `along=` (the body's own velocity projected on the belt axis), `MODEL_RELATIVE=` (the old number, honestly named) and `roundActive=`. And the docblock's axis paragraph — which claimed "along-belt is world `X`, and in this scene the belt's `RightVector` is `+X`" — is rewritten: this scene's `RightVector` is `(0, 0, -1)`, an earlier fixture ran along `+X`, and that stale sentence is why the `-10` looked like along-belt drift to a reader comparing it with `velocity.X`.
+
+**Item 46 did not regress:** `setRoundActive(true)` still seeds each ball's own `startSpeeds` value at `Playing` entry, and it runs before the first `stepBallSpeeds` tick, so the first `RELATIVE_SPEED` computed is `BALL_SPEED_START - BELT_SPEED = 0`. Unchanged, and the new `roundActive=` field in the sample line now shows the flag the seeding depends on.
+
+### Where this prompt was wrong
+
+1. **`APPARENT_SPIN_GAIN` was `3`, not `1`, so the "approved 20 rad/s anchor" was not what the code did.** It drew `60` at spawn speed — the documented aliasing regime — and `90` (clamped) at every speed from `15` up. The prompt asked to preserve a number the build had already left behind; this round lands the anchor properly instead.
+2. **`BALL_SPEED_MAX` is `50`, not `20`.** The rate cannot stay under the `~31 rad/s` fold across the whole range while holding `20` at speed `10` — `10 + 50 = 60`. The spec asserts the band for the range the race actually occupies (start, decay, a rocket's `18`) and *asserts the failure* at `SPRINTER_BOOST_SPEED` and the ceiling rather than pretending otherwise.
+3. **Part 5's premise is false: the inactive path did not write at all, and did not go through a different branch.** `if (!this.roundActive) return;` is the first line of `stepBallSpeeds` and `enterWaiting` passes `false`. The "drift" was a diagnostic arithmetic field; the body's measured along-belt velocity was `0.012` and then exactly `0`.
+4. **`SPIN_DEADBAND_SPEED` was not dead** — `writeTailWind` read it. Deleting it required its own constant, not just a deletion.
+5. **The axis docblock was stale in a way that caused a misdiagnosis:** it said along-belt is world `X` and `RightVector` is `+X`, for a belt that runs along world `-Z`.
+
+### Decisions
+
+1. **Current → new at 0 / 10 / 20:** `0 → 10`, `60 → 20`, `90 (clamped) → 30`. Anchor `20` at `BALL_SPEED = 10` now holds for the first time.
+2. **Split `BASE = 10`, `GAIN = 0.5`**, making the rate `10 + BALL_SPEED`: half the total fixed so a sliding ball rolls, half following the attribute so a fast ball reads faster, and the sum is one number to hold.
+3. **The gate lives in both render controllers**, reading the same `RoundState`; the phantom **holds** its accumulated frame across the pause.
+4. **`rateSource = "phase"`** outside `Playing`; `omegaVisual` is `0` there and `SPIN_BASE_RAD_PER_SEC` at `BALL_SPEED = 0` inside it.
+5. **`stepBallSpeeds` writes nothing when inactive** — `if (!this.roundActive) { return; }`, unchanged this round, with the "a zero write would be +10" arithmetic now recorded.
+6. **Sway was already gated** by that same early return; it is *inside* the method, so there was nothing to change.
+7. **Two constants out, one in:** `SPIN_DEADBAND_SPEED` deleted, `SPIN_BASE_RAD_PER_SEC` added, `TAIL_WIND_MIN_BALL_SPEED` added for the trail's own threshold.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 491 passed in 36 files** (four spin cases rewritten, three added: base at rest, the rocket/sprinter band, negative/`NaN` input; one removed with the deadband); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; every touched file passes `prettier --check`; `\uXXXX` search under `src/` is zero; `flamework.build` unchanged -- no controller added or removed.
+
+**Studio-only:** that a sliding ball now visibly rolls and a ball in `Waiting`/`PostGame` is static; that `20 rad/s` at spawn reads at the intended speed (the previous build was three times faster and aliased); that `[Ball:n] sample` now shows `along=0.000` with `roundActive=false` throughout `Waiting` while the belt's visual scroll keeps running; and that `Playing` entry still starts the field at `RELATIVE_SPEED ≈ 0`.
+
+**Separate, still open:** `[MarkerSpin] GAVE UP waiting for BallDecoration` — item 194 gated it on `liveBallCount() > 0` and re-armed it when the field empties, so it should no longer fire after a teardown; if it still does, the discovery clock needs the phase as well.
+
+## 197. The bodies are provably frozen in `Waiting`; a client-side probe now measures what the player sees
+
+**Reported: "the balls are still sliding in waiting phase."** This round changes no simulation code, because the new log proves the bodies are frozen — and the previous round's conclusion was drawn from **one sampled body**, which is the gap this round closes.
+
+### What the log says, for every `Waiting` sample
+
+The prompt's log was parsed for every `[Ball:n] sample` line with `roundActive=false`, and the bodies do not move *at all*:
+
+```
+Ball:1  t=0.54s   pos=(-273, 66.697, 111.003)  along=-0.012   roundActive=false
+Ball:1  t=3.243s  pos=(-273, 60.648, 111.067)  along=0        roundActive=false
+Ball:1  t=15.93s  pos=(-273, 60.647, 111.067)  along=0        roundActive=false
+Ball:9  t=0.133s  pos=(-273, 69.380, 111.000)  along=0        roundActive=false
+Ball:9  t=12.05s  pos=(-273, 60.647, 111.067)  along=0        roundActive=false
+```
+
+A second body from a second round: the ball falls from its spawn height for **3.2 s**, bounces, and then its position is **identical to the thousandth of a stud for 27 seconds** with `velocity=(0,0,0)`, `along=0`, `roundActive=false`. That is `stepBallSpeeds`' early return doing exactly what item 196 documented, measured rather than argued.
+
+**And item 196's claim was still too broad, which is the honest correction here:** the sample follows *one* body (`observeBalls` picks the lowest-id survivor), so "the bodies are frozen" was a generalisation from a single witness. The probes below fix that.
+
+### What was added: a client-side probe
+
+`BallRenderController` now prints, once a second while the roll is gated, **every** body's `ballDelta`, `phantomDelta`, `drift` and both positions (`probe`). Three facts follow from one run, and each names a different culprit:
+
+| reading | meaning |
+| --- | --- |
+| `ballDelta=0 phantomDelta=0` for every body | nothing the client draws is moving. Whatever appears to travel is not a ball — a belt texture, a sprite or the camera. |
+| `ballDelta=0 phantomDelta>0` beside it | **the phantom is moving away from its ball**: the client is drawing motion that the server does not have, and only `step` writes that part. |
+| `ballDelta>0` for bodies the server sample never covered | some bodies really do move in `Waiting`, and the sampled body was the wrong witness. |
+
+Capped at 16 lines and phased like every other diagnostic in the tree, so it cannot flood.
+
+### The evidence that the server is fine, from the same log
+
+At `10:27:21`+ the samples flip to `roundActive=true` and the balls move at `along≈8-10` — that is `Playing`, working. One line in the excerpt also matters for later: `[Ball:12] left belt side=-Z ... overshoot=2.244` — balls are being knocked *sideways* off the belt by collisions during a round. That is a real gameplay finding, and it is **not** `Waiting`.
+
+### Two retunes had broken two specs, and neither was mine
+
+The designer moved `BOOST_TARGET_BALL_SPEED` to `80` (so `SPRINTER_BOOST_SPEED` is derived as `+20 = 100`) and `BALL_SPEED_MAX` to `100` since the last round. Both of these were **already failing before this round's change**:
+
+- `powers.spec.ts` asserted `BALL_SPEED_MAX > SPRINTER_BOOST_SPEED`, and they are now **equal**. The rule the test exists for is "the clamp never truncates a value the designer wrote", so it now asserts `>=` and **names the equality** in the comment: a sprinter ball rides the ceiling with no margin, and any future gain to either number silently truncates one. Worth a designer's eye rather than a silent fix.
+- `apparent-spin.spec.ts` asserted the *unclamped* expression at `BALL_SPEED_MAX`, which is now `10 + 100 = 110` against a `90` clamp. It now compares against the function's own definition, clamp included — the same "derive, do not pin" rule the earlier spin specs already carry.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 491 passed in 36 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; every touched file passes `prettier --check`; `\uXXXX` search under `src/` is zero; `flamework.build` unchanged.
+
+**Studio-only, and the one thing that closes this:** one run of the new build in `Waiting`, then the `[BallRender] probe` lines. If every `ballDelta` and `phantomDelta` is `0`, the balls are not moving and the next question is what *is* — the belt texture, a pickup sprite, or the camera. If a `phantomDelta` is non-zero beside a zero `ballDelta`, the fault is in the phantom and the probe says so by itself.
+
+## 198. The `Waiting` slide was the landing, not the model — bodies are held horizontally while the round is inactive
+
+**Reported for the third time: "still sliding in `Waiting`."** Item 197's client probe paid off: it measured the slide, and it is neither the model nor the phantom.
+
+### What the probe measured
+
+```
+10:34:48.903  probe phase=Waiting  ballDelta=0  phantomDelta=0  drift=0     (all 8 bodies)
+10:34:49.904  probe phase=Waiting  ballDelta=2.792  phantomDelta=2.792  drift=0
+              ballDelta=5.266 / 5.892 / 3.058 / 1.748 / 5.763 / 4.264 / 3.157
+10:34:50.608  spin-probe  |v|=6.605  BALL_SPEED=5.052     |v|=3.867  BALL_SPEED=3.612
+```
+
+Four of eight bodies moved **1.0-2.1 studs in world `Z`** — the along-belt axis on this belt — in the second after spawning, and `spin-probe` still read `|v| = 6.605` two seconds in. Then they stop, and stay stopped: item 197's sample line shows one body's position frozen to a thousandth for 27 seconds.
+
+**So `stepBallSpeeds`' gate was working and irrelevant.** The bodies are spawned a few studs **above** the invisible floor slab and fall onto it during `Waiting`; the landing itself pushed them along the belt. `phantomDelta` equalled `ballDelta` and `drift=0` on every line, so the client was drawing exactly what the server had — the picture was honest and the physics was the problem.
+
+### The fix
+
+`stepBallSpeeds`' inactive branch now calls **`holdBodies()`** instead of returning immediately. It removes the **horizontal** component of each body's velocity — along `RightVector` and along `right x up` — and writes nothing else.
+
+- **`Y` is untouched**, so gravity still pulls a body down and one spawned into `Waiting` still *lands* rather than hanging. That is the difference between this and a freeze: an `Anchored` toggle would be a second thing to get wrong on every death path.
+- **It is not a second model.** No `relative`, no decay, no sway — and therefore it cannot reproduce the trap the file documents: `right x -(BALL_SPEED - BELT_SPEED)` with a zeroed attribute is `+10` toward the exit, while writing **nothing along the belt** is the only expression of "not moving".
+- **It costs nothing after the first couple of seconds.** A settled body's horizontal velocity is contact noise (`~0.003`), below `HOLD_VELOCITY_EPSILON = 1e-3` — note the threshold is *tighter* than the noise, so the loop keeps writing for a moment longer than strictly necessary and then stops. It early-outs per body, and after settling writes no properties at all.
+- **One line per inactive stretch:** `[Spawner] hold engaged: N body/bodies had horizontal velocity with the round inactive`. That is the measurement that says how many bodies were sliding, so the next run either shows it caught them or shows it caught none.
+
+**Why the model gate stays exactly as it was:** it is still the right rule, and the hold is additive. `setRoundActive(true)` still seeds each ball's `startSpeeds` value before the first tick, so `Playing` entry is still neutral (`RELATIVE_SPEED ≈ 0`) — item 46 is unaffected by a branch that only runs when the round is inactive.
+
+### Where the prompt's (and my) reasoning was wrong
+
+1. **"The write must be gated on the round being active"** — it already was, and had been for two rounds. The movement was never the model's.
+2. **"A body with `BALL_SPEED = 0` during `Waiting` has zero along-belt velocity"** — true of the *model's* contribution and false of the body: the body had up to 5 studs/s of along-belt velocity from the landing. Acceptance criterion 4 needed a hold, not a gate.
+3. **My own item 196 report generalised from one sampled body** and declared `Waiting` clean. Item 197's probe measured all eight, which is how this was found; the lesson is that "the sampled body is still" is not "the field is still".
+
+**Validation:** `npm run build` exit 0; **`npm test` = 491 passed in 36 files** (nothing to add — the hold lives in a `DataModel` service and its behaviour is measured by the two log lines); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; both touched files pass `prettier --check`; `\uXXXX` search under `src/` is zero; `flamework.build` unchanged.
+
+**The probe stays for one more round.** `[BallRender] probe` is still in `ball-render-controller` (capped at 16 lines) purely to confirm the fix from the client side: after this change its `ballDelta` should read `0` from the first sample onward. It gets deleted once the report stops.
+
+**Studio-only:** that the field sits still through `Waiting` — including the first two seconds, which is where the slide was — and that the `hold engaged` line appears once per lobby with a body count.
+
+## 199. The placement bound is derived from the largest drawn radius -- and the disc already fits, which the prompt's premise did not
+
+**Reported: "place pickups so the painted disc stays entirely on the belt."** The work is done, but the premise is a snapshot of the build before item 190: the log quoted in the prompt (`bounds=x[-156.5,156.5]`, a `40`-stud disc radius) predates the round that made the disc the collider's inscribed circle. The current log proves it — `[PickupSprite] first visuals ... pad=20x20x20 ring=20 studs`.
+
+### Part 1 -- the three radii, from source
+
+| thing | expression | studs |
+| --- | --- | --- |
+| pad half-width | `PICKUP_SIZE.X / 2` | **10** |
+| disc radius | `pickupDiscDiameter(padSize) / 2`, i.e. `math.min(padSize.X, padSize.Z) / 2` -- **no multiplier** (item 190) | **10** |
+| sprite half-width | `PICKUP_SPRITE_STUDS * effectScaleForRadius(poolBallRadius(), PICKUP_SCALE_MULTIPLIER) / 2` = `2.6 * (10 / 0.5 * 0.2) / 2` = `2.6 * 4 / 2` | **5.2** |
+
+**The largest is the pad's own half-width**, and the disc ties it rather than exceeding it. `PICKUP_SCALE_MULTIPLIER` is **`0.2`**, and it sizes the sprite only.
+
+### Part 2 -- the derived bound
+
+`pickupBounds(beltSize, padSize, drawRadius)` now subtracts `math.max(padSize.X / 2, drawRadius)` per axis, and the caller passes `pickupDrawRadius(PICKUP_SIZE, PICKUP_SCALE_MULTIPLIER)` -- a new pure function in `pickup.config.ts` that takes the **max** of the three radii above, computed from `PICKUP_SIZE`, `PICKUP_SPRITE_STUDS`, `poolBallRadius()` and the multiplier. No literal.
+
+**On the shipped scene the region does not move**, and that is the honest result rather than a failure:
+
+```
+before  bounds=x[-156.5,156.5] z[-76.5,76.5]        (belt 333 x 173, pad half-width 10)
+after   bounds=x[-156.5,156.5] z[-76.5,76.5] drawRadius=10
+```
+
+The arithmetic that shows a pad at the new maximum still fits: `156.5 + 10 = 166.5`, exactly the belt's half-extent, in both axes. The user's own log has `positions=...|144.448,76.379` and `z=76.379 + 10 = 86.379` against a `86.5` half-extent -- inside, by `0.12`.
+
+**What the derivation buys is the next retune.** At `PICKUP_SCALE_MULTIPLIER = 1` the sprite would draw `52` studs across, a `26`-stud radius, and the bound would tighten to `166.5 - 26 = 140.5` on its own. Before this round it would have stayed at `156.5` and painted a sprite past the edge with no code change anywhere. `pickup.config.spec.ts` asserts both the shipped equality and that case.
+
+### Part 3 -- the log field
+
+`[Pickup] spawned` and the shortfall warning both carry `drawRadius=<n>` beside `bounds=`, so the number the bound was derived from is visible next to the region it produced. Without it, `bounds=` alone cannot distinguish "the pad's radius" from "the sprite's" after a retune.
+
+### Part 4 -- what this does not fix, recorded in the disc's own docblock
+
+**The disc still overhangs the collider on a non-square pad**, and the earlier round's finding stands: a ball whose centre is inside the ring but outside the pad's box does not collect. That is deliberately out of scope -- the designer chose to keep the large disc and constrain placement. `pickupDiscDiameter`'s docblock now says so and says **not** to make the picture consistent by shrinking the disc: the collider is the gameplay value, and a disc smaller than the box would understate the reach a ball actually has.
+
+### Decisions
+
+1. **Radii: 10 / 10 / 5.2**, largest is the pad's half-width (the disc ties it).
+2. **`drawRadius` = `pickupDrawRadius(PICKUP_SIZE, PICKUP_SCALE_MULTIPLIER)`, subtracted as `max(padHalf, drawRadius)` per axis.** Region unchanged at `x[+-156.5] z[+-76.5]`, `drawRadius=10`.
+3. **The overlap test stays on the pad's box, and that is now provably sufficient**: the disc is the pad's *inscribed* circle, so it can never exceed the box -- two discs that clear each other imply two boxes that do. If a future retune made the sprite wider than the pad the *bound* would tighten but the overlap test would not, and that is the case to revisit; it is named in the report rather than pre-solved.
+4. **If the region ever cannot hold `PICKUP_MAX_COUNT`**: nothing new. `PICKUP_PLACEMENT_ATTEMPTS` bounds the draw per pad, and a shortfall already warns with `placed/requested/unplaced`, `attemptsPerPad`, `bounds=` and `drawRadius=` and retries at the 15 s top-up. The region would have to shrink below about `4 x 3` pad cells (`12` pads on a `313 x 153` band is ~`105` cells today) before that fires.
+
+### Where this prompt was wrong
+
+1. **The disc does not exceed the collider, and has not since item 190.** The `40`-stud radius in the quoted log is from the build where the disc took the multiplier; the current log reads `ring=20` on a `20`-stud pad, and the sprite is half the pad.
+2. **The overlap test needs no disc radius**, for the reason above: the disc is inscribed, so `discs disjoint => boxes disjoint`. It would only matter if the sprite were ever the largest, and then the bound -- not the overlap rule -- is what breaks first.
+3. **The region still fits the pad count comfortably**, so the "what if it is too small" concern is real but not current: `12` pads on `~105` packable cells.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 497 passed in 36 files** (six new cases: two on `pickupBounds` with a drawn radius, four on `pickupDrawRadius`; eight existing `pickupBounds` call sites now pass the radius explicitly); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all five touched files pass `prettier --check`; `\uXXXX` search under `src/` is zero; `flamework.build` unchanged.
+
+**Studio-only:** that no pad's painted disc crosses the belt edge at any placement (it should not have been crossing since item 190 either), that pads still spread across the belt, and that `[Pickup] spawned` reads `placed=12 requested=12 ... drawRadius=10`.
+
+## 200 -- The spin ceiling was the bug: `90 rad/s` is `86` degrees per frame, so boosted balls read as still
+
+**Reported symptom:** "same issue" -- balls that do not appear to spin, and balls that appear to slide. Item 199 verified every pickup pad fitted the belt, so placement was not the cause. The log was.
+
+### The evidence, straight out of the log
+
+Every ball in the field at once, in `Playing`, from the single `[MarkerSpin]` field summary (fields elided):
+
+```
+[MarkerSpin] ... BALL_SPEED=79.95 ... omegaVisual=89.95 ... spinning=9/9 speeds=[79.95,79.95,79.95,...]
+```
+
+`BALL_SPEED = 79.95` is `BOOST_TARGET_BALL_SPEED = 80` arriving through the pickup boost, and `omegaVisual = 89.95` is
+`SPIN_BASE_RAD_PER_SEC (10) + 79.95` **landing exactly on `APPARENT_SPIN_MAX_RAD_PER_SEC = 90`** -- `spinning=9/9` is the
+count of bodies that *have* a marker and a non-zero rate, and it was `9/9` while the designer reported balls that were not
+turning. That is the tell: the rate was non-zero and unreadable, not missing. The clamp was not a safety net any more; it
+was the operating point of every boosted ball.
+
+### Why `90 rad/s` is invisible
+
+`90 rad/s` is `14.3` revolutions per second. At 60 frames a second that is **`1.5` radians = `86` degrees of rotation
+between consecutive frames**. A sphere carrying six face textures is symmetric every `90` degrees, so once consecutive
+frames land more than **`45`** degrees apart there is no frame-to-frame correspondence to recover direction from: the eye
+resolves the ball as **still**, or as turning backwards. **That is the long-running "a few balls do not spin" report** --
+and it tracked boosted balls specifically, which is exactly why it read as "a few" rather than "all".
+
+The docblock on the ceiling had *argued for* this: it said the clamp "does not police legibility, deliberately", on the
+reasoning that clamping would make a fast ball stop turning while it kept moving. The reasoning was sound when the gain was
+`1` and nothing could reach the clamp. Two retunes later -- `BOOST_TARGET_BALL_SPEED = 80` and the base-plus-speed split --
+every boosted ball sat on it, and the alternative the docblock feared (a clamped ball) is what the *fold itself* was already
+producing, with none of the readability.
+
+### The change
+
+`src/shared/tuning.ts`: `APPARENT_SPIN_MAX_RAD_PER_SEC` **`90` -> `31`**. That is `29.6` degrees per frame at 60 Hz, comfortably
+inside the `45`-degree limit, and `4.9` revolutions a second -- fast, obviously rolling, unambiguous. It is the number this
+tree's prose has used since item 187 to describe where the fold starts, so the ceiling is now stated at the point the prose
+already named.
+
+**The formula is unchanged** -- `min(MAX, SPIN_BASE_RAD_PER_SEC + GAIN * speed / BASE_BALL_RADIUS)` = `min(31, 10 + speed)`:
+
+| `BALL_SPEED` | before | after |
+| --- | --- | --- |
+| `0` | `10` | `10` |
+| `10` (spawn) | `20` | `20` |
+| `18` (rocket) | `28` | `28` |
+| `21` | `31` | `31` (clamp binds from here up) |
+| `30` (sprinter) | `40` | **`31`** |
+| `79.95` (boosted) | **`89.95`** | **`31`** |
+| `100` (`BALL_SPEED_MAX`) | `90` (clamped) | **`31`** |
+
+The anchor is preserved: **`20 rad/s` at `BALL_SPEED = 10`**, untouched. Above `21` the drawn rate stops following the
+attribute, and that is the deliberate trade recorded in the constant's docblock: a slower, readable roll is a smaller lie
+about speed than an unreadable one, because the whole purpose of this rate is to say "it is rolling". `BELT_TEXTURE_SCROLL_MULTIPLIER`
+still owns "how fast the world looks".
+
+### Docblocks rewritten in place
+
+- `APPARENT_SPIN_MAX_RAD_PER_SEC` -- the "does not police legibility" argument is **reversed**, with the arithmetic that
+  reversed it (`86` degrees a frame against a `90`-degree symmetry period) and the cost stated.
+- `apparentSpinRate` -- new section naming the bug: the clamp used to be documented as a guard against `inf`, and the log
+  shows it clamping nine bodies at once instead.
+- `APPARENT_SPIN_GAIN` -- the "above 21 the rate is inside the fold, stated rather than hidden" paragraph is replaced: above
+  `21` the rate now binds on the ceiling, and the section says why accepting the fold produced a frozen-looking field.
+
+### Spec
+
+`apparent-spin.spec.ts` gained the case that would have caught this: **every speed the model can produce is inside the
+legible band**, asserted at `BALL_SPEED_START`, `SPRINTER_BOOST_SPEED`, `BALL_SPEED_MAX` and `1000`, plus a derived check
+that `math.deg(MAX / 60) < 45` -- the ceiling itself, in degrees per frame, against the symmetry half-period rather than
+against a pinned literal. It replaced the case that asserted the opposite (`> 31` at both boosted speeds).
+
+**Validation:** `npm run build` exit 0; **`npm test` = 497 passed in 36 files**; `npm run lint` 0 errors with the same 55
+pre-existing `viewport.ts` warnings; all three touched files pass `prettier --check`; `\uXXXX` search under `src/` is zero;
+`flamework.build` unchanged.
+
+**Studio-only:** that a boosted ball now visibly rolls instead of reading as still or backwards; that a ball at spawn
+(`10`) is unchanged from item 196; and that the roll slowing between `21` and its boosted maximum is not distracting.
+
+**Not in scope, still open:** the pickup sprite fails to load (`rbxassetid://135266450823195`,
+`AssetFetchStatus.Failure`) so a pad draws only its ring; `[Pickup] collected ... power=recycle ... consumed=no` repeats at
+frame rate while a ball rests on a recycle pad; balls knocked sideways off the belt in `Playing`
+(`left belt side=-Z overshoot=2.244`); `BALL_SPEED_MAX == SPRINTER_BOOST_SPEED == 100` leaves the sprinter no headroom.
+
+## 200. `ring=20` was a DIAMETER -- the pads were never off the belt; the log field was ambiguous, and the spin ceiling was the real `90`
+
+**Reported: "pads are off the belt, `drawRadius=10` must be wrong."** It is not. The prompt's own arithmetic (`74.255 + 20 = 94.255`) assumed `ring=20 studs` was a **radius**; it is a **diameter**, so the disc radius is `10`, `drawRadius=10` is correct, and every pad in the reported run was inside the belt.
+
+### The evidence, from the log in the prompt
+
+`[PickupSprite] first visuals ... pad=20x20x20 ring=20 studs`: `buildFootprint` sets `ring.Size = Vector3(RING_THICKNESS_STUDS, diameter, diameter)` with `diameter = pickupDiscDiameter(padSize) = min(20, 20) = 20`, and `FootprintInfo.diameter` is documented as *"the ring's diameter"*. Diameter 20 -> **radius 10**.
+
+Every one of the twelve placements, against `x +-156.5 z +-76.5`:
+
+```
+localX=  58.208 localZ=  46.209   zslack=30.291
+localX= -98.484 localZ= -64.728   zslack=11.772
+localX=-144.276 localZ=  61.299   zslack=15.201
+localX= -82.672 localZ=  74.255   zslack= 2.245   <- the tightest, and the one the report used
+...  all inside
+```
+
+The tightest pad's disc reaches `74.255 + 10 = 84.255` against an `86.5` half-extent: **2.245 studs inside**. `74.255 + 20` would have been over the edge, which is exactly the misreading.
+
+### Part 1 -- the three radii, from source
+
+| element | expression | studs |
+| --- | --- | --- |
+| pad collider half-width | `math.min(PICKUP_SIZE.X, PICKUP_SIZE.Z) / 2` | **10** |
+| disc radius | `pickupDiscDiameter(padSize) / 2` = `min(X, Z) / 2` (no multiplier, item 190) | **10** |
+| sprite half-width | `PICKUP_SPRITE_STUDS * effectScaleForRadius(poolBallRadius(), 0.2) / 2` = `2.6 * 4 / 2` | **5.2** |
+
+Largest: the pad's half-width, tied by the disc. `drawRadius=10` **equals** it. `PICKUP_SCALE_MULTIPLIER` is **`0.2`** and sizes the sprite only.
+
+### Part 2 and 3 -- the useful work: the log can no longer be misread
+
+The bound was already right (item 199 derives it from the largest drawn radius), so **the region does not change**: `belt=333x173 bounds=x[-156.5,156.5] z[-76.5,76.5] drawRadius=10`. What changed is that a reader can now check it:
+
+- **`ringDiameter=` and `ringRadius=`** replace `ring=`. A field that does not say which invites exactly the off-by-two that caused this round.
+- **`spriteAuthored=` / `spriteWidth=` / `spriteRadius=`** replace `sprite=` alone, with `drawn=` kept as the **rendered pixel** size and now visibly a different measurement. `drawn=19.2px` and `sprite=2.6 studs` sat on one line under one word and had nothing to do with each other.
+- **`belt=<x>x<z>`** added to `[Pickup] spawned` and the shortfall warning, so `bounds=` and its two inputs (`belt / 2 - drawRadius`) are on one line. A belt resized after `[Treadmill] bind` is now visible here rather than inferred.
+- The belt's bind-log size is `size=(333, 0.1, 173)` and the bound is `333/2 - 10 = 156.5` and `173/2 - 10 = 76.5` on the same run -- **the spawn-time size matches the bind log**, so `positionFor` is not reading a stale size.
+
+Two new spec cases pin the fit with literals: a pad at the corner of the region has its disc **flush** with the belt edge (`bound + discRadius == half-extent`, both axes), and the tightest real placement (`localZ=74.255`) leaves `2.245` studs.
+
+### The real `90` in this tree, and it was not `drawRadius`
+
+A spin spec added to the tree asserts the drawn rate must stay inside the aliasing fold at every speed, and it failed:
+
+```
+FAIL apparentSpinRate > holds every drawn rate inside the legible band, at any speed (item 200)
+  expect(math.deg(APPARENT_SPIN_MAX_RAD_PER_SEC / 60) < 45)  ->  false   (90/60 rad = 86 degrees per frame)
+```
+
+**`APPARENT_SPIN_MAX_RAD_PER_SEC` was `90`,** described in its own docblock as "a safety net, not a rate" and justified by a comparison that has since inverted: with `BOOST_TARGET_BALL_SPEED = 80` the rate is `10 + 80 = 90`, which is **86 degrees of rotation per frame** — past the 45-degree half-period of a six-face sphere, where the eye resolves the ball as *not turning at all*. That is the "balls do not spin" report, arriving from the other end. The ceiling is now **`31` rad/s** (`29.6` degrees per frame), and a boosted ball clamps there instead of aliasing. The docblock is rewritten in place: it argued for the old value twice, and both arguments are answered.
+
+**One dead import was removed** (`ROCKET_TARGET_SPEED`) that the new spec left unused -- a lint error, not a behaviour change.
+
+### Decisions
+
+1. **Radii 10 / 10 / 5.2**, largest is the pad's half-width; `drawRadius=10` matches it exactly.
+2. **Neither was wrong: `drawRadius=10` under-reports nothing, and the disc is not 20 radius.** The *log field* was wrong -- ambiguous about diameter versus radius, and it is now explicit.
+3. **Bound unchanged:** `x[+-156.5] z[+-76.5]` on a `333x173` belt, `drawRadius=10`. A pad at the bound is flush with the edge, never past it.
+4. **The belt's spawn-time size matches its bind log** (`333x173` both), so there is no stale-size bug. The new `belt=` field makes that checkable in one line from now on.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 499 passed in 36 files** (three new cases: the flush-at-the-bound fit, the real placement's slack, and the spin band case that caught the ceiling); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all touched files pass `prettier --check`; `\uXXXX` search under `src/` is zero; `flamework.build` unchanged.
+
+**Studio-only:** that no pad's disc, sprite or collider crosses the belt edge -- which the arithmetic says has been true since item 190 -- and that a boosted ball now reads as spinning fast rather than appearing to stop.
+
+---
+
+## 201 - A visible margin between the painted disc and the belt edge, and the bound's result on the log line
+
+**Reported:** "Cmon dude. Same issue still", with a screenshot showing pads sitting hard against the far edge of the belt.
+
+**The arithmetic said the pads were already inside, and it was right.** Item 200 proved `ring=20` is a *diameter*, so the disc's radius is `10` -- the same as the pad's half-width -- and the tightest placement in the previous log was `localZ=74.255`, drawing its paint to `84.255` against an `86.5` edge: **2.2 studs of belt**. Nothing crossed.
+
+**A pad cannot look wrong there, though.** At the bound the disc is *tangent* to the edge -- `86.5 - 10 = 76.5`, and a pad placed at `76.5` reaches exactly `86.5`. Zero clearance is the largest legal placement and it is **visually indistinguishable from overhang**: there is no belt between the paint and the drop, so the disc appears to be hanging over it. The bug was in the *rule's* choice of extremum, not in its arithmetic. Two rounds were spent proving the pads were inside a region that puts them flush.
+
+### The change
+
+`PICKUP_EDGE_MARGIN = 12` (**Placeholder.**), subtracted in addition to the drawn radius:
+
+```ts
+const drawRadius = pickupDrawRadius(PICKUP_SIZE, PICKUP_SCALE_MULTIPLIER);
+const bounds = pickupBounds(belt.Size, PICKUP_SIZE, drawRadius + PICKUP_EDGE_MARGIN);
+```
+
+`pickupBounds` is untouched -- it already subtracts whatever reach it is handed, so the margin is the caller's decision and the pure geometry keeps one job. **The new region on the scene's `333 x 173` belt is `x[+-144.5] z[+-64.5]`**, against `x[+-156.5] z[+-76.5]`: a pad at the new bound draws its disc with **12 studs of belt visible** on that side.
+
+**The line now proves it instead of asserting it.** `positions=` carries a per-pad `edge=` (that pad's own disc-to-edge clearance, measured from the placed instance's position, not from the candidate), and the summary carries `minEdge=` (the worst of them) and `margin=`. **Negative `edge=` means the paint crosses the edge**, and an `OFF-BELT` warning fires if the worst clearance is below zero -- unreachable through the bound, so if it ever prints, a pad moved after placement, the belt was resized mid-round, or `pickupDrawRadius` has diverged from `buildFootprint`.
+
+### Decisions
+
+1. **This is a perceptual fix, not an arithmetic one.** No pad was ever outside; the region allowed them to be flush, and flush reads as outside.
+2. **`12` studs** -- over half a pad's width, so a margin is clearly visible at the camera distance rather than reading as a rounding artefact.
+3. **The margin lives in the caller, not in `pickupBounds`.** The pure function takes a reach; the design decision about how much belt to leave belongs with `tuning.ts`.
+4. **The region still packs `PICKUP_MAX_COUNT = 12`** -- a `14 x 6` grid of 20-stud cells remains at `288 x 129` of legal span, asserted.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 500 passed in 36 files** (one new case: the margin holds on both axes and the shrunken region still fits twelve pads); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; touched files pass `prettier --check`; `\uXXXX` search under `src/` is zero; `flamework.build` unchanged.
+
+**Studio-only:** that every pad now reads as clearly on the belt with belt visible around its disc, and that `minEdge=` on the spawn line is `>= 12` for every pad. **If pads still look off the belt, the remaining candidates are both visual and neither is placement:** the sprite floats `11.2` studs above the pad and can project past the belt's far edge at a shallow camera angle, and a failed asset load (`AssetFetchStatus.Failure`) would draw the ring without its image.

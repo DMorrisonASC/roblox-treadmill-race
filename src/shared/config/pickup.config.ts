@@ -1,6 +1,14 @@
+import { poolBallRadius } from "../shape-pool";
+import { PICKUP_SPRITE_STUDS } from "../tuning";
+import { effectScaleForRadius } from "../vfx-scale";
+
 /**
  * The pickup's own visual scale, in the same shape item 177 gave the ball effects: **one multiplier, in the effect's own
  * config file, applied through `shared/vfx-scale.ts`.**
+ *
+ * **`PICKUP_SCALE_MULTIPLIER` is `0.2`, and it scales the SPRITE ONLY (item 190).** The disc is the collider's inscribed
+ * circle and takes no multiplier. `pickupDrawRadius` reads this number to derive how far a pad's *picture* reaches, which is
+ * what a placement bound has to keep on the belt (item 199).
  *
  * ## Why the pickup needed one at all (item 188)
  *
@@ -75,10 +83,53 @@ export const PICKUP_SCALE_MULTIPLIER = 0.2;
  * `min` rather than `PICKUP_SIZE.X` because the pad is a box, not a square: a designer who makes it `20 x 1 x 12` should get a
  * `12`-stud circle, not one that overhangs the narrow axis.
  *
+ * ## What this does **not** fix, stated so nobody "fixes" it by shrinking the disc (item 199)
+ *
+ * The disc is still **bigger than the collider whenever the pad is not square**: on a `20 x 1 x 12` pad the circle is `12`
+ * across while the box is `20` on its long axis, so a ball whose centre is inside the paint can be outside the collection
+ * volume along that axis. That is deliberate and out of scope: the designer chose to keep the large disc and constrain
+ * **placement** instead, so `pickupBounds` subtracts the largest *drawn* radius (`pickupDrawRadius`) and no pad's picture
+ * crosses the belt's edge. **Do not make the visual consistent by shrinking the disc** — the collider is the gameplay value,
+ * and a disc smaller than the box would understate the reach a ball actually has.
+ *
  * Pure, so the equality with the collider is asserted in the spec rather than trusted — see
  * `pickup.config.spec.ts`. The alternative to a function here would be the same `math.min(padSize.X, padSize.Z)` written at
  * the call site, which is a rule that a later reader can only check by eye.
  */
 export function pickupDiscDiameter(padSize: Vector3): number {
 	return math.min(padSize.X, padSize.Z);
+}
+
+/**
+ * **The largest radius a pickup actually draws**, in studs — the number a placement bound has to subtract (item 199).
+ *
+ * ## Why this exists, given the disc already equals the collider
+ *
+ * It does not overhang *today*: `pickupDiscDiameter` is the pad's inscribed circle, so the disc's radius is exactly the pad's
+ * half-width, and the sprite is smaller than both. A bound derived from `padSize / 2` is therefore correct by accident of two
+ * numbers happening to agree.
+ *
+ * **The sprite is the part that can move.** Its drawn width is
+ * `PICKUP_SPRITE_STUDS x effectScaleForRadius(poolBallRadius(), PICKUP_SCALE_MULTIPLIER)`, which today is
+ * `2.6 x 4 = 10.4` studs — but `PICKUP_SCALE_MULTIPLIER` is a *look* that a designer retunes by eye, and one step up makes the
+ * sprite wider than the pad with no code change anywhere. The bound would then silently place a picture past the belt's edge,
+ * which is the exact report this function exists to prevent. Reading the largest of the three radii makes that retune safe
+ * instead of silent.
+ *
+ * ## The three things measured, and which wins
+ *
+ * - **the pad's own footprint**, `min(X, Z) / 2` — the narrow axis, because that is the axis a circle has to fit;
+ * - **the disc**, `pickupDiscDiameter / 2` — equal to the pad radius by construction (item 190), listed separately so the
+ *   equality is stated rather than assumed;
+ * - **the sprite**, `PICKUP_SPRITE_STUDS x scale / 2` — the only one that is free to grow.
+ *
+ * Pure, and asserted in `pickup.config.spec.ts` against a literal pad and a literal multiplier, including the case that breaks
+ * the accident: a multiplier large enough for the sprite to exceed the pad.
+ */
+export function pickupDrawRadius(padSize: Vector3, scaleMultiplier: number): number {
+	const padRadius = math.min(padSize.X, padSize.Z) / 2;
+	const discRadius = pickupDiscDiameter(padSize) / 2;
+	const spriteRadius = (PICKUP_SPRITE_STUDS * effectScaleForRadius(poolBallRadius(), scaleMultiplier)) / 2;
+
+	return math.max(padRadius, math.max(discRadius, spriteRadius));
 }

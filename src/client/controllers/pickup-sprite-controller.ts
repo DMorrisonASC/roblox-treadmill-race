@@ -411,8 +411,19 @@ export class PickupSpriteController implements OnStart {
 				}
 
 				const drawn = label === undefined ? "none" : `${label.AbsoluteSize.X}x${label.AbsoluteSize.Y}px`;
+				// **`ringDiameter` and `ringRadius`, not `ring` (item 200).** The field used to read `ring=20 studs`, and that
+				// single number was read as a *radius* by the next review — which made every placed pad look 10 studs over the
+				// belt's edge when the arithmetic was in fact correct. A diameter and a radius differ by a factor of two, and a
+				// field that does not say which it is invites exactly that mistake. Both are printed; `ringRadius` is the number
+				// a bound must subtract.
+				//
+				// **`spriteWidth` in studs, with the rendered pixels as a separate field.** `sprite=2.6 studs` is the *authored*
+				// constant and `drawn=19.2px` is what the engine rendered on screen at the current camera distance — two numbers
+				// measuring different things under one word. The world size is `PICKUP_SPRITE_STUDS x scale`, which is what a
+				// placement bound cares about; the pixel size is a rendering observation and stays, but labelled.
+				const spriteStuds = PICKUP_SPRITE_STUDS * this.pickupScale;
 				print(
-					`[PickupSprite] first visuals on ${pickup.GetFullName()} sprite=${PICKUP_SPRITE_STUDS} studs drawn=${drawn} lift=${PICKUP_SIZE.Y / 2 + PICKUP_SPRITE_LIFT_STUDS} studs pad=${footprint.padSize} ring=${footprint.diameter} studs`,
+					`[PickupSprite] first visuals on ${pickup.GetFullName()} spriteAuthored=${PICKUP_SPRITE_STUDS} studs spriteWidth=${formatStuds(spriteStuds)} studs spriteRadius=${formatStuds(spriteStuds / 2)} studs drawn=${drawn} lift=${PICKUP_SIZE.Y / 2 + PICKUP_SPRITE_LIFT_STUDS} studs pad=${footprint.padSize} ringDiameter=${formatStuds(footprint.diameter)} studs ringRadius=${formatStuds(footprint.diameter / 2)} studs`,
 				);
 			});
 		}
@@ -563,4 +574,14 @@ interface FootprintInfo {
 	readonly padSize: string;
 	/** The ring's diameter in studs — the inscribed circle of the pad's square cross-section. */
 	readonly diameter: number;
+}
+
+/**
+ * A stud length to two places, for the size fields on the `first visuals` line (item 200).
+ *
+ * Exists because that line now prints a **diameter and a radius** side by side, and `tostring` on a float would print
+ * `19.999999` beside `9.999999` for what is a `20`-stud circle. Two places is the precision a stud is authored to.
+ */
+function formatStuds(value: number): string {
+	return tostring(math.round(value * 100) / 100);
 }

@@ -344,6 +344,11 @@ agent looking for its controller will not find one.
 - **ball phantom** — the ball's own part is invisible and the phantom draws; the six face textures have to be copied and hidden
   separately, because a `Decal`/`Texture` renders on an invisible part. Spin comes from
   [`shared/apparent-spin.ts`](../src/shared/apparent-spin.ts) so the phantom and `marker-spin-controller` cannot disagree.
+  **The rate is `SPIN_BASE_RAD_PER_SEC (10) + APPARENT_SPIN_GAIN (0.5) x BALL_SPEED / BASE_BALL_RADIUS`, which is simply
+  `10 + BALL_SPEED`** — so a ball sliding at `BALL_SPEED = 0` still rolls (item 196; the old form returned `0` there, which is
+  the sliding case, not the parked one). **Both controllers gate the accumulation on the phase**: outside `Playing` nothing
+  turns and the phantom holds its accumulated frame, because a ball frozen on a stopped belt has no canonical facing. There is
+  no speed deadband any more; `SPIN_DEADBAND_SPEED` is deleted and the tail-wind gate reads `TAIL_WIND_MIN_BALL_SPEED`.
 - **pickup sprite** — the image comes from either a `pickupSprite` instance or `PICKUP_SPRITE_ASSET_ID`; both produce one
   `ContentId` for one `ImageLabel.Image`. The ring is an `ImageLabel` on the same `BillboardGui`, not a `ParticleEmitter`.
 - **elimination splash** — fires from the same remote as the elimination sound; `LIFETIME_SECONDS` is the sum of its four phases

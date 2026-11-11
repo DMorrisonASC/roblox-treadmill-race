@@ -5,6 +5,7 @@ import { PICKUP_SOUND_REMOTE_NAME, REMOTES_FOLDER_NAME, ROUND_STATE_VALUE_NAME }
 import { TAGS } from "shared/tags";
 import {
 	BELT_SURFACE_THICKNESS,
+	PICKUP_EDGE_MARGIN,
 	PICKUP_MAX_COUNT,
 	PICKUP_PLACEMENT_ATTEMPTS,
 	PICKUP_SIZE,
@@ -12,6 +13,7 @@ import {
 	PICKUPS_FOLDER_NAME,
 } from "shared/tuning";
 import { beltLocalToWorld, padFootprint, pickupBounds, PickupFootprint, rectsOverlap } from "shared/pickup-placement";
+import { PICKUP_SCALE_MULTIPLIER, pickupDrawRadius } from "shared/config/pickup.config";
 import { pickupDecision, powerOf, speedAfterPickup } from "server/powers";
 
 /**
@@ -228,7 +230,15 @@ export class PickupService implements OnStart {
 		}
 
 		const folder = this.pickupsFolder();
-		const bounds = pickupBounds(belt.Size, PICKUP_SIZE);
+		// **The bound is derived from what a pad *draws*, not from its collider (item 199).** `pickupDrawRadius` is the largest
+		// of the pad's footprint, the painted disc and the sprite — so a retune of `PICKUP_SCALE_MULTIPLIER` (which sizes the
+		// sprite only) moves the bound with it instead of leaving a picture hanging over the belt's edge.
+		//
+		// **Plus a visible margin (item 201).** Subtracting only the drawn radius puts a pad at the region's corner with its disc
+		// *tangent* to the belt edge: arithmetically inside, and visually identical to overhanging, because there is then no belt
+		// between the paint and the drop. `PICKUP_EDGE_MARGIN` is the width of visible belt that keeps "on the belt" legible.
+		const drawRadius = pickupDrawRadius(PICKUP_SIZE, PICKUP_SCALE_MULTIPLIER);
+		const bounds = pickupBounds(belt.Size, PICKUP_SIZE, drawRadius + PICKUP_EDGE_MARGIN);
 
 		// The live pads, as obstacles, in the **belt's own frame** — the same frame their positions were built in, so a
 		// rotated belt needs no special case here.
@@ -276,24 +286,55 @@ export class PickupService implements OnStart {
 
 		if (placed.size() > 0) {
 			const summary = new Array<string>();
+			// **The disc's real distance to the belt edge, per pad, and the worst of them (item 201).** `positions=` says where a
+			// pad's *centre* is; that is one subtraction away from being useless for "is the picture on the belt". `edge=n` is
+			// `min(halfX - |localX|, halfZ - |localZ|) - drawRadius` — **negative means the painted disc crosses the edge**, and it
+			// is measured from the placed instance's own position rather than from the candidate that was drawn, so a pad moved by
+			// anything between placement and parenting would show up here.
+			//
+			// It is the number that ends the argument: two rounds of "the pads are off the belt" were settled by reading a
+			// diameter as a radius, and no field on the line could contradict it.
+			let worstClearance = math.huge;
 			for (const pickup of placed) {
 				const localPoint = belt.CFrame.PointToObjectSpace(pickup.Position);
-				summary.push(`${formatNumber(localPoint.X)},${formatNumber(localPoint.Z)}`);
+				const discRadius = pickupDrawRadius(pickup.Size, PICKUP_SCALE_MULTIPLIER);
+				const clearance =
+					math.min(belt.Size.X / 2 - math.abs(localPoint.X), belt.Size.Z / 2 - math.abs(localPoint.Z)) -
+					discRadius;
+
+				worstClearance = math.min(worstClearance, clearance);
+				summary.push(
+					`${formatNumber(localPoint.X)},${formatNumber(localPoint.Z)},edge=${formatNumber(clearance)}`,
+				);
 			}
 
 			// The bounds are printed with the count because they are the rule, not the result: a pad that appears in the wrong
 			// place and a pad that appears inside a nonsensical bound look identical in the Explorer, and only the second says
 			// the scene is the problem.
+			// **`belt=` and `drawRadius=` beside `bounds=`, so the bound can be checked from the line itself (item 200).**
+			// The `bounds=` field is the *output* of `beltSize / 2 - drawRadius` per axis; without both inputs on the same line a
+			// reader cannot tell a correct bound from a stale belt size or a wrong radius. `belt=` is the size read at this
+			// moment from the live tagged part, so a belt resized after `[Treadmill] bind` is visible here rather than inferred.
 			print(
-				`[Pickup] spawned reason=${reason} placed=${placed.size()} requested=${deficit} live=${this.live.size()} count=${PICKUP_MAX_COUNT} bounds=x[${formatNumber(bounds.minX)},${formatNumber(bounds.maxX)}] z[${formatNumber(bounds.minZ)},${formatNumber(bounds.maxZ)}] positions=${summary.join("|")}`,
+				`[Pickup] spawned reason=${reason} placed=${placed.size()} requested=${deficit} live=${this.live.size()} count=${PICKUP_MAX_COUNT} belt=${formatNumber(belt.Size.X)}x${formatNumber(belt.Size.Z)} bounds=x[${formatNumber(bounds.minX)},${formatNumber(bounds.maxX)}] z[${formatNumber(bounds.minZ)},${formatNumber(bounds.maxZ)}] drawRadius=${formatNumber(drawRadius)} margin=${formatNumber(PICKUP_EDGE_MARGIN)} minEdge=${formatNumber(worstClearance)} positions=${summary.join("|")}`,
 			);
+
+			// **A disc that crosses the edge is a bug, and it says so once per spawn.** Nothing above can produce one — the bound
+			// subtracts the drawn radius plus the margin — so this firing means a pad moved after it was placed, the belt was
+			// resized mid-round, or `pickupDrawRadius` and the disc's actual construction have diverged. Named separately from
+			// `minEdge=` because a field is read and a warning is acted on.
+			if (worstClearance < 0) {
+				warn(
+					`[Pickup] OFF-BELT: a painted disc crosses the belt edge by ${formatNumber(-worstClearance)} studs (minEdge=${formatNumber(worstClearance)}, drawRadius=${formatNumber(drawRadius)}). The bound should make this unreachable; check that the disc still equals the drawn radius.`,
+				);
+			}
 		}
 
 		if (placed.size() < deficit) {
 			// A warning rather than a print: this is the scene refusing to hold what was asked for, and it is the only signal
 			// that a pad is missing. Named numbers, because "some pads did not fit" is not actionable and "3 of 12" is.
 			warn(
-				`[Pickup] placement shortfall reason=${reason} placed=${placed.size()} requested=${deficit} unplaced=${deficit - placed.size()} attemptsPerPad=${PICKUP_PLACEMENT_ATTEMPTS} bounds=x[${formatNumber(bounds.minX)},${formatNumber(bounds.maxX)}] z[${formatNumber(bounds.minZ)},${formatNumber(bounds.maxZ)}] pad=${formatNumber(PICKUP_SIZE.X)}x${formatNumber(PICKUP_SIZE.Z)} — could not place the rest clear of the pads already on the belt; retried at the next ${PICKUP_SPAWN_INTERVAL_SECONDS}s top-up`,
+				`[Pickup] placement shortfall reason=${reason} placed=${placed.size()} requested=${deficit} unplaced=${deficit - placed.size()} attemptsPerPad=${PICKUP_PLACEMENT_ATTEMPTS} belt=${formatNumber(belt.Size.X)}x${formatNumber(belt.Size.Z)} bounds=x[${formatNumber(bounds.minX)},${formatNumber(bounds.maxX)}] z[${formatNumber(bounds.minZ)},${formatNumber(bounds.maxZ)}] drawRadius=${formatNumber(drawRadius)} pad=${formatNumber(PICKUP_SIZE.X)}x${formatNumber(PICKUP_SIZE.Z)} — could not place the rest clear of the pads already on the belt; retried at the next ${PICKUP_SPAWN_INTERVAL_SECONDS}s top-up`,
 			);
 		}
 	}

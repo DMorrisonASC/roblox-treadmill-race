@@ -3,7 +3,7 @@ import {
 	APPARENT_SPIN_MAX_RAD_PER_SEC,
 	APPARENT_SPIN_SIGN,
 	BASE_BALL_RADIUS,
-	SPIN_DEADBAND_SPEED,
+	SPIN_BASE_RAD_PER_SEC,
 } from "./tuning";
 
 /**
@@ -31,10 +31,22 @@ import {
 /**
  * The drawn angular rate for a ball travelling at `speed`, in radians/second.
  *
- * `min(APPARENT_SPIN_MAX_RAD_PER_SEC, APPARENT_SPIN_GAIN * speed / BASE_BALL_RADIUS)` above `SPIN_DEADBAND_SPEED`, and
- * exactly `0` at or below it. The deadband is a real hold rather than a near-miss: `0` here feeds
- * `CFrame.fromAxisAngle(axis, 0)`, which is the identity, so a parked ball's pose is preserved bit-for-bit instead of
- * drifting by a thousandth of a degree per frame.
+ * `min(APPARENT_SPIN_MAX_RAD_PER_SEC, SPIN_BASE_RAD_PER_SEC + APPARENT_SPIN_GAIN * speed / BASE_BALL_RADIUS)` ?
+ * **base plus speed, with no deadband (item 196).**
+ *
+ * ## Why the deadband went, and what it got wrong
+ *
+ * The previous form was `min(MAX, GAIN * speed / BASE_BALL_RADIUS)` above a deadband and exactly `0` below it. That made
+ * `0` stand for "parked", and `BALL_SPEED = 0` does **not** mean parked: it means the ball is moving at exactly the belt's
+ * speed through the tread, which is where every ball ends up a few seconds into a round. The log from that build shows one
+ * at `RELATIVE_SPEED = +10` toward the exit with a still skin ? **a ball sliding across the floor without turning**, which
+ * is the single most obvious render bug this system can produce, and which no gain can fix because the term that would fix
+ * it is zero by definition in that case.
+ *
+ * **`0` is now a real rate** (`SPIN_BASE_RAD_PER_SEC`), so a sliding ball rolls. "Do not spin at rest" is answered by the
+ * **phase** instead: both controllers stop accumulating rotation outside `Playing`, where a ball on a stopped belt genuinely
+ * is at rest. That is a fact about the round rather than about a number, and it is the fact the old deadband was standing
+ * in for.
  *
  * ## Why the divisor is `BASE_BALL_RADIUS` and not the body's radius (item 188)
  *
@@ -55,11 +67,14 @@ import {
  * accumulated pose with a `NaN`. The divisor is now a constant, so there is nothing to divide by zero.
  */
 export function apparentSpinRate(speed: number): number {
-	if (!(speed > SPIN_DEADBAND_SPEED)) {
-		return 0;
-	}
+	// A negative or `NaN` speed is not motion: `BALL_SPEED_MIN` is `0` and a body with no attribute reads `0`, but a collision
+	// handler writing a stray negative must not draw the ball turning backwards at the base rate.
+	const sane = speed > 0 ? speed : 0;
 
-	return math.min(APPARENT_SPIN_MAX_RAD_PER_SEC, (APPARENT_SPIN_GAIN * speed) / BASE_BALL_RADIUS);
+	return math.min(
+		APPARENT_SPIN_MAX_RAD_PER_SEC,
+		SPIN_BASE_RAD_PER_SEC + (APPARENT_SPIN_GAIN * sane) / BASE_BALL_RADIUS,
+	);
 }
 
 /**
