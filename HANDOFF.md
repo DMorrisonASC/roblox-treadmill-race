@@ -5171,3 +5171,105 @@ touched file passes `prettier --check`. `\uXXXX` search under `src/` returned no
 
 **Studio-only:** that every powered body shows its name for the whole ride, and whether the label is legible rather than merely
 present at the far end.
+
+## 186. The arena camera snaps on `Waiting` under the wipe, and debug key `2` is covered by it
+
+**The rule: snap on `Waiting`, hold through `Playing` and `PostGame`, restore on `Intermission`.** `Playing`/`PostGame` only act as
+the fallback for a client that joined late. New `src/client/controllers/treadmill-camera-controller.ts` (`@Controller()`), plus
+`TAGS.treadmillCamera = "TreadmillCamera"` for a hand-placed part whose `CFrame` is the pose.
+
+**The orientation is the part's full `CFrame`, not a derived one.** The belt is `336 x 173` with `rightVector = (0, 0, -1)`, so the
+arena's long axis is not world `X`; a computed camera would have to know the fixture's yaw and would be wrong the next time the
+scene is rebuilt. A designer positions and aims the part in Studio. A `BasePart` is preferred; a `Model` with a `PrimaryPart` is
+accepted; anything else is skipped and the "no part" warning covers it.
+
+**`forceWaiting` is now wrapped — this is the load-bearing change.**
+
+```ts
+this.clearAllBodies("debug key 2");
+this.resetSyntheticCounter();
+++this.generation;
+const from = this.phase;
+this.transitionAround(from, "Waiting", () => {
+    const spawned = this.startWaitingRound(reason, false);
+    const bots = IS_STUDIO ? 0 : this.spawnBots("auto-bots for debug key 2");
+    this.enterWaiting(reason, spawned + bots);
+});
+```
+
+`pendingTimerHold` behaves exactly as on the timer path with no extra code: `transitionAround` sets it **synchronously** before
+its `task.spawn`, and `enterWaiting` consumes it via `consumeTimerHold()` inside the callback, so `Waiting`'s deadline is
+`WAITING_SECONDS + hold` on both paths. **The spawn moved inside the callback** — outside it, bodies appeared in the previous
+phase's lobby before the screen went dark.
+
+**The generation is bumped before the wipe, not inside it.** The `Intermission` timer loop compares the generation it captured,
+so bumping here retires it immediately; without it a `2` pressed just as intermission elapsed would race the timer and start two
+wipes and two lobbies. `enterWaiting` bumps again, which is harmless.
+
+**The docblock that argued for the unwrapped path was rewritten in place**, not deleted. It had said the wipe "exists to cover a
+phase change the player did not ask for; a debug key is asked for, and covering the screen would hide the teardown the key exists
+to demonstrate" (item 73). The replacement says that stopped being true once the camera snapped on `Waiting`: the wipe now hides a
+**camera cut**, a visible cut is the one thing a camera change cannot afford, and the teardown is still visible because
+`clearAllBodies` runs before the cover starts. The cost is named: ~2.5 s
+(`coverSeconds() + TRANSITION_NETWORK_STEP + holdSeconds() + openSeconds()`) before a `2` press shows its phase.
+
+**`forcePlaying` (`3`) is deliberately not wrapped.** Item 49 leaves `Waiting ? Playing` uncovered on purpose, and the camera rule
+depends on that: `Playing` must not re-engage, or key `3` would put a visible cut on the one uncovered edge. `forceIntermission`
+(`1`) was already unwrapped and stays so; `debugSpawnCompetitors` (`4`) changes no phase and is untouched.
+
+**Debug keys, with the controller reading none of them:** `1` restores (enters `Intermission`); `2` engages under the wipe
+(enters `Waiting`); `3` keeps the camera (`Playing` is already active and does not re-engage); `4` does nothing to the phase. Every
+behaviour falls out of the phase rule.
+
+**Restore and the two triggers.** Restore is `CameraSubject` (humanoid, else head) **then** `CameraType = Custom` — the subject
+first so the engine has something to attach to on the frame the type changes. Trigger 1 is `Intermission` entry, under the wipe
+item 49 wraps around `PostGame ? Intermission`. Trigger 2 is `CharacterRemoving`, chosen over `CharacterAdded` with a change check
+because it fires while the old body still exists — the moment the default camera would snap back to a body about to vanish — and
+because `CharacterAdded` needs a second comparison to tell the first spawn from a reset, which is exactly the case that must not
+suppress anything. A reset sets `suppressedGeneration = generation`; the next `Waiting` bumps `generation` and resets the
+suppression to `-1`, so the next round re-engages with no second flag to clear. **No new character yet:** restore to `Custom` with
+whatever subject exists (possibly nil); `Scriptable` is never held, because holding it would strand the player looking at the
+arena.
+
+**Missing part and tag removal.** No tagged part at `onStart` warns once (`[TreadmillCamera] no part tagged TreadmillCamera —
+camera stays on the player…`) and does not retry; `GetInstanceAddedSignal` picks up a part tagged later and logs
+`attached late part=…`, so a Studio tag while running needs no restart. Tag removed mid-round: the controller **keeps the last
+pose** and stays engaged, because the restore path is keyed on `RoundState` and a phase change still releases the camera —
+releasing on the tag removal itself would move the camera for a reason the player cannot see.
+
+**Log lines, actual:**
+
+```
+[TreadmillCamera] mounted part=Workspace.arena.treadmillCamera fov=70 character=true
+[TreadmillCamera] active part=Workspace.arena.treadmillCamera phase=Waiting generation=3
+[TreadmillCamera] restored (round end) to=Custom character=true generation=3
+[TreadmillCamera] restored (character loss) to=Custom character=true suppressedGeneration=3
+```
+
+The wipe evidence needs no line of its own: `[Transition] covering (Intermission ? Waiting)` / `[Transition] uncovered (Waiting)`
+now fire on a `2` press as well as on the timer.
+
+**`flamework.build` regenerated** — `flamework.build` and `out/tsconfig.tsbuildinfo` deleted first, never `rm -rf out` (item 52).
+The grep that proves the controller boots:
+
+```
+"roblox-treadmill-race:out/client/controllers/treadmill-camera-controller@TreadmillCameraController": "client/controllers/treadmill-camera-controller@TreadmillCameraController",
+```
+
+**Where the prompt was wrong.** (1) `forceWaiting` did call `startWaitingRound` then `enterWaiting`, but the **spawn had to move
+inside the wipe**, which the prompt's suggested shape (`transitionAround("Waiting", () => { …enterWaiting… })`) did not say — as
+written, bodies would have appeared in the old phase's lobby before the cover. (2) `pendingTimerHold` needed **no extra
+handling**: `transitionAround` already sets it synchronously before scheduling, so `enterWaiting` consumes it inside the callback
+unchanged. (3) `enterIntermission`'s re-arm does interact — not with the hold, but with the **generation race** described above,
+which needed the pre-bump. (4) `TRANSITION_CONFIG.ENABLED` is `true` in the tree, verified. (5) The wipe labels have an ASCII
+`-`/`?` in the compiled string (`covering (${from} ? ${label})`); unchanged, recorded here so the next reader does not think the
+log is truncated.
+
+**Not verified without Studio:** whether a ~2.5 s wipe on a `2` press reads as a transition or as a stall; whether the snap is
+genuinely invisible under the wipe at the belt's scale; whether `CharacterRemoving` really fires before the replacement exists on
+this platform (the code handles either); whether `CameraType = Custom` with a nil subject behaves as the docs describe; and whether
+the authored part's `CFrame` actually frames the belt — the one number a designer sets by eye.
+
+**Validation:** `npm run build` passed and regenerated `flamework.build`; `npm run lint` exited 0 with the same 55 pre-existing
+Prettier warnings in `src/shared/ui/viewport.ts`; `prettier --check "src/**/*.ts"` fails only on that file. `\uXXXX` search under
+`src/` returned no matches. **`npm test` was not run**, per the constraint.

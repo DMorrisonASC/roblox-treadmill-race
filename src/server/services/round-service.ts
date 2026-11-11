@@ -412,32 +412,67 @@ export class RoundService implements OnStart {
 	 * identity unique.
 	 *
 	 * The synthetic counter resets with the world it describes, so the numbering restarts each round.
+	 *
+	 * ## The wipe now covers this key (item 186)
+	 *
+	 * **This reverses the paragraph that used to end here.** It read: *"the wipe exists to cover a phase change the player
+	 * did not ask for; a debug key is asked for, and covering the screen would hide the teardown the key exists to
+	 * demonstrate"* (item 73). That was true while the wipe was purely decorative. It stopped being true when the arena
+	 * camera began snapping on `Waiting` entry: the wipe is no longer hiding a *transition*, it is hiding a **camera cut**, and
+	 * a cut the player can see is the one thing a camera change cannot afford. A `2` press engaged the camera in the open,
+	 * which read as a glitch rather than as a debug affordance.
+	 *
+	 * So the body below is now handed to exactly the call the `Intermission` timer uses, with the same label. **The
+	 * teardown is still visible** — `clearAllBodies` runs before the cover starts, and its `[Round] cleared N ball(s)` line
+	 * proves it — so a reader who wants to watch the clear still can. What the cover hides is the moment `RoundState` becomes
+	 * `Waiting`, which is when the camera moves.
+	 *
+	 * **The cost, named:** a `2` press now takes `coverSeconds() + TRANSITION_NETWORK_STEP + holdSeconds() + openSeconds()`
+	 * — about 2.5 s with the shipped config — before the phase is visible. That is the price of no visible snap, and it is
+	 * the same price the timer path pays.
+	 *
+	 * **The generation is bumped before the wipe, not inside it.** The `Intermission` timer loop compares the generation it
+	 * captured against this one, so bumping here retires it immediately; without this a `2` pressed just as the intermission
+	 * elapsed would race the timer and start two wipes and two lobbies. `enterWaiting` bumps it again, which is harmless —
+	 * the counter is only ever compared for staleness.
 	 */
 	public forceWaiting(reason: string): void {
 		this.clearAllBodies("debug key 2");
 		this.resetSyntheticCounter();
 
-		const spawned = this.startWaitingRound(reason, false);
+		// **Spawn inside the cover, not before it.** The bodies belong to the phase being entered, and a spawn outside the
+		// wipe would put them on the belt of the *previous* phase — visible in the lobby, under no camera, arriving before the
+		// screen goes dark. Everything the old body did in order is still done in order; it simply happens one cover later.
+		++this.generation;
 
-		// **Bots, but only where `startWaitingRound` did not already add them (item 150).**
-		//
-		// A Studio session usually has one player, so `Waiting` used to count down to a `Playing` phase with a single competitor
-		// - which the first tick ended as `last standing`. The workaround was to press `4` inside the countdown, which is a race
-		// against a timer rather than a test harness. Item 131 fixed that here, unconditionally.
-		//
-		// **The unconditional call was the wrong home for it.** `startWaitingRound` is the one place `Waiting` begins, so the
-		// population belongs there: it covers this key *and* the `Intermission` timer, in every round rather than only the one
-		// this key starts. What is left here is the case that call cannot cover — a **live** server, where the automatic
-		// population is deliberately off. Key `2` is a debug verb somebody pressed on purpose, so on Live it keeps item 131's
-		// behaviour: bots now, because a human asked.
-		//
-		// The call still sits **after `startWaitingRound`** (a spawn before it would take a spawner slot first, and the
-		// players' own bodies would arrive second) and **before `enterWaiting`** (which prints the transition — bots spawned
-		// after it would be missing from `competitors=` and would appear, in the log, to arrive after the phase they belong
-		// to).
-		const bots = IS_STUDIO ? 0 : this.spawnBots("auto-bots for debug key 2");
+		// **`this.phase`, not a hardcoded `"Intermission"`.** A second `2` press while already in `Waiting` enters `Waiting`
+		// again, and the transition's own log line is the evidence a reader uses to judge whether the wipe fired — so it must
+		// name the phase the machine was actually in.
+		const from = this.phase;
 
-		this.enterWaiting(reason, spawned + bots);
+		this.transitionAround(from, "Waiting", () => {
+			const spawned = this.startWaitingRound(reason, false);
+
+			// **Bots, but only where `startWaitingRound` did not already add them (item 150).**
+			//
+			// A Studio session usually has one player, so `Waiting` used to count down to a `Playing` phase with a single competitor
+			// - which the first tick ended as `last standing`. The workaround was to press `4` inside the countdown, which is a race
+			// against a timer rather than a test harness. Item 131 fixed that here, unconditionally.
+			//
+			// **The unconditional call was the wrong home for it.** `startWaitingRound` is the one place `Waiting` begins, so the
+			// population belongs there: it covers this key *and* the `Intermission` timer, in every round rather than only the one
+			// this key starts. What is left here is the case that call cannot cover — a **live** server, where the automatic
+			// population is deliberately off. Key `2` is a debug verb somebody pressed on purpose, so on Live it keeps item 131's
+			// behaviour: bots now, because a human asked.
+			//
+			// The call still sits **after `startWaitingRound`** (a spawn before it would take a spawner slot first, and the
+			// players' own bodies would arrive second) and **before `enterWaiting`** (which prints the transition — bots spawned
+			// after it would be missing from `competitors=` and would appear, in the log, to arrive after the phase they belong
+			// to).
+			const bots = IS_STUDIO ? 0 : this.spawnBots("auto-bots for debug key 2");
+
+			this.enterWaiting(reason, spawned + bots);
+		});
 	}
 
 	/**

@@ -54,4 +54,21 @@ export const TAGS = {
 	 * them by the same mechanism as `Ball` rather than by folder position.
 	 */
 	pickup: "Pickup",
+	/**
+	 * The arena camera's pose: **one `BasePart` (or a `Model` with a `PrimaryPart`) whose `CFrame` is where the round's
+	 * camera should sit.**
+	 *
+	 * A designer places it by hand in Studio — position it, aim it, tag it — and `TreadmillCameraController` copies its
+	 * `CFrame` verbatim onto every client's `Camera` when the round begins. **Nothing in this repository creates one**, so
+	 * there is no path constant and no derived pose: the arena's long axis is not world `X` (the belt is `336 x 173` with
+	 * `rightVector = (0, 0, -1)`), which means a computed camera would have to know the fixture's yaw and would be wrong the
+	 * next time the scene is rebuilt.
+	 *
+	 * **The part's own orientation is the camera's orientation.** Any `BasePart` works — a `Block` is the natural choice
+	 * because its `LookVector` faces along `-Z` and reads as "the way the camera looks" in the Explorer. The part itself
+	 * need not be visible, collidable or queryable; only its `CFrame` is read.
+	 *
+	 * Optional: without it every client keeps its own camera, which is what shipped before item 186.
+	 */
+	treadmillCamera: "TreadmillCamera",
 } as const;
