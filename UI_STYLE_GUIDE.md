@@ -30,6 +30,17 @@ Container   transparent, owns the cell     Container   transparent, exactly the 
 **A panel has no shadow plate (item 195).** Not "a plate with depth 0" — none. §1.2b records the three rounds of bugs
 that produced that decision, and §1.1's arithmetic below applies to controls.
 
+**A card that is *chosen* rather than pressed takes the panel anatomy and keeps the press (item 215).** The picker's ball
+cards are `TextButton`s — they are pressable — but the press **is** the selection, so a plate has nothing to say: what
+changes on a press is the fill and the stroke colour, and the press cue is the `UIScale` every control already carries
+(§3.2). One object, one `UIStroke`, one `UICorner`, no plate. The stroke carries the card's rarity, because the ring that
+used to carry it was a second edge inside the first, and four visible edges on a 200-pixel card was the complaint this
+paragraph answers.
+
+**The exception is narrow.** A control pressed *for an action* — a footer button, a tab, a chest — keeps its depth, because
+depth is what says "this is an object sitting on the surface" and the pressed and disabled states are drawn with the plates.
+Only a surface whose press means "choose this one" can give them up.
+
 ### 1.1 The Golden Math of Depth
 
 This is the whole trick for a control, and it is arithmetic, not taste.
@@ -200,6 +211,11 @@ hand-picked pairs exist to avoid.
 The near-black outline is what makes the saturated face read as a physical object rather than a coloured
 rectangle.
 
+**One exception, item 215: a picker card's single stroke is its rarity colour** (`theme.colors.rarity`). That card has no
+second object to carry the rarity and no black outline behind the colour, so the one stroke does both jobs. The
+alternative — near-black edge, rarity read from something else — was a card with nothing on it saying what it is.
+`common` is the weakest of the four (`#9AA0A6` on a `#3E3E47` card) and is the value to check first on a screenshot.
+
 ### 2.3 Panel faces are neutral, controls are not
 
 - **A large surface is furniture.** A panel is charcoal — a full-height red sheet behind pale cards is a wall
@@ -274,6 +290,10 @@ edges and leaves an L of it along the other two — which reads as a component s
 **Selection needs no second colour.** A selected tab is simply the pressed one. That means there is no second
 palette per component, nothing for a caller to keep in step, and no state where a tab's colour disagrees with
 whether its panel is open.
+
+**Except a card with no depth, where the colour is the only state there is (item 215).** A selected picker card is the
+`accent` fill, the `onAccent` stroke and `onAccent` text — one fill, one stroke, one text colour, no geometry. The rule
+above is about not keeping a *second* palette beside the plates; with no plates, the palette is not a second one.
 
 ### 3.2 Hover and press feedback
 

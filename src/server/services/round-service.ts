@@ -22,6 +22,9 @@ import {
 	PICKER_PICK_REMOTE_NAME,
 	PICKER_REROLL_REMOTE_NAME,
 	PLAYING_DEADLINE_VALUE_NAME,
+	ROUND_REFUSAL_VALUE_NAME,
+	INTERMISSION_DEADLINE_VALUE_NAME,
+	ROUND_PLAYING_DEADLINE_VALUE_NAME,
 	REMOTES_FOLDER_NAME,
 	ROUND_PAYOUT_REMOTE_NAME,
 	ROUND_STATE_VALUE_NAME,
@@ -30,6 +33,7 @@ import {
 import { PickerOfferMessage, PickerResult, REROLL_COST_COINS } from "shared/picker";
 import { ECONOMY_ACTION_COOLDOWN_MS } from "shared/economy.config";
 import { payoutAwards, RoundPayoutMessage } from "shared/round-payout";
+import { REFUSAL_NEED_PLAYERS } from "shared/round-status";
 import { LeaderboardEntry } from "shared/leaderboard";
 import { distanceFromSpawnEdge } from "shared/position";
 import { powerForBallId } from "shared/powers.config";
@@ -44,6 +48,7 @@ import {
 	PICKER_WINDOW_SECONDS,
 	POST_GAME_SECONDS,
 	PLAYING_CAP_SECONDS,
+	MIN_ENROLLED_PLAYERS,
 	ROUND_IDLE_WARN_SECONDS,
 	TICK_INTERVAL_SECONDS,
 	WAITING_SECONDS,
@@ -310,6 +315,24 @@ export class RoundService implements OnStart {
 	private playingDeadlineValue?: NumberValue;
 
 	/**
+	 * `Why a round cannot start`, or `""` (item 214). See `ROUND_REFUSAL_VALUE_NAME` for why it is a global string rather than a
+	 * phase or a per-player attribute.
+	 */
+	private refusalValue?: StringValue;
+
+	/**
+	 * When the current `Intermission` ends, or `0` (item 214).
+	 *
+	 * **Not `playingDeadlineValue`.** That one is `Waiting`'s deadline - the instant `Playing` begins - and its name is
+	 * historical. This value ends one phase earlier, and sharing a value between two clocks is how a countdown shows the wrong
+	 * number for one frame at every transition.
+	 */
+	private intermissionDeadlineValue?: NumberValue;
+
+	/** When the current `Playing` reaches its cap, or `0` (item 214). Read by the banner's clock. */
+	private roundPlayingDeadlineValue?: NumberValue;
+
+	/**
 	 * The last synthetic owner number handed out, so the next debug competitor is `Debug#(n+1)`.
 	 *
 	 * Shared by `Waiting`-entry defaults and `3` presses rather than being two counters, because
@@ -378,7 +401,23 @@ export class RoundService implements OnStart {
 		// first nonetheless means there is no window in which a connection could happen with no listener: a handler that
 		// arrives a millisecond later is a joiner who is a competitor by the seed and would never be removed.
 		Players.PlayerAdded.Connect((player) => this.enrollOnJoin(player));
-		Players.PlayerRemoving.Connect((player) => this.enrolledUserIds.delete(player.UserId));
+		Players.PlayerRemoving.Connect((player) => {
+			// **The enrollment record, unchanged (item 159).** A `UserId` that stays in the set after its player has left would be
+			// spawned for in a round that player is not in.
+			this.enrolledUserIds.delete(player.UserId);
+
+			// **The two `Player`-keyed maps, dropped here because a `Player` instance does not outlive its session.** Both were
+			// written once per join and never removed, so every departure left a dead `Player` key behind: a leak, and on a rejoin a
+			// second key for the same person. `enrolledUserIds` is keyed by `UserId` and needs no such care - which is why it is the
+			// one that survived review.
+			this.offers.delete(player);
+			this.pickerCooldowns.delete(player);
+
+			// **And the bodies that player was driving (item 211).** This is the half that was missing: a departure destroyed
+			// nothing, so the body stayed on the belt holding a leaderboard rank and keeping `checkEndCondition` from ever reaching
+			// zero competitors.
+			this.teardownPlayerBodies(player);
+		});
 
 		// The first `[Round]` line a fresh server prints must name the phase it is in, not the one it is
 		// leaving, so it is a state line rather than an arrow. `Intermission` is the initial value of
@@ -1107,6 +1146,39 @@ export class RoundService implements OnStart {
 	}
 
 	/**
+	 * Publishes the reason a round cannot start, or `""` to clear it (item 214).
+	 *
+	 * One writer and one value: the guard in `startIntermissionTimer` is the only thing that can refuse, and it clears the
+	 * string on the iteration that succeeds - so the banner stops saying "need two players" on the frame the second one enrolls,
+	 * rather than one phase later.
+	 */
+	private publishRefusal(reason: string): void {
+		if (this.refusalValue !== undefined && this.refusalValue.Value !== reason) {
+			this.refusalValue.Value = reason;
+		}
+	}
+
+	/**
+	 * Publishes when the current `Intermission` ends, or `0` (item 214).
+	 *
+	 * Written at the top of an iteration the guard has approved, next to the `span` it comes from; an iteration the guard
+	 * refused publishes `0` instead (item 216). Either way the value the client reads is what the lobby actually intends to do -
+	 * a countdown toward a boundary the lobby has refused would be the lie this pair of writers exists to avoid.
+	 */
+	private publishIntermissionDeadline(deadline: number): void {
+		if (this.intermissionDeadlineValue !== undefined) {
+			this.intermissionDeadlineValue.Value = deadline;
+		}
+	}
+
+	/** Publishes when the current `Playing` reaches its cap, or `0` (item 214). */
+	private publishRoundPlayingDeadline(deadline: number): void {
+		if (this.roundPlayingDeadlineValue !== undefined) {
+			this.roundPlayingDeadlineValue.Value = deadline;
+		}
+	}
+
+	/**
 	 * Enters the lobby. **Spawns nothing** — the caller has already established the competitor set.
 	 *
 	 * The spawn used to live here, which made "how many competitors a round starts with" a property of a
@@ -1293,6 +1365,13 @@ export class RoundService implements OnStart {
 		this.runningStartedAt = os.clock();
 		this.frozenElapsed = 0;
 
+		// **The two clocks swap here** (item 214). `Intermission`'s deadline is meaningless once the lobby is gone, and the cap is
+		// known the moment the phase opens - so the banner has a number to show on its first frame rather than after a tick.
+		// The refusal is cleared too: a round that started has nothing to refuse.
+		this.publishIntermissionDeadline(0);
+		this.publishRoundPlayingDeadline(Workspace.GetServerTimeNow() + PLAYING_CAP_SECONDS);
+		this.publishRefusal("");
+
 		// The pick window closes with the phase, and only when the phase actually moved: every refusal above returns before
 		// this line, so a lobby that re-arms keeps its offers and its countdown rather than silently losing them.
 		this.closeOffers();
@@ -1344,6 +1423,8 @@ export class RoundService implements OnStart {
 
 		this.frozenElapsed = os.clock() - this.runningStartedAt;
 		this.phase = "PostGame";
+		// The cap has been reached, so the clock has nothing left to count: `PostGame` has no banner clock.
+		this.publishRoundPlayingDeadline(0);
 		const generation = ++this.generation;
 
 		this.stopBeltRamp();
@@ -1443,6 +1524,13 @@ export class RoundService implements OnStart {
 		const from = this.phase;
 		this.phase = "Intermission";
 		this.generation++;
+
+		// **Both clocks and the refusal are cleared at lobby entry, then re-published by the guard** (items 214, 216). Clearing here
+		// makes the "no clock yet, no refusal yet" frame honest: the deadline for this lobby is not known until its span is
+		// computed, and whether a refusal applies is decided at the top of the loop's first iteration - after that span is known
+		// and before it is waited on.
+		this.publishRoundPlayingDeadline(0);
+		this.publishIntermissionDeadline(0);
 
 		this.clearAllBodies("intermission");
 
@@ -1617,20 +1705,41 @@ export class RoundService implements OnStart {
 	}
 
 	/**
-	 * Arms the `Intermission → Waiting` timer, re-arming itself while the server is empty.
+	 * Arms the `Intermission → Waiting` timer, re-arming itself while the lobby cannot start a round.
 	 *
-	 * **Zero players means the timer restarts rather than advancing.** A server that has been empty for an
-	 * hour must still be in `Intermission` on the first join: advancing to `Waiting` would spawn a round's
-	 * worth of bodies, run `Playing` and eliminate them all with nobody watching, and leave the first
-	 * joiner arriving into someone else's `PostGame`. The check is `Players.GetPlayers().size() === 0`
-	 * — every connected `Player`, not just those with a character — taken at the moment the timer expires
-	 * rather than at the moment it was armed, because a player who leaves during the 30 s is exactly the
-	 * case this must catch.
+	 * **Two re-arm reasons, both read at the top of an iteration and again after its wait (items 159, 214, 216).**
 	 *
-	 * The loop is a `while` on the phase and generation rather than a chain of `task.delay`s: a re-armed
-	 * timer needs to run the same check again, and a self-rescheduling closure is how that becomes one
-	 * readable condition instead of a count of re-arms. A debug advance bumps the generation, which
-	 * retires this loop on its next wake-up.
+	 * - **No players connected.** A server that has been empty for an hour must still be in `Intermission` on the first
+	 *   join: advancing to `Waiting` would spawn a round's worth of bodies, run `Playing` and eliminate them all with nobody
+	 *   watching, and leave the first joiner arriving into someone else's `PostGame`. The check is
+	 *   `Players.GetPlayers().size() === 0` - every connected `Player`, not just those with a character.
+	 * - **Too few players enrolled.** `enrolledUserIds` is seeded by `openEnrollmentWindow` and frozen at the cutoff, so a
+	 *   player who joined after it is connected but not racing. Starting a round for one enrolled player while a second
+	 *   stands in the lobby is the broken round this rule prevents.
+	 *
+	 * **The order is zero-connected first.** It is the more general answer - nobody is here, so nobody can be enrolled - and
+	 * its log line says "waiting for someone" rather than "waiting for a second someone". Both are `intermissionRearm`.
+	 *
+	 * ## Why the guard is asked before the wait, not after it (item 216)
+	 *
+	 * Item 214 put the enrolled check at the *end* of the iteration, which meant a solo player watched `LOBBY` count from
+	 * `0:30` to `0:00` under "Next round starting soon." and was told the round needed two players only once those thirty
+	 * seconds had already elapsed - and then the refusal stayed for another full phase after a second player arrived.
+	 *
+	 * **The banner is a readout of what the server intends to do.** A deadline may therefore only be published on an
+	 * iteration the guard has approved, and the refusal only on one it has not: a countdown toward a transition the lobby has
+	 * already refused is a lie, and it was the visible half of the user's report.
+	 *
+	 * ## Why it is asked a second time, after the wait
+	 *
+	 * A player can leave during the thirty seconds, and `PlayerRemoving` takes their id out of `enrolledUserIds`. Without the
+	 * second ask the lobby would spawn for the survivor and start a one-player race - the exact round the first ask exists to
+	 * prevent. The second ask publishes nothing: its `continue` lands on an iteration whose top republishes the refusal,
+	 * hides the clock and prints the one line for that re-arm, so a re-arm is still one line however it was reached.
+	 *
+	 * The loop is a `while` on the phase and generation rather than a chain of `task.delay`s: a re-armed timer needs to run
+	 * the same checks again, and a self-rescheduling closure is how that becomes one readable condition instead of a count of
+	 * re-arms. A debug advance bumps the generation, which retires this loop on its next wake-up.
 	 */
 	private startIntermissionTimer(): void {
 		const generation = this.generation;
@@ -1639,18 +1748,40 @@ export class RoundService implements OnStart {
 		const hold = this.consumeTimerHold();
 
 		task.spawn(() => {
-			// The first wait is skipped only if a caller wants the transition immediately; here the timer
-			// always runs its full duration before the first check.
+			// `first` only decides whether the wipe's hold is added to the first span. The guard runs before that span
+			// is waited on, so the hold delays the *first decision* by the wipe's length rather than delaying a check
+			// that has already happened.
 			let first = true;
 			while (this.phase === "Intermission" && generation === this.generation) {
-				// **The enrollment window is opened per iteration, not once outside the loop (item 159).** The re-arm path below
-				// is a `continue` inside this loop and never re-enters `enterIntermission`, so a window opened at phase entry
-				// would be closed for the second lobby onwards — and the first joiner after an empty spell would never be a
-				// competitor, which reads in the log as "waiting for a player" while one is standing in the lobby.
 				const span = INTERMISSION_SECONDS + (first ? hold : 0);
 				first = false;
 
+				// **The enrollment window is opened per iteration, not once outside the loop (item 159).** The re-arm path below
+				// is a `continue` inside this loop and never re-enters `enterIntermission`, so a window opened at phase entry
+				// would be closed for the second lobby onwards - and the first joiner after an empty spell would never be a
+				// competitor, which reads in the log as "waiting for a player" while one is standing in the lobby.
+				//
+				// **Before the guard, and that is the order that makes the guard mean anything (item 216).** The window is what
+				// seeds `enrolledUserIds` from the players who are here now, and it is what enrolls a joiner for the *next*
+				// iteration while this one is already refused.
 				this.openEnrollmentWindow(span);
+
+				// **Nothing is published before this line runs (item 216).** The guard decides what the banner may say: refuse
+				// here and the clock never appears, approve here and both the cleared refusal and the fresh deadline go out
+				// together, in one frame.
+				const rearm = this.intermissionRearm();
+				if (rearm !== undefined) {
+					this.refuseIntermission(rearm);
+					task.wait(span);
+					continue;
+				}
+
+				// **A round that is allowed to start carries no refusal and a live deadline.** Cleared on the iteration that can
+				// start, not one after it, so the banner stops saying "need two players" on the same frame the second one
+				// enrolls. `Workspace:GetServerTimeNow()` because the client reads the same clock - `os.clock()` is this
+				// machine's CPU time and is meaningless to a client.
+				this.publishRefusal("");
+				this.publishIntermissionDeadline(Workspace.GetServerTimeNow() + span);
 
 				task.wait(span);
 
@@ -1658,14 +1789,10 @@ export class RoundService implements OnStart {
 					return;
 				}
 
-				const players = Players.GetPlayers();
-				if (players.size() === 0) {
-					// Re-armed by looping. Logged because "the machine is stuck in Intermission" and "the
-					// machine is correctly waiting for a player" look identical from outside, and the
-					// difference is one line.
-					print(
-						`[Round] Intermission timer restarted — no players connected (players=0), another ${INTERMISSION_SECONDS}s`,
-					);
+				// **Asked again after the wait, and this ask is not redundant (item 216).** A player who leaves during the
+				// thirty seconds is removed from `enrolledUserIds`; without this the lobby would spawn for the survivor and
+				// start a one-player race. Publishing is the next top's job, so there is one line per re-arm rather than two.
+				if (this.intermissionRearm() !== undefined) {
 					continue;
 				}
 
@@ -1695,6 +1822,64 @@ export class RoundService implements OnStart {
 		});
 	}
 
+	/**
+	 * Why the lobby cannot start a round with the players it has *now*, or `undefined` when it can.
+	 *
+	 * **Two reasons, and the order between them is the tree's** (item 216). Zero connected players comes first because it
+	 * is the more general answer: nobody is here, so nobody can be enrolled. The enrolled check asks the narrower question -
+	 * players are here, but not enough of them are racing.
+	 *
+	 * **Studio is exempt from the second, not the first.** A Studio session has one player by construction and
+	 * `spawnStudioBots` fills its field, so applying the enrolled rule there would park every test in `Intermission` for
+	 * ever; an empty Studio session is still empty.
+	 *
+	 * Called twice per iteration - before the wait to decide what the banner may say, after it to decide whether a round
+	 * starts. See `startIntermissionTimer` for why both asks exist.
+	 */
+	private intermissionRearm(): "empty" | "enrolled" | undefined {
+		if (Players.GetPlayers().size() === 0) {
+			return "empty";
+		}
+
+		if (!IS_STUDIO && this.enrolledUserIds.size() < MIN_ENROLLED_PLAYERS) {
+			return "enrolled";
+		}
+
+		return undefined;
+	}
+
+	/**
+	 * Publishes the refused state for an iteration the guard has rejected: the reason, a hidden clock, one log line.
+	 *
+	 * **The clock is cleared before the wait, not after it** (item 216). `publishIntermissionDeadline(0)` is the client's
+	 * "no countdown is due" - `refreshClock` hides the label on `deadline <= 0` - so the banner reads the phase and the
+	 * refusal with no number between them, which is the user's *"if there is one player, there should not be a counter for
+	 * the round then"*.
+	 *
+	 * **Both reasons publish the same sentence.** A server with nobody connected needs the same two players as a server with
+	 * one, so the banner has one sentence for "this round cannot start yet"; only the log distinguishes the two, because only
+	 * the log is read by someone debugging. Publishing on the empty branch too is what makes a solo player who joins an empty
+	 * server see the refusal on their first frame instead of "Next round starting soon." with no countdown under it.
+	 */
+	private refuseIntermission(reason: "empty" | "enrolled"): void {
+		this.publishRefusal(REFUSAL_NEED_PLAYERS);
+		this.publishIntermissionDeadline(0);
+
+		const connected = Players.GetPlayers().size();
+
+		if (reason === "empty") {
+			// Logged because "the machine is stuck in Intermission" and "the machine is correctly waiting for a player" look
+			// identical from outside, and the difference is one line.
+			print(
+				`[Round] Intermission timer restarted — no players connected (players=${connected}, deadline=none), another ${INTERMISSION_SECONDS}s`,
+			);
+			return;
+		}
+
+		print(
+			`[Round] Intermission timer restarted — need ${MIN_ENROLLED_PLAYERS} enrolled players (connected=${connected}, enrolled=${this.enrolledUserIds.size()}, deadline=none), another ${INTERMISSION_SECONDS}s`,
+		);
+	}
 	// #endregion
 
 	// #region belt ramp
@@ -1834,44 +2019,67 @@ export class RoundService implements OnStart {
 				continue;
 			}
 
-			const name = ball.GetFullName();
-			// Read before the destroy, after which every property reads as its default. The owner is what
-			// makes this line a result rather than a position: `live=` says how many are left, `owner=` says
-			// which competitor just lost.
-			const owner = readOwner(ball);
-			// The toucher is read here, before the destroy, for the same reason as the owner: the last-touch record is
-			// cleared when a body dies (`powers.forgetBall`), and a destroyed body would report no owner at all.
-			const toucher = lastToucherOf(ball);
-
-			// **The placement record, one line beside the log line that says the same thing.** This loop is the elimination
-			// order — `getLiveBalls` is walked once per tick and bodies leave it permanently — so the order these pushes
-			// happen in *is* the result the payout is derived from. Recorded before the destroy, while the owner value is
-			// still meaningful.
-			this.recordElimination(owner, ball);
-
-			this.forgetBall(ball);
-			ball.Destroy();
-
-			// Leaving the belt is *losing*, so the owner is told. Read before the destroy, and dispatched through the pure
-			// rule so "synthetic owners are not told" has one definition rather than one `if` per removal site.
-			this.notifyEliminated(owner, "left-belt");
-
-			// **The sound is a second event at the same place, not a second call site.** A body leaving the belt is what
-			// an elimination *is*, so the sound sits beside the splash rather than in `destroyBall` or in the end
-			// condition — those are about a body dying and a round ending, which are different facts. It is targeted at
-			// the player whose ball landed the last touch, not broadcast: see `playEliminationSound`.
-			this.playEliminationSound(owner, toucher);
-
-			// **Every elimination restarts the idle clock.** The warning it guards exists to say "nothing has
-			// happened for 60 s", and a round that is shedding a competitor every few seconds is the exact
-			// opposite of that — without this reset the line would fire on a schedule that has nothing to do
-			// with the round's progress, and a busy round would get the same warning as a stuck one.
-			this.lastProgressAt = os.clock();
-
-			print(
-				`[Round] eliminated ${name}, owner=${owner === undefined ? "none" : tostring(owner.userId)}(${owner === undefined ? "none" : owner.displayName}), live=${this.liveBalls.size()}`,
-			);
+			this.eliminateBody(ball, "left-belt");
 		}
+	}
+
+	/**
+	 * **The one path a body takes out of a round** (item 211): record it, forget it, destroy it, tell whoever needs telling.
+	 *
+	 * ## Why this is a function and not the body of a loop
+	 *
+	 * It used to be inline in `settleEliminations`, which meant every other way a body could leave - a `KillY` cull, and now an
+	 * owner disconnecting - had to duplicate the steps or route through a belt check that does not apply. The duplicated version
+	 * is the one that forgets `recordElimination`, and forgetting it is exactly the bug this round fixes: a body that disappears
+	 * without a record is a body still holding a rank on the leaderboard and still counted by `checkEndCondition`.
+	 *
+	 * ## Why the owner and the toucher are read first
+	 *
+	 * A destroyed part reports its **default** attributes, so `readOwner` after `Destroy()` returns `undefined` and the round
+	 * would quietly treat a real player as an ownerless body. The toucher is the same problem one level down: `powers` clears
+	 * its last-touch record when the body dies.
+	 *
+	 * ## Why `name` is captured before the destroy
+	 *
+	 * `GetFullName()` on a destroyed instance throws. The line is printed after the destroy so `live=` reflects the removal,
+	 * which means the name has to be held in a local first.
+	 *
+	 * ## `cause`
+	 *
+	 * The reason is on the line because two of the four paths are otherwise indistinguishable: a belt crossing, a kill-plane
+	 * cull and a disconnect all produce the same "that body is not on the belt any more" state, and only the first is something
+	 * the player did.
+	 */
+	private eliminateBody(body: BasePart, cause: EliminationCause): void {
+		const name = body.GetFullName();
+		const owner = readOwner(body);
+		const toucher = lastToucherOf(body);
+
+		// **The placement record, one line beside the log line that says the same thing.** Bodies leave permanently, so the order
+		// these pushes happen in *is* the result the payout is derived from. Recorded before the destroy, while the owner value and
+		// the position are still meaningful.
+		this.recordElimination(owner, body);
+
+		this.forgetBall(body);
+		body.Destroy();
+
+		// Losing is losing whichever way it happened, so the owner is told. Dispatched through the pure rule so "synthetic owners
+		// are not told" and "a disconnected owner is not told" have one definition rather than one `if` per removal site.
+		this.notifyEliminated(owner, cause);
+
+		// **The sound is a second event at the same place, not a second call site.** A body leaving the round is what an
+		// elimination *is*, so the sound sits beside the splash rather than in `destroyBall` or in the end condition - those are
+		// about a body dying and a round ending, which are different facts. It is targeted at the player whose ball landed the last
+		// touch, not broadcast: see `playEliminationSound`.
+		this.playEliminationSound(owner, toucher);
+
+		// **Every elimination restarts the idle clock.** The warning it guards exists to say "nothing has happened for 60 s", and a
+		// round shedding a competitor every few seconds is the exact opposite of that.
+		this.lastProgressAt = os.clock();
+
+		print(
+			`[Round] eliminated ${name}, owner=${owner === undefined ? "none" : tostring(owner.userId)}(${owner === undefined ? "none" : owner.displayName}), live=${this.liveBalls.size()}, cause=${cause}`,
+		);
 	}
 
 	/**
@@ -2196,6 +2404,78 @@ export class RoundService implements OnStart {
 	 * checks membership first, because the round's own eliminations remove the entry *before* destroying,
 	 * and a handler that acted twice per body would double-count.
 	 */
+	/**
+	 * **A player disconnected, so every body they were driving is eliminated** (item 211).
+	 *
+	 * ## What this is
+	 *
+	 * A belt elimination that happened because the *client* left rather than because the body crossed the line. The body never
+	 * moved; the person stopped driving it. The tree has to treat that as a loss, because the alternative is worse in three
+	 * separate ways, all of which the designer reported as one bug:
+	 *
+	 * - the body stays on the belt as a live competitor, so `checkEndCondition` never sees the field shrink and the round runs
+	 *   to its time cap;
+	 * - `LeaderboardService.collect()` still enumerates it from the tag, so the board shows a player who has left as still
+	 *   racing, ranked above the people still in it;
+	 * - nothing writes `Competing = false`, though that write is now moot for the departing player - their instance is about to
+	 *   be destroyed - and the elimination path does it anyway so the ordering matches every other removal.
+	 *
+	 * ## Why the tag scan and not `getLiveBalls()`
+	 *
+	 * `getLiveBalls()` is this service's own tracked set, and it is the right answer for a body *this round* spawned. The tag is
+	 * the answer for "which bodies exist at all", which is the question here: a body spawned by a debug press, or one whose
+	 * tracking was lost, is still that player's body on the belt. `OwnerUserId` is the identity - the display name is a string a
+	 * player can change, and a twin has no owner at all.
+	 *
+	 * ## Why `eliminateBody` and not a bare `Destroy()`
+	 *
+	 * Because the six steps it performs *are* the definition of an elimination in this tree, and a body that is destroyed without
+	 * them is the bug. The round's record (payout order, leaderboard stack), the splash rule, the sound, the idle clock and the
+	 * `live=` count all live in one function precisely so that a new removal path cannot implement four of them and forget two.
+	 *
+	 * ## Why `evaluateAfterLoss` and not `checkEndCondition` inline
+	 *
+	 * The same reason `handleExternalDestruction` uses it: the end check must run *after* the whole batch is recorded, because a
+	 * check between two bodies of a player with a decoy twin would see one competitor left and name a winner who is about to lose
+	 * their own second body. It also defers by one resumption, which is what keeps the log line for the elimination ahead of the
+	 * log line for the round ending.
+	 */
+	private teardownPlayerBodies(player: Player): void {
+		// Read once: the instance is about to be destroyed and every property read after that is a reminder of the ordering.
+		const userId = player.UserId;
+
+		const bodies = new Array<BasePart>();
+		for (const instance of CollectionService.GetTagged(TAGS.ball)) {
+			if (!instance.IsA("BasePart") || instance.Parent === undefined) {
+				continue;
+			}
+
+			const owner = readOwner(instance);
+			if (owner !== undefined && owner.userId === userId) {
+				bodies.push(instance);
+			}
+		}
+
+		if (bodies.size() === 0) {
+			return;
+		}
+
+		// One line before the eliminations, so a log reader can tell "this player left and lost two bodies" from "two bodies
+		// happened to be eliminated in the same frame". The per-body lines follow with `cause=left-game`.
+		print(
+			`[Round] player left mid-round: ${player.Name} owner=${tostring(userId)} bodies=${bodies.size()} phase=${this.phase}`,
+		);
+
+		// **Eliminated one at a time, each with its own record.** A body that is a `decoy` twin is covered by its parent's
+		// elimination (item 148 destroys the twin with the parent), and it carries no owner, so it is not in this list.
+		for (const body of bodies) {
+			this.eliminateBody(body, "left-game");
+		}
+
+		// The round may now have nobody, or exactly one competitor - both are results. Checked once, after the batch.
+		this.evaluateAfterLoss();
+	}
+
 	private trackBall(ball: BasePart): void {
 		this.liveBalls.add(ball);
 
@@ -2220,35 +2500,14 @@ export class RoundService implements OnStart {
 			return;
 		}
 
-		// **Read before the body is forgotten and long before it is gone**, because the owner lives in attributes on the
-		// instance: a destroyed part returns its defaults, so a post-destroy read would report `userId 0` and the rule would
-		// quietly treat a real player as synthetic and tell nobody.
-		const owner = readOwner(ball);
-		// **The powers map still holds this body's toucher at this point, and that is why `destroyBall` calls
-		// `forgetBallPower` *after* `Destroy()`.** This method runs from inside that `Destroy()`, so clearing the record
-		// first — the natural reading of "clean up, then destroy" — would make every cull silent.
-		const toucher = lastToucherOf(ball);
-
-		// A culled body is an eliminated competitor, so it takes its place in the payout order here too: `KillY` and the
-		// `MaxLiveBalls` cap are removal paths the round does not control, and a player whose body fell out of the world
-		// still finished where it finished. Teardown never reaches this line — `clearAllBodies` forgets first.
-		this.recordElimination(owner, ball);
-
-		this.forgetBall(ball);
-
-		// Culled, not torn down: `KillY` and the `MaxLiveBalls` cap remove a competitor the same way the zone does, and the
-		// player whose ball fell out of the world is exactly as eliminated. Teardown never reaches here — `clearAllBodies`
-		// forgets each body before destroying it, so the membership check above returns early — which is what keeps a
-		// phase change from splashing every player at once.
-		this.notifyEliminated(owner, "culled");
-
-		// The same sound, for the same reason: a body culled by `KillY` or the cap left the round, whether or not
-		// anybody owned it — and the player who last touched it is the one who hears it.
-		this.playEliminationSound(owner, toucher);
-
-		// A body lost to the kill plane or a future path is still a change in the round's state, so it
-		// restarts the idle clock for the same reason a zone elimination does — see `warnIfIdle`.
-		this.lastProgressAt = os.clock();
+		// **One call, because the six steps are the same six steps** (item 211). The body was destroyed by something outside the
+		// round - `KillY`, the `MaxLiveBalls` cap - and it still finished where it finished, so it takes its place in the payout
+		// order and on the leaderboard exactly as a belt crossing does. `eliminateBody` reads the owner and the toucher *before*
+		// the destroy; this handler runs from inside `Destroying`, so both are still readable here.
+		//
+		// **The membership check above is what keeps a teardown out.** `clearAllBodies` forgets each body before destroying it, so a
+		// phase change returns early and does not splash every player at once.
+		this.eliminateBody(ball, "culled");
 
 		this.evaluateAfterLoss();
 	}
@@ -3172,9 +3431,47 @@ export class RoundService implements OnStart {
 			deadline.Parent = ReplicatedStorage;
 			this.playingDeadlineValue = deadline;
 		}
+
+		// **The three values the banner added in item 214, created here for the same reason as the deadline above.** A client that
+		// mounts during `Intermission` reads them in `onStart`, so a value created later would be a `WaitForChild` race on every
+		// join rather than a plain read. Each is seeded with its "nothing is happening" value - `""` for the refusal, `0` for the
+		// deadlines - so a reader never has to distinguish "absent" from "cleared".
+		this.refusalValue = ensureStringValue(ROUND_REFUSAL_VALUE_NAME);
+		this.intermissionDeadlineValue = ensureNumberValue(INTERMISSION_DEADLINE_VALUE_NAME);
+		this.roundPlayingDeadlineValue = ensureNumberValue(ROUND_PLAYING_DEADLINE_VALUE_NAME);
 	}
 
 	// #endregion
+}
+
+/** Find-or-create a `StringValue` in `ReplicatedStorage`, seeded `""` (item 214). */
+function ensureStringValue(name: string): StringValue {
+	const existing = ReplicatedStorage.FindFirstChild(name);
+	if (existing !== undefined && existing.IsA("StringValue")) {
+		return existing;
+	}
+
+	const created = new Instance("StringValue");
+	created.Name = name;
+	created.Value = "";
+	created.Parent = ReplicatedStorage;
+
+	return created;
+}
+
+/** Find-or-create a `NumberValue` in `ReplicatedStorage`, seeded `0` (item 214). */
+function ensureNumberValue(name: string): NumberValue {
+	const existing = ReplicatedStorage.FindFirstChild(name);
+	if (existing !== undefined && existing.IsA("NumberValue")) {
+		return existing;
+	}
+
+	const created = new Instance("NumberValue");
+	created.Name = name;
+	created.Value = 0;
+	created.Parent = ReplicatedStorage;
+
+	return created;
 }
 
 /**

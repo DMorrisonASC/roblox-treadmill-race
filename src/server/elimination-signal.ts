@@ -12,7 +12,18 @@
  */
 
 /** Why a body left the round. The distinction that matters is whether a player should be told. */
-export type EliminationCause = "left-belt" | "culled" | "teardown";
+/**
+ * Why a body left the round.
+ *
+ * - **`left-belt`** - it crossed the elimination zone. The normal way to lose.
+ * - **`culled`** - it fell below `KillY` or was removed by the `MaxLiveBalls` cap. A loss the round did not control.
+ * - **`left-game`** - its **owner disconnected** while it was still racing (item 211). The body never left the belt; the
+ *   player did. Treated as an elimination because the alternative is a body nobody is driving holding a rank and keeping the
+ *   round from ending.
+ * - **`teardown`** - the round cleared the field. Not an elimination at all, which is why every recipient rule returns
+ *   `undefined` for it.
+ */
+export type EliminationCause = "left-belt" | "culled" | "left-game" | "teardown";
 
 /** Anything with a user id. `BallOwner` satisfies this structurally, so callers pass their own value. */
 export interface OwnedBody {
@@ -48,7 +59,10 @@ export function isRealOwner(userId: number): boolean {
  * and a post-destroy read would silently report `userId 0` — which the third rule would then quietly treat as synthetic.
  */
 export function splashTargetUserId(owner: OwnedBody | undefined, cause: EliminationCause): number | undefined {
-	if (cause === "teardown" || owner === undefined) {
+	// **`left-game` is not told either (item 211).** The recipient of a splash is the *owner of the eliminated body*, and on a
+	// disconnect that owner's client is already gone - the remote would fire at nothing. The result is the same as `teardown`
+	// for a different reason: a teardown has no elimination to report, and a disconnect has nobody left to report it to.
+	if (cause === "teardown" || cause === "left-game" || owner === undefined) {
 		return undefined;
 	}
 

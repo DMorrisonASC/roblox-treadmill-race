@@ -6456,3 +6456,526 @@ An eliminated body **never** outranks a live one, whatever its frozen distance. 
 **Validation:** `npm run build` exit 0; **`npm test` = 517 passed in 38 files** (unchanged - the changed ordering lives inside `LeaderboardService.rank`, which cannot be constructed in Jest, so it is verified by reading rather than by a case); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all five touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged (no controller added or removed).
 
 **Studio-only:** that the character actually walks after Stop Watching (the new `[CharacterFreeze] thawed reason=spectating` line proves the decision changed, not the effect); that an eliminated row reads as red strikethrough **below** the live field; and that reset in each of the three states leaves the character walkable exactly when the camera is on it.
+---
+
+## 210 - The phase banner is a two-row text strip, no panel
+
+**Reported:** the banner is a chunky charcoal pill at the top of the screen; the designer wants text only, two rows, no panel. The screenshot shows it drawing level with the Roblox topbar buttons.
+
+### What was verified, and where the prompt was wrong
+
+| claim | verdict |
+|---|---|
+| `bannerText(phase, winner)` exists and returns `PostGame — X` / phase name | ✅ - **removed**; nothing imported it, and the two-row split replaces its one string with three |
+| `getTheme().typography.heading2 / heading3 / body2` | ❌ **no such slots.** Typography lives in `scale.ts` as `TYPOGRAPHY`, keyed by *big-ui* variant names: `h4` 32, `h5` 24, `h6` 18, `body1` 16, `body2` 14, `caption` 12, `overline` 11. Used `h6` (header), `body2` (bullet), `h5` (message) |
+| `getFont()` | ❌ does not exist - the face is `FONT` in `scale.ts` (`GothamMedium`) |
+| `outlineText` returns the `UIStroke` | ✅ `shared/ui/text.ts:41`, colour is the module's own `Color3.fromRGB(0,0,0)`, thickness `TEXT_OUTLINE_THICKNESS = 2` |
+| `GuiService:GetGuiInset()` | ✅ `LuaTuple<[Vector2, Vector2]>` in the installed typings |
+| `TopbarInset` signal | ✅ `GuiService.TopbarInset` is a `Rect` property, so `GetPropertyChangedSignal("TopbarInset")` is valid - **connected**, not boot-only |
+| `hudDark.colors.textPrimary` | `BASE.white` (`theme.ts:261`); `chunkyDarkTheme().paint.panel` is the `0.203922…` charcoal the old line printed. **The old mounted line printed the panel face colour, not the text colour** - so decision 8's suspicion was right, and `textColor=` now prints white |
+
+Also wrong: `getTheme()` carries **no** `typography` field at all (by design - type is not per-direction), so "read the theme's typography" had to become "read `TYPOGRAPHY` from `scale.ts`".
+
+### The change
+
+`phase-banner-controller.ts` is a rewrite. `buildChunkyPanel`, `applyChunkyChrome`, `chunkyDarkTheme`, big-ui `Text` and Fusion are **all gone from it** (`grep` for those tokens returns nothing); the element is now plain instances and one `UIListLayout` per axis:
+
+```
+HudTopbarGui (TopbarSafeInsets, DisplayOrder 30)   <- unchanged layer
+└── RoundStatus (Frame, Size.X = 1, AutomaticSize.Y, BackgroundTransparency = 1, Position.Y = topbar inset)
+    ├── Header (Frame, AutomaticSize.XY)  [UIListLayout horizontal, centred]
+    │   ├── Phase    (TextLabel, h6, "LOBBY"|"MATCH"|"RACE"|"RESULT"|"UNKNOWN")
+    │   ├── Separator(TextLabel, body2, "•")   <- hidden with the winner token
+    │   └── Winner   (TextLabel, h6, name or "")
+    └── StatusMessage (TextLabel, h5, full width, centred, wrapped)
+```
+
+Every frame is `BackgroundTransparency = 1`, no `UICorner`, no plate stroke. Every `TextLabel` is built by one `label()` helper that calls `outlineText`, so "all four are stroked" is structural. Colours are `theme.colors.textPrimary`; sizes are `TYPOGRAPHY` slots; the font is `FONT`.
+
+**Decision 1: `hudTopbar` kept**, and the topbar offset applied to the strip. The layer's `TopbarSafeInsets` **contributed nothing on this client** - the old mounted line printed `pos=…, 0` and the screenshot shows the pill level with the Roblox buttons - so `GuiService`'s inset (`max(GetGuiInset()[1].Y, TopbarInset.Height)`) is added to `RoundStatus.Position.Y` and re-applied on `TopbarInset` changes. Creating a `DeviceSafeInsets` layer would have moved the contract for every future tenant of `hudTopbar` for one element's benefit.
+
+**Decision 3: slots `h6` / `body2` / `h5`** - header 18, bullet 14, message 24, so the message is visibly larger than the header as required.
+
+**Decision 5: the empty winner token is hidden together with the bullet.** A `UIListLayout` skips invisible children, so `RESULT` alone is a one-token row; leaving the bullet would print `RESULT •` with nothing after it. This is why the separator's `Visible` is bound to `winnerText !== ""` rather than being always on - and it is also why the separator's **text** had to be set explicitly, which the first pass of this rewrite missed: the label existed with empty text and no bullet would ever have drawn.
+
+**Decision 7: two connections, one `refresh()`.** One `GetPropertyChangedSignal("Value")` per `StringValue`, both calling the same function that writes all four labels. A handler per label would read the same two values four times and could disagree with itself mid-transition.
+
+### The three deviations from the reference
+
+1. **Two header tokens, not three.** `Lv. 1 • LOBBY • Wins` needs a level and a win count, and neither exists: `Profile` carries `coins`, `ownedBalls`, `purchases` and two reward timestamps. A level that is always `1` and a win count that is always `0` is the placeholder-content defect items 55-62 refused for the store tiles.
+2. **No `You're up next!`.** There is no queue - every enrolled player is in the round, and in `Playing` most have already been eliminated. The sentence would be false in four of five states, so the message names the actual state instead.
+3. **`PostGame — X` became `RESULT • X` / `X wins!`.** The visible change is intentional: the two rows separate *state* from *sentence*, and the em-dash form was designed for a single-label banner.
+
+### Strings, per phase
+
+| phase | header | winner | message |
+| --- | --- | --- | --- |
+| `Intermission` | `LOBBY` | (hidden) | `Next round starting soon.` |
+| `Waiting` | `MATCH` | (hidden) | `Pick your ball.` |
+| `Playing` | `RACE` | (hidden) | `Race in progress.` |
+| `PostGame` + name | `RESULT` | `BestDefault` | `BestDefault wins!` |
+| `PostGame` + `none`/`""` | `RESULT` | (hidden) | `No winner this round.` |
+| anything else | `UNKNOWN` | (hidden) | `Unknown` + one `[PhaseBanner] unknown RoundState value="…"` |
+
+The mapping moved to **`src/shared/phase-banner.ts`** (`bannerHeaderText`, `bannerWinnerText`, `bannerMessageText`, `reportUnknownPhase`, `KNOWN_PHASES`) because Jest only collects `src/shared/**` and `src/server/**` - a spec beside the controller would never run. Seven cases in `phase-banner.spec.ts`, including a pair-check that `bannerWinnerText` and `bannerMessageText` agree about whether anybody won.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 526 passed in 39 files** (+9); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all three touched files pass `prettier --check`; `\uXXXX` under `src/` = 0 while the emitted Luau contains the real bullet byte (`local SEPARATOR_TEXT = "•"`); `flamework.build` unchanged.
+
+**Studio-only:** legibility of `GothamMedium` white with a 2px black outline over the arena's bright sky and its dark far shots; the exact vertical placement at 1080p, 720p and 4:3; and whether a borderless strip reads as deliberate HUD or as a watermark. That last one is the judgement this round cannot make.
+---
+
+## 211 - A departing player's bodies are eliminated, so the board and the round agree
+
+**Reported:** a player leaving destroyed no ball, did not strike them through on the leaderboard, and did not end the round.
+
+### What was verified, and where the prompt was wrong
+
+| claim | verdict |
+|---|---|
+| `PlayerRemoving` in `RoundService` only drops the enrollment record | ✅ `round-service.ts:381` - `Players.PlayerRemoving.Connect((player) => this.enrolledUserIds.delete(player.UserId))`, one line, nothing else |
+| other `PlayerRemoving` handlers | `economy-service.ts:173` (`unload`) and `:182` (`disarmIfArmerLeft`) - the admin side, as described; `player-data-store.release` is called from `unload` |
+| `EliminationCause` | `"left-belt" \| "culled" \| "teardown"` (`elimination-signal.ts:15`). **`teardown` is a fourth cause the prompt did not know about**, and it is why a phase change splashes nobody |
+| `notifyEliminated` already guards a departed recipient | ✅ it resolves `Players.GetPlayerByUserId(userId)` and returns when `undefined`, so a `FireClient` into nothing was already impossible |
+| `playEliminationSound` guards too | ✅ same lookup, same early return |
+| `settleEliminations` refactorable | ✅ the per-body work touched `this` only through methods, so it moved out whole |
+| `evaluateAfterLoss` | **defers** (`task.defer` then `checkEndCondition`) - so the round ends one resumption after the departure, not in the same frame |
+| maps keyed by `Player` | ❌ **two exist in `RoundService` and neither was cleaned up**: `offers: Map<Player, StoredOffer>` and `pickerCooldowns: Map<Player, number>`. Fixed here |
+
+### The change
+
+**`EliminationCause` gained `"left-game"`**, with a docblock that now names all four causes - the type had three and the fourth, `teardown`, was undocumented.
+
+**`eliminateBody(body, cause)` extracted** from `settleEliminations`'s loop: read the name, owner and toucher *before* the destroy, `recordElimination`, `forgetBall`, `Destroy`, `notifyEliminated`, `playEliminationSound`, reset the idle clock, and print. The line now carries `cause=` on every path, so a belt crossing, a cull and a disconnect are distinguishable in the log - they were not before, and that ambiguity is part of why this bug read as three separate ones.
+
+`settleEliminations` is now a three-line loop; `handleExternalDestruction` is one call with `cause="culled"`, which is what removed its four duplicated steps.
+
+**`teardownPlayerBodies(player)`** scans `CollectionService.GetTagged(TAGS.ball)` for bodies whose `OwnerUserId` equals the departing id, prints one `[Round] player left mid-round: <name> owner=<id> bodies=<n> phase=<phase>` line, eliminates each with `cause="left-game"`, then calls `evaluateAfterLoss` **once after the batch** - checking between two bodies would let a player with a decoy twin hand the win to somebody who is about to lose their second body.
+
+**`splashTargetUserId` returns `undefined` for `left-game`**, so the splash is not fired at a client that is gone. The recipient guard that already existed would have stopped the `FireClient` anyway; the cause makes the intent explicit and is what the new spec case asserts.
+
+**The two `Player`-keyed maps are now deleted in the same handler.** They were written per join and never removed, so every departure leaked a dead `Player` key and a rejoin created a second one. `enrolledUserIds` is keyed by `UserId`, which is why it was the one that survived review.
+
+### Where the prompt was wrong
+
+1. **`teardown` is a fourth cause** and it is load-bearing: it is what makes a phase change splash nobody. Adding `left-game` as a third cause would have collided with the real count.
+2. **`notifyEliminated` already guards** the recipient - decision 4's "add one if absent" had nothing to add.
+3. **The round does not end in the same frame.** `evaluateAfterLoss` defers by one resumption, deliberately (the existing docblock explains the batch-safety reason). So the log shows `[Round] eliminated … cause=left-game` and then, on the next heartbeat-deferred tick, `[Round] Playing → PostGame`. The prompt's decision 7 asked me to prove "the same millisecond", which would have required sacrificing the batch guarantee.
+4. **Two `Player`-keyed maps exist**, and the prompt's grep question ("if any map is keyed by `Player`") found something real.
+5. **`handleExternalDestruction` was already a duplicate** of the elimination steps, not just a future risk - the extraction removed an existing four-line copy rather than pre-empting one.
+
+### The three symptoms, mapped
+
+| report | cause | fix |
+|---|---|---|
+| "did not destroy the ball" | nothing subscribed to the departure | `teardownPlayerBodies` destroys every body with that `OwnerUserId`, in the same frame as `PlayerRemoving` |
+| "no strike-through on the leaderboard" | `recordElimination` never ran, so the body stayed **live** and enumerated from the tag | `eliminateBody` records it with its distance captured before the destroy; `LeaderboardService` merges it into the eliminated block below every live body |
+| "did not end the round" | `checkEndCondition` counts live bodies, and the body was still live | `evaluateAfterLoss` after the batch: one competitor left → `last standing`; none → `no survivors` |
+
+### The other half of the prompt's own question
+
+**A departing player's decoy twin** carries no owner, so it is not in this list - and it does not need to be: `powers` destroys the twin with its parent (item 148), and `getCompetitors()` filters on `readOwner(ball) !== undefined`, so a twin was never a competitor.
+
+**A rejoining player** gets a fresh `Player` instance, so `Competing` is `undefined` for them, `CharacterFreezeController` freezes them (phase is `Playing`, they are not competing), and `enrolledUserIds` re-enrolls them only if the enrollment window is open - item 159's rule, untouched.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 528 passed in 39 files** (+2: `left-game` splashes nobody, and the other two causes still splash); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all three touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged; no client file touched.
+
+**Studio-only:** a two-player round where one closes the game and the other sees `[Round] eliminated … cause=left-game` followed by `[Round] Playing → PostGame (…, last standing, winner=…)`; a three-player round where the leaver appears struck through at the right rank; and a rejoin during the same round landing frozen and not competing. `Player.UserId` is set at instance creation, so reading it inside the handler is safe - but that is the Studio fact worth confirming once.
+---
+
+## 212 - A reset re-engages the arena camera, and the picker shows only when the player has an offer
+
+### Verified, and where the prompt was wrong
+
+| claim | verdict |
+|---|---|
+| `CharacterAdded` does something in the camera controller | ❌ **there was no `CharacterAdded` handler at all**. Only `CharacterRemoving`, which set `suppressedGeneration = this.generation` and restored, unconditionally, whenever `engaged` |
+| `CharacterRemoving` checks `cameraWantsArena` first | ❌ it checked only `engaged`, then suppressed |
+| `isActive()` | `part` + `character()` + `cameraWantsArena(...)` + `suppressedGeneration !== generation` |
+| `spectateAvailable` | `!competing && ARENA_CAMERA_PHASES.has(phase)` - unchanged by this round |
+| `picker-controller`'s visible condition | `frame.Visible = phase === "Waiting"` in `applyPhase` - **a fact about the round, not about the player** |
+| `openOffers` offers a non-enrolled player | ❌ **no** - `if (useEnrollment && !this.enrolledUserIds.has(player.UserId)) { print("offer skipped"); continue; }` |
+
+**Which picker bug was real:** the visible condition, exactly as the prompt's case (3) describes. `PickerOpen` is not fired at a non-enrolled client, so a joiner during `Playing` never sees the picker (phase is not `Waiting`), but a joiner during `Waiting` saw an **empty panel with a countdown and no cards** for the rest of the phase. No server change was needed.
+
+**Criterion 4's premise is wrong.** A player whose own body is already eliminated and who is spectating does *not* "still have `spectating = false`" - nothing writes `spectating` on death. That player asked to watch, so the camera now stays on the arena across their respawn instead of dropping them into the lobby mid-race. Recorded as a deliberate difference: the alternative (force the lobby) would undo an explicit request for no stated reason.
+
+### Bug 1 - the camera
+
+**The suppression is gone, not narrowed.** `suppressedGeneration` is deleted, and `isActive()` is now `part exists && character exists && cameraWantsArena(phase, competing, spectating)`. The item-186 docblock is rewritten in place to record what it guarded against ("a player who reset has lost the race") and why that stopped being true: `Competing` is written by the server at spawn, at elimination and at teardown, and it lives on the `Player`, so it survives a respawn - a local flag saying "and they reset" was a second opinion about a fact the server already publishes.
+
+`CharacterRemoving` is now the **give-back** path only: if the arena is still wanted, it does nothing (the camera stays scripted on the tagged part, which does not need a body); otherwise it restores, because the subject for the hand-back has to be read before the body vanishes.
+
+`CharacterAdded` is the **second re-engagement point**: it defers one resumption (`CharacterAdded` fires before the new body is parented, so `character()` can still be `nil`), calls `observe()`, and prints `[TreadmillCamera] reset-reengage part=… phase=Playing generation=<n> competing=true` when the camera was engaged before and still is - i.e. a reset that kept the arena. A first spawn engages from nothing and deliberately does not print it.
+
+`generation` survives as a **log field only**; the `restore` line now has one shape (the old character-loss variant printed `suppressedGeneration=`).
+
+The `spectate-controller` and `spectateAvailable` needed **no change** (option (a) of the prompt's fork): with the camera state-driven, a competing player's reset leaves them on the arena, which is the state their `competing = true` already describes, and the button correctly stays hidden because there is nothing to toggle.
+
+### Bug 2 - the picker
+
+`pickerVisible(phase, hasOffer)` in `shared/picker.ts`: `phase === "Waiting" && hasOffer`. The controller calls it from `applyPhase` **and** from `onOffer`, because either fact can land last - a client that starts during `Waiting` reads the phase at mount and receives its offer a moment later.
+
+### Decisions
+
+1. `CharacterAdded`: nothing existed; added, deferred one resumption.
+2. `CharacterRemoving`: suppressed unconditionally when engaged; now restores only when the arena is not wanted.
+3. `CharacterAdded`'s `observe()` alone is **not** enough - the suppression also had to go, which is why the field is deleted rather than narrowed.
+4. `spectateAvailable` kept as-is; the camera fix makes the reset recoverable.
+5. Picker condition was phase-only; see above.
+6. `PickerOpen` is **not** fired to a non-enrolled player.
+7. New line: `[TreadmillCamera] reset-reengage part=<path> phase=<phase> generation=<n> competing=<bool>`.
+8. Picker shape: **phase + offer**, as one pure rule in `shared/picker.ts` with four spec cases.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 532 passed in 40 files** (+4 for `pickerVisible`); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all four touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged; `spectate.ts`, `spectate-controller.ts` and `character-freeze-controller.ts` have empty diffs.
+
+**Studio-only:** a two-player round where one resets mid-race (arena camera back, `reset-reengage` once, button absent, character still frozen because the camera is on the arena); a join mid-`Waiting` (no picker, no `[Picker] closed` line); and a rejoin during `Playing` after being in the previous `Waiting` (no picker). Each is a distinct session; the log lines are the evidence for each.
+---
+
+## 213 - The banner is centred on the screen, because the layer stopped sizing itself to the top bar
+
+**Reported:** the phase banner is visibly off-centre.
+
+### The cause was the user's hypothesis, and the mechanism was worse than "an inset"
+
+`hudTopbar`'s gui was `TopbarSafeInsets`. From the engine's own `ScreenInsets` reference (`create.roblox.com/docs/reference/engine/enums/ScreenInsets`):
+
+> **`TopbarSafeInsets`** - "Top bar safe area insets are added to the `DeviceSafeInsets` area, resulting in an area guaranteed to be unobscured by both device screen cutouts and Roblox core UI elements like the experience controls. Unlike `CoreUISafeInsets`, **this area's position and size is dynamic and is limited to the space available within the top bar area itself**, outside of `CoreUISafeInsets`."
+
+So the gui is not a full-width box with a vertical inset - it is a **box sized to the top bar's own space**, whose width and position move with what the top bar leaves. The strip inside it was full width *of that box* and perfectly centred in it, and off-centre on the screen. Every one of the strip's own properties was correct:
+
+```
+root.AnchorPoint = new Vector2(0, 0);
+root.Position = UDim2.fromOffset(0, this.topbarInset());
+root.Size = new UDim2(1, 0, 0, 0);
+root.AutomaticSize = Enum.AutomaticSize.Y;
+```
+
+**`GuiService:GetGuiInset()` was already read** (item 213's `topbarInset()`, re-read on `TopbarInset` changes) - the vertical half was honoured. What was not honoured is that the *horizontal* width came from the layer.
+
+### The user's `CoreUISafeInsets` suggestion, tested against the docs
+
+> **`CoreUISafeInsets`** - "Core UI insets are added to the `DeviceSafeInsets` area ... unobscured by both device screen cutouts and Roblox core UI elements like the top bar buttons."
+>
+> **`DeviceSafeInsets`** - "Device safe area insets are added to the fullscreen area. The resulting area is guaranteed to not be occluded by any **device** screen cutouts such as the camera notch, **although no inset is added for Roblox core UI elements** like the top bar buttons."
+
+Moving to `CoreUISafeInsets` would **not** have fixed it: it is `DeviceSafeInsets` *plus* the core-UI inset, so it is narrower still on a phone - the top bar buttons and the chat button take their space out of it horizontally. The lever that gives "as wide as the screen allows" is `DeviceSafeInsets`, which the docs explicitly say adds no core-UI inset.
+
+### The change
+
+`layers.ts`'s `topbarHudGui()` uses `Enum.ScreenInsets.DeviceSafeInsets` instead of `TopbarSafeInsets`, with a docblock quoting both definitions and naming the cost: the layer's top edge is now the physical top of the screen, so **each tenant owns its own vertical offset**. `hudTopbar` has exactly one tenant - `PhaseBannerController`, which reads `GuiService:GetGuiInset()` and re-reads it on `TopbarInset` - so the cost is paid by the element this round exists for.
+
+`ScreenGui.IgnoreGuiInset` **does exist** in the installed typings (`None.d.ts:24081`), and option B would have been smaller on paper. It was not taken: `IgnoreGuiInset` is about the topbar inset on a gui that is otherwise full-screen, and combining it with an explicit `ScreenInsets` value is two mechanisms for one result. `DeviceSafeInsets` says what the layer wants in one property, and the docblock above it can be checked against the engine's own description.
+
+The strip itself is unchanged except for its docblock and one diagnostic addition - `(0, 0)` anchor with `Size.X.Scale = 1` is centred by construction, so a centred anchor would only add a second pair of numbers to disagree.
+
+**The boot line now proves it:** `centre=<n> screenCentre=<n> screenW=<n>`, where `centre` is `AbsolutePosition.X + AbsoluteSize.X / 2` and `screenCentre` is half `Workspace.CurrentCamera.ViewportSize.X`. Those two numbers were different before this round and a reader could not see it, because `pos=` and `size=` are both relative to the gui. `ViewportSize` rather than `GuiService.GetScreenResolution()`: the latter is the display's pixel size, which on a letterboxed or scaled client is not the area guis are laid out in.
+
+### The four candidate causes, walked
+
+1. **The gui's inset narrowed the box** - **confirmed**, by the `TopbarSafeInsets` quote above. This was the cause.
+2. **The strip's own sizing** - ruled out: `AnchorPoint (0,0)`, `Position (0, inset)`, `Size (1, 0, 0, 0)` describes a full-width box at the top of its parent, which is centred when the parent is the screen.
+3. **`TextXAlignment` / `HorizontalAlignment` not `Center`** - ruled out: the message is `TextXAlignment.Center` and the header's `UIListLayout.HorizontalAlignment = Center`.
+4. **`GetGuiInset()` not read** - ruled out: it was read, and it is what put the strip below the topbar at all. The vertical half worked; only the horizontal half was the layer's doing.
+
+### Where this prompt was wrong
+
+- It guessed `TopbarSafeInsets` "narrows the available width horizontally **as well as vertically**". The engine's description is stronger than that: the region is *dynamic and limited to the top bar's own space*, which is why the offset could be large and not a fixed side margin.
+- It proposed option A with a centred anchor and `Position.X.Scale = 0.5`. That is the same rectangle as `(0,0)` + `Size.X.Scale = 1`, so the extra anchor was not taken - it is one more pair of numbers that can disagree.
+- It worried that `DeviceSafeInsets` "may not inset horizontally on desktop but does on a phone", which would have been a problem for centring. It is not: on a phone the notch-safe area *is* the area the player sees, so centring in it centres in what is visible.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 532 passed in 40 files** (unchanged - the layout has no pure surface); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; both touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged; `hudCore`, `splash`, `sheet`, `reveal`, `toast`, `transition` and `fullScreen` are untouched.
+
+**Studio-only:** `centre == screenCentre` on a 16:9 desktop, a 4:3 viewport and a landscape phone; that the strip's top edge clears the top bar by the `GetGuiInset()` amount on each; and whether the phone's notch-safe width reads as centered rather than as inset - the one thing a screenshot settles.
+## 214 - A round refuses to start on one player, and the banner carries a clock
+
+The request was three things: a round with one enrolled player should not start, the banner should say so, and the banner should show how long the current `Intermission` or `Playing` phase has left. The first two are one guard and one string; the third is a replicated number and a per-frame recompute, because a client cannot derive a deadline from a phase name.
+
+### The guard
+
+`RoundService` already had a zero-player check in the `startIntermissionTimer` loop. That check cannot catch the case the user is reporting: one player is connected, enrolled, and alone, so the loop happily counts down and starts a one-player race. The new guard sits immediately after the existing check and reuses its restart path:
+
+```ts
+if (!IS_STUDIO && this.enrolledUserIds.size() < MIN_ENROLLED_PLAYERS) {
+    this.publishRefusal(REFUSAL_NEED_PLAYERS);
+    print(`[Round] Intermission timer restarted — need ${MIN_ENROLLED_PLAYERS} enrolled players (connected=${players.size()}, enrolled=${this.enrolledUserIds.size()}), another ${INTERMISSION_SECONDS}s`);
+    continue;
+}
+this.publishRefusal("");
+```
+
+Three properties of that line matter:
+
+- **`IS_STUDIO` is in the condition, not around it.** The existing zero-player check is also Studio-exempt, because Studio is where a solo tester lives. A guard that fires in Studio would make the game untestable by the one person most likely to test it.
+- **The intermission timer restarts rather than pausing.** That is what the surrounding code does for the zero-player case, and a pause would need a second piece of state (`pausedAt`) that the phase machine currently does not have. The cost is that a lone player sees a fresh full `INTERMISSION_SECONDS` each cycle rather than a frozen remainder.
+- **`publishRefusal` is called with the refusal inside the guard and `""` after it**, so the sentence appears and disappears with the condition rather than needing a separate clear site. `publishRefusal` only writes when the value actually differs, so the per-iteration call does not churn the value's `Changed`.
+
+`MIN_ENROLLED_PLAYERS = 2` is in `tuning.ts`, **not** a placeholder: the user asked for "atleast two players" and two is the literal number in that sentence.
+
+### The three published values, and why two of them are new names
+
+| Value | Written | Cleared | Read by |
+|---|---|---|---|
+| `RoundRefusal` (`StringValue`) | the guard, `REFUSAL_NEED_PLAYERS`; `enterPlaying` writes `""` | `publishRefusal("")` after the guard passes; `enterPlaying` | banner message row |
+| `RoundIntermissionDeadline` (`NumberValue`) | `Intermission` entry, `GetServerTimeNow() + span` | `Intermission` entry (to `0`) and `enterPlaying` | banner clock, `Intermission` |
+| `RoundPlayingDeadline` (`NumberValue`) | `enterPlaying`, `GetServerTimeNow() + PLAYING_CAP_SECONDS` | `PostGame` entry, `Waiting` entry, `endPlaying` | banner clock, `Playing` |
+
+`span` is `INTERMISSION_SECONDS + (first ? hold : 0)` - the same expression the loop already used for its own wait, so the published deadline and the loop's `task.wait` cannot drift apart.
+
+**`RoundPlayingDeadline` is a new name because `PLAYING_DEADLINE_VALUE_NAME` already exists and means something else.** It is `Waiting`'s pick deadline, published in `enterWaiting` and cleared on `Playing` entry - its name is historical, from when `Playing` was the only phase with a deadline. Reusing it would have made `Playing`'s cap fight the picker's deadline: the picker would have started counting the moment the race did. The new name's docblock in `remotes.ts` says exactly this, so the next reader does not "consolidate" them.
+
+Both numbers are `GetServerTimeNow() + span`, not `os.clock()`-relative remainders. A client and the server share the clock origin through `Workspace:GetServerTimeNow()`, so a replicated absolute deadline is directly comparable on the client with no offset correction and no drift as the number replicates. A remainder would be wrong by the replication latency the moment it arrived, and wrong by more the longer the phase ran.
+
+### The clock
+
+`shared/round-status.ts` holds both rules, because both ends need them and Jest only collects `src/shared/**`:
+
+- `phaseHasClock(phase)` - `Intermission` or `Playing`. **Not `Waiting`**: it has its own 3-2-1 in `CountdownController` (item 149) and a second clock over the same span is how two clocks end up disagreeing by a frame. **Not `PostGame`**: five seconds, and the winner line is the thing to read.
+- `formatClock(remaining)` - `M:SS` via `math.ceil`, clamped at `0`. `0:07`, not `00:07`: the leading minutes zero is noise for a clock that never exceeds two digits. `math.ceil` rather than `math.floor` so a clock reads `0:01` for the whole last second instead of showing `0:00` while the phase is still running - a clock that reads zero before the phase ends is a bug report waiting to happen.
+
+On the client, `PhaseBannerController` gained a fourth label in the header row (`Clock`, `LayoutOrder = 4`, `h6`, `Visible = false` by default) and:
+
+- **One `RunService.RenderStepped` connection** calling `refreshClock()`, connected once at mount. The alternative - connecting on `Intermission` entry and disconnecting on exit - is two connection lifecycles for a function that already early-returns in every phase without a clock. `refreshClock()` clears `Visible` and the text in those phases, so the cost of the always-on connection is one `phaseHasClock` call per frame.
+- **`refreshClock()` reads `roundState.Value` each frame** rather than caching a phase, so the clock and the message row cannot disagree about which phase is on screen after a change that has replicated but not yet been handled.
+- **The refusal is a normal `GetPropertyChangedSignal("Value")` connection that calls the existing `refresh()`**, not a second handler that writes the message itself. The message's text is decided in `bannerMessageText` and a second writer would be a second copy of the refusal rule.
+- **`bannerMessageText(phase, winner, refusal = "")`**: a non-empty refusal replaces the phase message. Defaulted so the existing spec cases and any other caller keep their behaviour.
+
+### The layout consequence, stated because it is visible
+
+The header row is a centred `UIListLayout` of `phase - bullet - winner - clock`. Adding a fourth token **widens the row asymmetrically**: a `RACE - 1:47` row is wider than a `RACE` row and stays centred as a whole, so the phase token moves left when the clock appears. That is the cost of a centred row with a variable-width trailing token, and it is unavoidable without giving the clock a fixed column (`Size.X` with `AutomaticSize` off), which would reserve space for a token that is absent in two of the four phases. The blank column would be the placeholder-content defect this tree has refused repeatedly, so the row is allowed to re-centre.
+
+### Where this prompt was wrong
+
+- It assumed the guard belonged at `Waiting` entry, "before the picker opens". It belongs in the `Intermission` loop: at `Waiting` entry the round has already been declared and bodies have not been spawned, so refusing there would leave a `Waiting` phase with no competitors and no path out. Refusing in the loop means the round never leaves `Intermission`.
+- It described `PLAYING_DEADLINE_VALUE_NAME` as a reusable deadline for `Playing`. It is `Waiting`'s. The name is misleading at `HEAD`; the fix taken here is a new name plus a docblock, not a rename, because a rename would touch `CountdownController` and every spec pinning the old name for no behavioural gain.
+- It expected the refusal to need its own "clear on phase change" path. `enterPlaying` clearing it is enough: the only other phase a refusal can be visible from is `Intermission`, and the guard re-publishes on every iteration.
+
+### Verification
+
+`npm run build` exit 0; **`npm test` = 540 passed in 41 files** (up from 532 / 40 - the new `round-status.spec.ts` plus one `phase-banner.spec.ts` case); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all eight touched files; `grep -n "\\u[0-9a-fA-F]{4}" src` = 0 (the one that appeared was a `\u2022` written *inside a comment*, which the guard does not distinguish from a string - it was replaced with the literal bullet, the same byte `SEPARATOR_TEXT` already carried); `flamework.build` unchanged; no controller added or removed.
+
+### Studio-only
+
+Two real clients in one server to see the same `1:47` at the same moment (a single client cannot prove the deadline is shared rather than locally derived); a player joining mid-`Intermission` with one other present, to confirm the refusal clears when the second player arrives rather than only at the next loop iteration; and `M:SS` legibility at `h6` (18 px) at a phone's viewport width, where four header tokens plus the clock is the row's widest state.
+## 215 - The picker's cards are one stroke each, and the footer keeps its depth
+
+The complaint was "excessive layering" on the `Waiting` ball picker. Nothing was wrong with the look; the **layer count** was the look. Every layer on a card was a deliberate decision from an earlier round (item 117's chrome, item 118's ring, item 122's sheet), which is why the fix is a subtraction and not a restyle.
+
+### What a card was
+
+```
+Card (TextButton, transparent hit area via applyChunkyChrome)
+  Chunk (Frame - the shadow strip, shadowOf(paint.card))
+  Face  (Frame - paint.card, inset by 6 px, UIStroke 3 px near-black, UICorner 8 px)
+    UIPadding, UIListLayout (vertical, centred)
+    Label_body2   the ball's name
+    Ball          an 84 px tinted circle, UICorner (1, 0) - no asset exists
+    Label_caption the rarity
+    Ring (Frame - UIStroke 1 px in the rarity colour, item 118)
+```
+
+Four painted edges on one 200 x 190 card: a shadow plate, a face, a 3-pixel black stroke on that face, and a second stroke inside it. Three cards a row, under a sheet that already has its own 6-pixel outline.
+
+### What a card is
+
+```
+Card (TextButton - paint.card fill, one UIStroke 3 px in the rarity colour, UICorner 8 px, UIScale)
+  UIPadding, UIListLayout (vertical, centred)
+  Label_body2   the ball's name
+  Ball          the tinted circle
+  Label_caption the rarity
+```
+
+`applyChunkyChrome` and `addChunkyRing` are gone from the card builder. `applyChunkyChrome(` now appears once in the file, in `footerButton`, where it belongs.
+
+### Why the button is the card, and not a transparent hit area plus a face child
+
+`applyChunkyChrome` inverts the stack because a child cannot draw behind its own parent's background - that is the rule that makes depth possible on an existing button. **With no plate there is nothing to invert for**, so the button's own background is the face. That is the shape `shared/ui/tile.ts` already uses for a flat card ("the button carries the surface, the border and the corner, and the labels are children"), so this is the tree's existing answer rather than a new one, and it is one object where the round's own sketch said two.
+
+### The press state
+
+`attachPressFeedback(button)` (`shared/ui/press.ts:45`) takes a `GuiButton` and parents one `UIScale`; it knows nothing about chrome. Verified by its other callers - `tile.ts:119`, `tabs.ts:164`, `panel.ts:230`, and eight sites in `shop-controller.ts`, several of them on cards that are *not* chromed. So a card gets `1.03` hover / `0.97` press over `0.1 s`, the same feedback as every other control, and **one** mechanism rather than a hand-rolled `MouseButton1Down`.
+
+`setRaised` was the pressed cue while the card had a plate to cover. One flat surface has nothing to sink into, so the plate cue and the scale cue were never alternatives - with the plate gone there is only the scale.
+
+### The selected state, in full
+
+| | fill | stroke colour | stroke width | name |
+| --- | --- | --- | --- | --- |
+| unselected | `paint.card` `#3E3E47` | `colors.rarity[rarity]` | 3 | `textPrimary` white |
+| selected | `colors.accent` `#3F82C9` | `colors.onAccent` white | 5 | `colors.onAccent` white |
+
+`chunkyDarkTheme().colors.rarity` is `common #9AA0A6`, `rare #4C93D6`, `epic #9B72F5`, `legendary #E0A93B` - so a rare card's edge is blue on a `#3E3E47` face, and a legendary one is amber.
+
+**The stroke width changed from 1/3 to 3/5, and that is the round's one retune.** `BORDER = 1` existed to be a hairline *beside* the chunky black outline, which was doing the work of being an edge; the ring was decoration on top of it. With both gone the stroke is the card's edge **and** its rarity, and 1 pixel of mid-grey cannot carry a colour across a 200-pixel card. `3` matches `CHUNKY_CONTROL_STROKE`, so a picker card and a footer button draw the same weight of edge; `5` on selection keeps item 122's "thicker, not larger" rule, which is what stops a selected card reflowing its siblings. A `UIStroke` is drawn centred on the edge and does not change a `GuiObject`'s size, so neither value can reflow the row.
+
+### The reference, walked item by item
+
+| Reference | Applies here? |
+| --- | --- |
+| §1 chunky style kept | **Yes** - the sheet, the footer and the type are untouched; what went is layer count, not boldness. |
+| §3 cards with image and name | **Yes**, with the ball placeholder standing in for the image: no ball has an asset id (item 58). |
+| §4 one clear outer border | **Yes** - one `UIStroke` per card, and the sheet's own outline is the other one. |
+| §4 no separate background box around the image | **Yes** - the art block was `applyChunkyChrome`'s face; there was never an `ImageLabel`, and the tinted circle is not in a box now. |
+| §4 rarity as a single visual indicator | **Partly.** The card's stroke is the single *graphic* indicator; the rarity caption is kept beside it, because a colour alone is not a rarity for a reader who cannot separate the four. Two indicators remain, one of them text. |
+| §5 header left/right | **Already true** - see below; the spacer the reference asks for is the one shape that does not work here. |
+| §5 remove redundant text | **Nothing to remove.** `Pick your ball.` is item 213's banner message, not a picker string. |
+| §6 footer with `FREE` and a diamond price | **The labels are already what the reference shows**, and the prompt was wrong about that - see below. |
+| §7 remove the gray trapezoids | **There is no trapezoid.** The nearest thing was the shadow strip, removed; the prompt named it correctly. |
+| §8 use `surfaceOpaqueTheme()` | **Does not apply.** The picker uses `chunkyDarkTheme()`, like every sheet, not the HUD direction or the paper one. |
+| §9 chunky aesthetic kept | **Yes.** |
+
+### The header is already left/right, and the spacer must not come back
+
+`buildHeader` (`picker-controller.ts:756`) is two **half-width** labels: `title.Size = (0.5, -SPACING.xs, 1, 0)` with `TextXAlignment.Left`, `countdown` the same with `TextXAlignment.Right`. So the title is at the left edge and the countdown at the right edge, and the round had nothing to restore.
+
+The spacer layout the prompt asked to "restore if it was collapsed" is the shape the first build *had* and the shape that broke: a `Size.X.Scale = 1` spacer inside a horizontal `UIListLayout` is a scale width inside an auto-measuring row, so the row's total exceeds the header and everything after the spacer is laid out past the right edge - which is where the countdown went. The style guide already records it as §5.2. **Refused, and the comment that says why is in the function.**
+
+### The countdown already matches the reference
+
+`tickCountdown` (`picker-controller.ts:687`) writes `tostring(math.ceil(remaining))` - a bare integer, no unit, no `M:SS`. The reference shows `7`. No change, and none needed.
+
+The arithmetic is untouched: the deadline is the server's, absolute, compared against `Workspace.GetServerTimeNow()`.
+
+### The strings, and where the prompt was wrong about them
+
+- Title: `CHOOSE YOUR BALL` (`:774`).
+- `All Balls` card, three lines: `FREE` in `colors.success` (`:846`), `All Balls` (`:848`), `random per round` (`:849`). The button is `Active = false` and dimmed through `dimChunkyChrome` (`:645-651`).
+- `Reroll`: a diamond + the price (`:886`), `REROLL` (`:892`), then a reason caption that is `""`, `not enough coins`, or `all balls shown` on a premium offer.
+- Card names: `ballName(ballId)`, uppercase via `shared/ball-name.ts`; the caption is `rarityLabel(rarity)`.
+
+**The prompt said "the reference's `FREE` under `ALL BALLS` is not accurate to this tree".** It is: the tree renders `FREE` in success green above `All Balls`. What is inaccurate is the *implication* - the button is not free, it is **unavailable**, and it says so two lines lower. `FREE` over a disabled button is a mild contradiction, and it is the one string on this panel that would read better as `UNAVAILABLE` or nothing at all. **Not changed**, because this round's acceptance criteria freeze the visible text; recorded here so the next round has it.
+
+### Where this prompt was wrong
+
+1. **"The picker uses `getTheme()` (the HUD dark)."** It uses `chunkyDarkTheme()` (`picker-controller.ts:178`) - the same direction as the shop (`:445`), the payout (`:163`), the reveal (`:237`), the leaderboard (`:121`), the toast (`:88`) and the spectate button (`:69`). `getTheme()` is the banner, the countdown and the splash. So §8's `surfaceOpaqueTheme()` is wrong for a different reason than the prompt gives: the right answer is not "keep the HUD direction", it is "the sheet direction is already in use and is already correct".
+2. **"The card is `Card -> face -> ring + ItemImage + ItemName`."** There is no `ImageLabel` and no art block. The image slot is a tinted `Frame` circle, because no ball has an asset, and there is a third label (the rarity caption) the sketch does not have.
+3. **"Restore the spacer layout" for the header.** The spacer is the bug, not the fix (§5.2).
+4. **"`FREE` is not accurate to this tree."** It is rendered (`:846`); the *reason* line is what makes the button honest.
+5. **"Fifteen+ `UIStroke`s and shadow strips in one panel."** The plate count was fourteen: 1 stroke on the sheet's face, 9 on the three cards (a shadow plate, a face stroke and a ring stroke each), 4 on the two footer buttons (a shadow plate and a face stroke each) - and a glyph outline on every one of the fourteen labels, which is the style's own rule (section 2.4). The number that matters is **two strokes on one card's edge**, which is now one.
+
+### Verification
+
+`npm run build` exit 0; **`npm test` = 540 passed in 41 files** (unchanged - a client controller has no pure surface and Jest does not collect `src/client/**`); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on the touched file; `grep "\\u[0-9a-fA-F]{4}" src` = 0; `flamework.build` unchanged; `applyChunkyChrome(` appears once in `picker-controller.ts` (the footer), `new Instance("UIStroke")` once (the card), `setRaised(` zero, `addChunkyRing` only in prose.
+
+**`UI_STYLE_GUIDE.md` gained three paragraphs**, because the card is a third anatomy and the guide's existing rules said the opposite twice: §1 now says a card that is *chosen* rather than pressed keeps the press but drops the plate; §2.2 records the rarity-coloured stroke as the one exception to "borders are near-black"; §3.1 records that with no plates, colour is the selection rather than a second palette. Leaving those unamended would have made the guide wrong about a panel a player sees every round.
+
+### Studio-only
+
+The three things a screenshot settles: whether one 3-pixel rarity stroke on a `#3E3E47` card reads as *chunky* or as *a hairline that got thicker*; whether `common`'s `#9AA0A6` edge is visible enough against the sheet's `#34343A`; and whether an `accent`-filled card with a white stroke reads as "chosen" rather than as a second, differently-shaped button. If it reads as a different kind of chunky rather than as fewer layers, the property doing the wrong work will be the corner radius (8 px is the control radius; a card this size may want more) - that is the number to look at before the colour.
+## 216 - The lobby guard runs at the top of the iteration, so the clock never counts toward a refused transition
+
+The user's report, verbatim: *"I saw 'lobby 0:N' and 'Next round starting soon.' Then it changed to reflect needing players. I need it start that first when a solo player joins. It switches depending on the amount of players. Its misleading, is it checking for players at last second? Also, if there is one player, there should not be a counter for the round then."*
+
+Every clause of that was one ordering bug. Item 214 put the enrolled-players guard **after** `task.wait(span)`, so it answered "could the lobby that just ended have started a round?" at the moment that lobby ended.
+
+### The loop, before this round
+
+```
+1756  const span = INTERMISSION_SECONDS + (first ? hold : 0)
+1758  this.publishIntermissionDeadline(Workspace.GetServerTimeNow() + span)   ← the clock starts HERE
+1760  this.openEnrollmentWindow(span)
+1762  task.wait(span)                                                        ← thirty seconds
+1765  if (players.size() === 0) { print(...); continue }                     ← the first guard
+1772  if (!IS_STUDIO && enrolledUserIds.size() < MIN_ENROLLED_PLAYERS) {     ← the second guard
+1773      this.publishRefusal(REFUSAL_NEED_PLAYERS); continue
+1782  this.publishRefusal("")
+1792  this.startWaitingRound("intermission elapsed", true)
+```
+
+A deadline was published on **every** iteration including the ones the guard then rejected, and the refusal was published **after** the wait. So a solo player watched `LOBBY • 0:30 → 0:00` under "Next round starting soon." and learned the round needed two players at the moment it should have started - then the refusal stuck around for a whole further phase after a second player arrived and enrolled.
+
+### The loop, after
+
+```
+1756  const span = INTERMISSION_SECONDS + (first ? hold : 0)
+1767  this.openEnrollmentWindow(span)                     ← seeds enrolledUserIds from who is here NOW
+1772  const rearm = this.intermissionRearm()              ← asked BEFORE anything is published
+1773  if (rearm !== undefined) {
+1774      this.refuseIntermission(rearm)                  ← refusal + deadline 0 + one log line
+1775      task.wait(span)
+1776      continue
+1777  }
+1783  this.publishRefusal("")                             ← cleared on the iteration that CAN start
+1784  this.publishIntermissionDeadline(now + span)        ← the clock starts only now
+1786  task.wait(span)
+1788  if (phase/generation changed) return
+1795  if (this.intermissionRearm() !== undefined) continue ← second ask; see below
+1805  const spawned = this.startWaitingRound("intermission elapsed", true)
+```
+
+### Why the window opens before the guard
+
+`openEnrollmentWindow` is what **seeds** `enrolledUserIds` from `Players.GetPlayers()` (round-service.ts:1633). The guard therefore asks about the enrollment of *this* iteration, not the last one - the user's "is it checking for players at last second?" answered by checking at the first second instead. It is also what enrolls a joiner for the *next* iteration while this one is already refused, which is the whole mechanism behind the mid-iteration join cases below.
+
+### The guard is asked twice, and the second ask is not redundant
+
+A player can leave during the thirty seconds, and `PlayerRemoving` deletes their id from `enrolledUserIds` (round-service.ts:407). With only the pre-wait ask, a lobby that began with two enrolled players would spawn for the survivor and start a **one-player race** - the exact round the guard exists to prevent. The post-wait ask (line 1795) publishes nothing: its `continue` lands on an iteration whose top republishes the refusal, hides the clock and prints the single line for that re-arm, so a re-arm is still exactly one log line however it was reached.
+
+### The zero-player guard's order: first, kept
+
+`intermissionRearm` (round-service.ts:1839) returns `"empty"` before `"enrolled"`. Two reasons, and the second is the tree's own: nobody connected is the more general answer - nobody is here, so nobody can *be* enrolled - and its log line says "waiting for someone" rather than "waiting for a second someone". Studio is exempt from the second check only (a Studio session has one player by construction and `spawnStudioBots` fills its field); an empty Studio session is still empty.
+
+**Both branches publish the same refusal string.** A server with nobody connected needs the same two players as a server with one, and publishing it on the empty branch is what makes a solo player joining an empty server see the refusal on their first replicated frame rather than inheriting "Next round starting soon." with no countdown under it.
+
+### The log lines, side by side
+
+| | before | after |
+| --- | --- | --- |
+| empty | `[Round] Intermission timer restarted — no players connected (players=0), another 30s` | `[Round] Intermission timer restarted — no players connected (players=0, deadline=none), another 30s` |
+| enrolled | `[Round] Intermission timer restarted — need 2 enrolled players (connected=1, enrolled=1), another 30s` | `[Round] Intermission timer restarted — need 2 enrolled players (connected=1, enrolled=1, deadline=none), another 30s` |
+| success | no restart line | no restart line (unchanged) |
+
+The em dash is the literal character, the `atleast` spelling in `REFUSAL_NEED_PLAYERS` is untouched, and `deadline=none` is the field that tells a reader the iteration published no clock - which is the change, stated where a reader looks for it.
+
+### The client: no change, because the early return already exists
+
+`refreshClock` (phase-banner-controller.ts:437) reads the deadline every frame and returns early:
+
+```ts
+const deadline = this.activeDeadline(phase);
+if (deadline === undefined || deadline <= 0) {
+    clockLabel.Visible = false;
+    clockLabel.Text = "";
+    return;
+}
+```
+
+So `publishIntermissionDeadline(0)` is the client's "no countdown is due", and the tick is a `RenderStepped` read of the value (line 265) rather than a `Changed` listener - the clock is hidden within one frame of the guard firing, and an idempotent `0 → 0` write is not even needed to make that true. **No client file was touched this round.**
+
+### The session shapes, walked
+
+| Case | Refusal appears | Clock | Refusal clears |
+| --- | --- | --- | --- |
+| Solo at boot | frame 1 of iteration 1 (guard runs before any publish) | **never** - deadline published only on approval | when a second player is enrolled and the next top asks the guard |
+| 2nd joins at s5 of a refused phase (window open to s25) | already shown | hidden throughout | top of the **next** iteration - `enrollOnJoin` added them, and the next top's `openEnrollmentWindow` re-seeds from connected players anyway |
+| 2nd joins at s20 (window open to s25) | already shown | hidden | top of the next iteration, same as above |
+| 2nd joins at s28 (window **closed** at s25) | already shown | hidden | top of the **next** iteration, and this is the one the prompt got wrong - see below |
+| 2nd joins during a *successful* phase | never | runs from the top of that iteration | n/a - already `""` |
+| Two players at boot | never | `LOBBY • 0:30` from frame 1 | n/a |
+| Studio, 1 player | never - the enrolled guard is Studio-exempt | runs; `spawnStudioBots` fills the field | n/a |
+
+The countdown and "Next round starting soon." therefore reappear **together**, on the same frame, or neither appears at all: `publishRefusal("")` and `publishIntermissionDeadline(now + span)` are adjacent lines on the success path.
+
+### The mid-iteration join's trade, named
+
+A player who joins *after* the top-of-iteration guard has already run cannot change that iteration's answer. The refusal stays until the next top - up to a full `INTERMISSION_SECONDS` - and the clock stays hidden for the same span. **Accepted, and it is the safe direction**: the alternative (a `PlayerAdded` handler that clears the refusal and republishes a deadline mid-iteration) is a second writer to both `RoundRefusal` and `RoundIntermissionDeadline`, which is exactly the "two copies of one fact" failure every value in this service has been built to avoid. A follow-up round can add it if the delay turns out to read badly in play; it is not this round's work.
+
+### Where this prompt was wrong
+
+1. **"A second player joins at second 28 ... the refusal stays through the next iteration's top and through the next 30 seconds."** It does not. `openEnrollmentWindow` **clears and re-seeds** `enrolledUserIds` from every connected player at the top of each iteration, so a player joined-but-not-enrolled is enrolled by the next top regardless of the cutoff. `ENROLLMENT_CUTOFF_SECONDS` decides who races in the iteration the window was opened for, not who is enrolled for the next one. The refusal clears one iteration earlier than the prompt predicted.
+2. **"the guard sees the enrollment state at the top of the iteration ... a player who joined during the previous iteration was added by `enrollOnJoin` while the window was open."** Only if they beat the cutoff. The seed is the mechanism that makes the late joiner count, and the prompt did not name it.
+3. **"`publishIntermissionDeadline(0)` triggers `GetPropertyChangedSignal("Value")` ... which `refreshClock`'s `RenderStepped` read depends on."** The read does not depend on `Changed` at all - `refreshClock` reads `Value` every frame (phase-banner-controller.ts:453), so the signal is irrelevant here. `publishIntermissionDeadline` also writes unconditionally, unlike `publishRefusal`, so there is no idempotence question to settle either way.
+4. **The sketch moved the guard but left the zero-player check at the bottom.** Both checks are one predicate (`intermissionRearm`) asked at the same two points; splitting them would have meant the empty-server case still published a full countdown it could never honour, which is the same bug in a different branch.
+5. **The sketch's post-wait section was `task.wait(span)` then `startWaitingRound`.** That drops item 159's protection against a player leaving mid-phase, which would start a one-player race. The second ask restores it without a second log line.
+
+### What only Studio settles
+
+- **The first frame.** The server publishes the refusal inside the first loop iteration, but the client's banner mounts whenever it mounts; a client that mounts before `RoundRefusal` replicates shows "Next round starting soon." for however many frames the value takes. The guard ordering makes the *server* publish before any deadline, which is the part source can prove; the absence of a visible flash is a screenshot.
+- **Whether the message and the header row update on the same frame.** Two different labels, one `refresh()` that writes both - but `GetPropertyChangedSignal` scheduling is the engine's, not this file's.
+- **Whether one iteration of delay on a mid-phase join reads as a bug in play.** The refusal is honest while it is shown; the only question is whether a player who joined at second 25 wonders why the countdown has not appeared yet.
+
+### The one thing that had to be true
+
+For the banner's `clock` field to be empty on a refused frame, the client's `activeDeadline("Intermission")` must read `0` (or the label must be `Visible = false`) **before any publish has run for that iteration**. Code path, end to end: `enterIntermission` clears the deadline to `0` at lobby entry (round-service.ts:1531), then the loop's first iteration opens the window and refuses **without ever calling `publishIntermissionDeadline(now + span)`** - the only call that sets a non-zero `Intermission` deadline is on the approved path (line 1784). `refreshClock` therefore sees `0`, sets `Visible = false` and `Text = ""`. There is no ordering in which a number reaches the label for a refused iteration, because the publisher for that number is unreachable until both asks have passed.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 540 passed in 41 files** (unchanged - no new pure function, `round-status.spec.ts` and `phase-banner.spec.ts` untouched); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on the touched file; `grep "\u[0-9a-fA-F]{4}" src` = 0; `flamework.build` unchanged; only `round-service.ts` changed this round.

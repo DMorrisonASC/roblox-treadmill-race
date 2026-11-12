@@ -61,3 +61,30 @@ export type PickerResult =
 	| { ok: false; reason: string }
 	/** A re-roll succeeded: the caller gets the replacement offer in the same message rather than waiting for a second. */
 	| { ok: true; offer: PickerOfferMessage };
+
+/**
+ * The phase a picker panel may be shown in.
+ *
+ * A named constant rather than a literal in the controller, because the rule below and the server's own "when is an offer
+ * issued" have to agree: `openOffers` runs at this phase's entry, so a panel shown in any other phase is a panel with nothing
+ * that could be in it.
+ */
+export const PICKER_PHASE = "Waiting";
+
+/**
+ * Whether the picker panel should be visible: **the offering phase *and* an offer this client actually holds** (item 212).
+ *
+ * ## Why the phase alone was wrong
+ *
+ * The visible condition used to be `phase === "Waiting"`, which is a statement about the *round*. The panel is a statement about
+ * *this player*: an offer is sent only to players the server enrolled, and `openOffers` skips everyone else with a log line. A
+ * client that joins during `Waiting` was never enrolled - the window closes at the end of `Intermission` - so it receives no
+ * offer, and a phase-only condition drew it an **empty panel with a countdown and no cards**: something that reads as "choose a
+ * ball" while offering nothing to choose.
+ *
+ * `hasOffer` is the second fact, and it is the one the controller already tracks (`offer !== undefined`). Both are required:
+ * an offer with no phase is a stale window, and a phase with no offer is a panel this player has no business seeing.
+ */
+export function pickerVisible(phase: string, hasOffer: boolean): boolean {
+	return phase === PICKER_PHASE && hasOffer;
+}

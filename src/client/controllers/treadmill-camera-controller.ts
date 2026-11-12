@@ -67,12 +67,15 @@ export class TreadmillCameraController implements OnStart {
 	/** Whether the camera is currently scripted by this controller, so a restore is never issued twice. */
 	private engaged = false;
 
-	/** The generation this controller has suppressed the camera for; `-1` means "not suppressed". */
-	private suppressedGeneration = -1;
-
 	/**
-	 * Bumped on each `Waiting` entry. A suppression is remembered against this number rather than as a bare boolean, so the
-	 * next round re-engages without anything having to clear the flag — the round boundary *is* the clear.
+	 * Bumped on each `Waiting` entry, and printed on every engage/restore line.
+	 *
+	 * **It no longer gates anything (item 212).** It used to pair with a `suppressedGeneration`: a reset recorded "suppress
+	 * for generation N" and the next `Waiting` bumped N, which un-suppressed the camera without a second flag to clear. That
+	 * design answered "this player gave up the race by resetting" - which stopped being true once `Competing` became the thing
+	 * that says whether a player is racing. A competitor who resets is still in the race, and the camera has to say so. The whole
+	 * rule is now `cameraWantsArena(phase, competing, spectating)` plus "is there a character to hand back to", evaluated on
+	 * every input change *and* on `CharacterAdded`, so there is no state for a generation to invalidate.
 	 */
 	private generation = 0;
 
@@ -170,13 +173,33 @@ export class TreadmillCameraController implements OnStart {
 	}
 
 	/**
-	 * Watches for the character being replaced — the reset trigger.
+	 * Watches both halves of a respawn: the old character leaving, and the new one arriving.
 	 *
-	 * **`CharacterRemoving`, not `CharacterAdded` with a change check.** `CharacterRemoving` fires while the old character
-	 * still exists, which is the moment the default camera would snap back to a body that is about to vanish; reacting there
-	 * restores first and then has nothing to do when the new body arrives. `CharacterAdded` would work too but needs a
-	 * second comparison to tell "the first spawn" from "a reset", and the first spawn is exactly the case that must *not*
-	 * suppress anything.
+	 * ## The bug this replaced (item 212)
+	 *
+	 * `CharacterRemoving` suppressed the arena camera for the rest of the round, on the argument that "a player who resets has
+	 * lost the race". That was written when item 186 was the only camera rule, and it stopped being true when `Competing` began
+	 * deciding who is racing: a competitor's ball is still on the belt after a reset, so they have not lost anything. The
+	 * observable result was a player who reset mid-`Playing` sitting on the lobby camera for the rest of the round with
+	 * `competing = true`, unable to get the arena back - the spectator button is not offered to a competitor, so there was no
+	 * path of any kind to recover.
+	 *
+	 * ## The rule now
+	 *
+	 * **The camera follows the state, not the history.** On removal, the camera is given back only when the arena is *not*
+	 * wanted - the same `cameraWantsArena(phase, competing, spectating)` every other decision reads. When the arena *is* wanted,
+	 * removal does nothing at all: the camera stays scripted on the tagged part, which is where the player belongs and which does
+	 * not depend on their body existing.
+	 *
+	 * On arrival, `observe()` runs. That is what re-engages if anything released the camera in the gap - and it is also what
+	 * gives back the character camera to a player whose phase ended while they were dead. Item 186 assumed `CharacterAdded` would
+	 * need a "first spawn or reset" comparison; it does not, because there is no longer any state for a reset to set.
+	 *
+	 * ## Why `CharacterRemoving` still exists at all
+	 *
+	 * Because the engine's default is to follow the character, and a player whose arena camera is no longer wanted has to be
+	 * handed back *before* their body vanishes - `restore` picks the humanoid or the head as the subject, and after removal
+	 * neither exists. The handler is therefore the give-back path, not a suppression path.
 	 */
 	private watchCharacter(): void {
 		const player = Players.LocalPlayer;
@@ -186,16 +209,46 @@ export class TreadmillCameraController implements OnStart {
 
 		this.connections.push(
 			player.CharacterRemoving.Connect(() => {
-				if (!this.engaged) {
-					// Not in a round, or already restored: the default camera is the right one and there is nothing to suppress.
+				const state = this.roundState;
+				if (!this.engaged || state === undefined) {
+					// Not scripted, so there is nothing to hand back.
 					return;
 				}
 
-				// **Suppressed for the rest of the round.** A player who resets has lost the race; snapping their new body back
-				// to the arena camera would look like a reward for it, and the round they are no longer in would keep the
-				// screen they gave up. The next `Waiting` bumps the generation, which un-suppresses without a second flag.
-				this.suppressedGeneration = this.generation;
-				this.restore("character loss", this.suppressedGeneration);
+				// **The state decides, not the fact that a character is going away.** The arena is still wanted: leave the camera
+				// where it is and let `CharacterAdded` re-assert it. This is the whole fix - the old code suppressed here
+				// unconditionally and never re-engaged.
+				if (cameraWantsArena(state.Value, this.competing, this.spectating)) {
+					return;
+				}
+
+				this.restore("character loss", this.generation);
+			}),
+		);
+
+		this.connections.push(
+			player.CharacterAdded.Connect(() => {
+				// **Deferred one resumption.** `CharacterAdded` fires before the new body is parented, so `character()` can still
+				// return `nil` on the synchronous pass - and `isActive()` refuses to engage without one. Re-observing immediately
+				// would therefore do nothing at all on some clients, which is the failure this handler exists to fix.
+				task.defer(() => {
+					// **Read before `observe`, because "re-engaged" means the camera was already on the arena and stayed there.**
+					// A first spawn engages from nothing, and printing the reset line there would make a normal join look like a
+					// recovery.
+					const wasEngaged = this.engaged;
+
+					this.observe();
+
+					// One line per reset that keeps the arena camera, because the alternative - a silent re-engage - is
+					// indistinguishable from the bug in a log.
+					const part = this.part;
+					const state = this.roundState;
+					if (wasEngaged && this.engaged && part !== undefined && state !== undefined) {
+						print(
+							`[TreadmillCamera] reset-reengage part=${part.GetFullName()} phase=${state.Value} generation=${this.generation} competing=${tostring(this.competing)}`,
+						);
+					}
+				});
 			}),
 		);
 	}
@@ -218,9 +271,13 @@ export class TreadmillCameraController implements OnStart {
 	/**
 	 * Whether the camera should be scripted right now.
 	 *
-	 * All three must hold: a part exists to copy, a character exists to hand the camera back to later, this round has not
-	 * been suppressed by a reset, **and the player wants the arena** — which is `cameraWantsArena`: a competitor always does
-	 * in these phases, and a non-competitor only while they have pressed Spectate.
+	 * Three things must hold: a part exists to copy, a character exists to hand the camera back to later, **and the player wants
+	 * the arena** - which is `cameraWantsArena`: a competitor always does in these phases, and a non-competitor only while they
+	 * have pressed Watch Race.
+	 *
+	 * **There is no fourth term, and that is the item 212 fix.** A reset used to add "unless this player reset during this round",
+	 * which is the same claim `Competing` makes and the server makes better: it is written at spawn, at elimination and at teardown,
+	 * and it survives a respawn because it lives on the `Player` rather than on the character.
 	 *
 	 * **The character test is not decoration.** `CameraType = Custom` with no `Subject` leaves the camera at the origin
 	 * staring at nothing, and a player with no body is not watching a race. Keeping the default camera for that case is
@@ -233,11 +290,12 @@ export class TreadmillCameraController implements OnStart {
 			return false;
 		}
 
-		if (!cameraWantsArena(state.Value, this.competing, this.spectating)) {
-			return false;
-		}
-
-		return this.suppressedGeneration !== this.generation;
+		// **The whole rule, and the reason there is no suppression term beside it (item 212).** A reset used to suppress the
+		// arena camera for the rest of the round, on the argument that a player who reset had lost the race. `Competing` is now
+		// the flag that answers "is this player still racing" - written by the server at spawn, at elimination and at teardown -
+		// so a competitor who resets mid-race is still competing and their camera belongs on the arena. A second local flag
+		// saying otherwise is a second opinion about a fact the server already publishes.
+		return cameraWantsArena(state.Value, this.competing, this.spectating);
 	}
 
 	/** Reads the replicated "am I in this round" flag and re-runs the rule if it changed. */
@@ -303,12 +361,10 @@ export class TreadmillCameraController implements OnStart {
 
 		const phase = state.Value;
 
-		// **The generation is bumped on `Waiting` entry, before the active test.** It is what makes "the next round
-		// re-engages" true even for a player who reset in the previous one, and doing it here rather than in the engage branch
-		// means a `Waiting` with no character yet still ends the suppression.
+		// **The generation still bumps on `Waiting` entry, but only as a label on the log lines** (item 212). It used to be what
+		// ended a reset suppression; that suppression is gone, because `Competing` now answers the question it was standing in for.
 		if (phase === "Waiting") {
 			this.generation++;
-			this.suppressedGeneration = -1;
 		}
 
 		if (this.isActive()) {
@@ -388,10 +444,12 @@ export class TreadmillCameraController implements OnStart {
 		camera.CameraType = Enum.CameraType.Custom;
 		this.engaged = false;
 
+		// **One shape, and `character=` on it (item 212).** The two shapes existed because the character-loss path printed a
+		// suppression number the others did not have; the suppression is gone, so the field is now `generation` on every line and a
+		// reader can compare two restores directly. `character=` stays: a restore with no subject is the one case where the camera
+		// goes to `Custom` with nothing to follow, and that is invisible from the reason alone.
 		print(
-			reason === "character loss"
-				? `[TreadmillCamera] restored (character loss) to=Custom character=${tostring(character !== undefined)} suppressedGeneration=${generation}`
-				: `[TreadmillCamera] restored (${reason}) to=Custom character=${tostring(character !== undefined)} generation=${generation}`,
+			`[TreadmillCamera] restored (${reason}) to=Custom character=${tostring(character !== undefined)} generation=${generation}`,
 		);
 	}
 }

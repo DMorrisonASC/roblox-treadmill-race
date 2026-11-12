@@ -4,6 +4,7 @@ import { PLAYER_COINS_ATTRIBUTE } from "shared/attributes";
 import { ballName, rarityLabel } from "shared/ball-name";
 import { Rarity, rarityOfBall } from "shared/economy.config";
 import { PickerOfferMessage, PickerResult, PICKER_OPTION_COUNT, REROLL_COST_COINS } from "shared/picker";
+import { pickerVisible } from "shared/picker";
 import {
 	PICKER_OFFER_REMOTE_NAME,
 	PICKER_PICK_REMOTE_NAME,
@@ -14,26 +15,30 @@ import {
 import { FONT, SPACING, TYPOGRAPHY, typographyOneStepUp } from "shared/ui/scale";
 import { chunkyDarkTheme, Theme } from "shared/ui/theme";
 import { getScreenGui } from "shared/ui/layers";
-import { addChunkyRing, applyChunkyChrome, ChunkyChrome, dimChunkyChrome, shadowOf } from "shared/ui/chunky-chrome";
+import { applyChunkyChrome, ChunkyChrome, dimChunkyChrome, shadowOf } from "shared/ui/chunky-chrome";
 import { buildChunkyPanel } from "shared/ui/chunky-panel";
 import { outlineText } from "shared/ui/text";
 import { attachClickSound } from "shared/ui/sounds";
+import { attachPressFeedback } from "shared/ui/press";
 import { applyPanelScale } from "shared/ui/ui-scale";
 
 /**
  * **Placeholder.** Draw order for the sheet's labels.
  *
- * Above `applyChunkyChrome`'s face, which takes `button.ZIndex + 1` for whatever button a label sits in: a label at the
- * same order as its button's face is drawn *underneath* it and vanishes. One number for the whole sheet, because no label
- * here is nested inside another label's stack.
+ * Above both surfaces a label can be parented to in this file: a card's own background (`CARD_Z_INDEX`), and a footer
+ * button's chrome face, which takes `button.ZIndex + 1`. A label at the same order as the surface it sits on is drawn
+ * *underneath* it and vanishes - `ZIndex` is relative to a parent's group, so a child at a higher number draws over its
+ * parent's own background but not over a same-numbered sibling. One number for the whole sheet, because no label here is
+ * nested inside another label's stack.
  */
 const LABEL_Z_INDEX = 6;
 
 /**
- * **Placeholder.** Base draw order for a card's plates.
+ * **Placeholder.** Draw order for a card.
  *
- * Below `LABEL_Z_INDEX` so the card's own labels sit above its face, and above the sheet's face so the cards are drawn on
- * the sheet rather than behind it. The chrome adds one for the face and the ring adds one more.
+ * Below `LABEL_Z_INDEX` so the card's own labels sit above its background, and above the sheet's face so the cards are
+ * drawn on the sheet rather than behind it. **One number, not a stack** (item 215): the card is a single object now, where
+ * the chrome put a shadow at this order and a face at `+1`, and the rarity ring took a third order on top of both.
  */
 const CARD_Z_INDEX = 3;
 
@@ -72,11 +77,19 @@ const SHEET_PADDING = SPACING.md;
 /** **Placeholder.** Gap between the three bands, in pixels. */
 const BAND_GAP = SPACING.sm;
 
-/** **Placeholder.** Border weight of the sheet and of an unselected card. */
-const BORDER = 1;
+/**
+ * **Placeholder.** Border weight of an unselected card.
+ *
+ * Equal to `CHUNKY_CONTROL_STROKE`, so a picker card and a footer button draw the same weight of edge. It was `1` while the
+ * card also carried `applyChunkyChrome`'s 3-pixel near-black outline **and** `addChunkyRing`'s hairline - a hairline was all
+ * that was left for the ring because the black outline was doing the work of being an edge. With both gone this stroke *is*
+ * the card's edge and its rarity at once, and 1 pixel of a mid-grey cannot carry a colour across a 200-pixel card
+ * (item 215).
+ */
+const CARD_STROKE = 3;
 
 /** **Placeholder.** Border weight of the selected card. Thicker, not larger: a size change would reflow the row. */
-const SELECTED_BORDER = 3;
+const CARD_STROKE_SELECTED = 5;
 
 /*
  * The disabled fade is no longer a constant here. `dimChunkyChrome` carries its own wash (0.45), and the two numbers
@@ -105,11 +118,10 @@ const DIAMOND_SIZE = 10;
 /** One rendered card, kept whole so the selection pass cannot mark the wrong button. */
 interface BallCard {
 	readonly ballId: string;
+	/** The card itself, and its only surface: the selection pass repaints this rather than a plate. */
 	readonly button: TextButton;
-	/** The card's plates and pressed state, so the selection pass restyles without rebuilding. */
-	readonly chrome: ChunkyChrome;
-	/** The rarity ring's frame. The `UIStroke` lives on this, not on the card's face - see the ring's creation site. */
-	readonly ring: Frame;
+	/** The card's one `UIStroke` - its edge and its rarity, restyled to the selection colour when marked. */
+	readonly stroke: UIStroke;
 	readonly nameLabel: TextLabel;
 }
 
@@ -118,7 +130,7 @@ interface BallCard {
  *
  * ```
  * BallPicker                       (vertical UIListLayout)
- *   Header                         (horizontal: title, spacer, countdown)
+ *   Header                         (horizontal: title left, countdown right)
  *   BallChoices                    (horizontal scroller: one card per offer entry)
  *     Card                         (vertical: name, tinted ball, rarity)
  *   Footer                         (horizontal: All Balls, Reroll)
@@ -145,6 +157,21 @@ interface BallCard {
  *   and it is its own child so a later round replaces one line rather than inserting a new one.
  * - **No ball image.** No ball has an asset — item 58 recorded the same finding for the store, which draws a tinted `Frame`
  *   + `UICorner` circle rather than inventing an asset id. This does the same, tinted by rarity.
+ *
+ * ## One stroke per card, no plate (item 215)
+ *
+ * The cards were `applyChunkyChrome`'s five-layer control — a shadow strip, an inset face, a 3-pixel near-black outline on
+ * that face, and `addChunkyRing`'s second stroke inside it — which is **four visible edges on one 200-pixel card**, three
+ * times a row, under a sheet that already has its own outline. The complaint was "excessive layering", and the layer count
+ * was the whole of it: every one of those layers was a deliberate decision from an earlier round (117, 118, 122).
+ *
+ * **A picker card is a choice, not a button on a surface.** The press a player makes on it *is* the selection, so its
+ * feedback is the fill and the stroke colour changing — not a face sinking into a plate that exists only to be sunk into.
+ * The chrome went, the ring went, and the card's single `UIStroke` now carries both its edge and its rarity.
+ *
+ * **The footer keeps its chrome, deliberately.** Those two buttons are pressed for an *action*, one of them is disabled with
+ * a reason, and `setRaised` + `dimChunkyChrome` are the two states they need. The trade is real and it belongs here rather
+ * than in a report nobody re-reads: the footer has more layers than the cards because it does more.
  */
 @Controller()
 export class PickerController implements OnStart {
@@ -216,14 +243,28 @@ export class PickerController implements OnStart {
 	}
 
 	/**
-	 * Shows the panel only during `Waiting`.
+	 * Shows the panel only in `Waiting` **and only when this client has an offer for this window** (item 212).
 	 *
-	 * One rule for the mount read and for every change, for the same reason the store keeps one: two copies of "when is this
-	 * visible" is how a panel ends up on screen in a phase the other copy thought was fine.
+	 * ## Why the phase alone was wrong
 	 *
-	 * Leaving the phase also **drops the offer**. The countdown is not a timer this file owns — it informs, and the phase
-	 * change is what ends the window. A stale offer that reappeared on the next entry would be a set of cards the server has
-	 * already discarded.
+	 * It read `frame.Visible = phase === "Waiting"`, which is a statement about the round rather than about this player. The
+	 * offer is not implied by the phase: `openOffers` sends one only to players in `enrolledUserIds`, and a client that joins
+	 * during `Waiting` was not enrolled (the window closed at the end of `Intermission`), so no `PickerOpen` is ever fired at
+	 * them. That client saw an **empty panel with a countdown and no cards** for the rest of the phase - which reads as "pick a
+	 * ball" while offering nothing to pick.
+	 *
+	 * The panel is the state of "I have an offer", not the state of "the round is between rounds". `offer !== undefined` is that
+	 * fact, and it is the same field `renderCards` fills.
+	 *
+	 * ## One rule for the mount read and for every change
+	 *
+	 * Same reason the store keeps one: two copies of "when is this visible" is how a panel ends up on screen in a phase the other
+	 * copy thought was fine. `refreshVisibility` is therefore called from `applyPhase` *and* from `onOffer` - the offer can
+	 * arrive after the phase read, and the phase can change after the offer arrived.
+	 *
+	 * Leaving the phase also **drops the offer**. The countdown is not a timer this file owns - it informs, and the phase change
+	 * is what ends the window. A stale offer that reappeared on the next entry would be a set of cards the server has already
+	 * discarded.
 	 */
 	private applyPhase(phase: string): void {
 		this.phase = phase;
@@ -233,17 +274,30 @@ export class PickerController implements OnStart {
 			return;
 		}
 
-		const waiting = phase === PHASE_WAITING;
-		frame.Visible = waiting;
+		if (phase !== PHASE_WAITING) {
+			this.offer = undefined;
+			this.chosen = undefined;
+			this.clearCards();
+			this.setLoading(true);
+		}
 
-		if (waiting) {
+		this.refreshVisibility();
+	}
+
+	/**
+	 * The one place the panel is shown or hidden: **`Waiting` *and* an offer.**
+	 *
+	 * Called when the phase changes and when an offer arrives, because either can be the last of the two facts to land: a client
+	 * that starts during `Waiting` reads the phase first and receives its offer a moment later, and a client whose offer arrived
+	 * during the tail of `Intermission` has the phase land second. Both orders end in the same visibility.
+	 */
+	private refreshVisibility(): void {
+		const frame = this.mainFrame;
+		if (frame === undefined) {
 			return;
 		}
 
-		this.offer = undefined;
-		this.chosen = undefined;
-		this.clearCards();
-		this.setLoading(true);
+		frame.Visible = pickerVisible(this.phase, this.offer !== undefined);
 	}
 
 	private connectRemotes(): void {
@@ -295,6 +349,9 @@ export class PickerController implements OnStart {
 		this.renderCards(offer);
 		this.setLoading(false);
 		this.refreshFooter();
+		// **The arrive-second case.** On a client that joined during `Waiting` the phase read happened at mount with no offer, so
+		// nothing was shown; this is the moment the panel earns its visibility.
+		this.refreshVisibility();
 	}
 
 	private renderCards(offer: PickerOfferMessage): void {
@@ -325,6 +382,11 @@ export class PickerController implements OnStart {
 	/**
 	 * One card: name, tinted ball, rarity — siblings in a vertical list, in that order.
 	 *
+	 * **One object, one stroke** (item 215). The card *is* the button: `paint.card` fills it, a single `UIStroke` in the
+	 * rarity colour draws its edge, and it takes the same corner radius as a footer button. `shared/ui/tile.ts` builds its
+	 * cards the same way, for the same reason - with no shadow plate there is nothing to invert the stack for, so the
+	 * button's own background is the face.
+	 *
 	 * The selection state is a **border and a fill**, never a size: a card that grew on selection would reflow every sibling
 	 * in the row, which for a nine-card premium offer is a visible jump under the pointer that just clicked it.
 	 */
@@ -335,21 +397,31 @@ export class PickerController implements OnStart {
 		const button = new Instance("TextButton");
 		button.Name = `Card_${order}`;
 		button.Size = UDim2.fromOffset(CARD_WIDTH, CARD_HEIGHT);
+		button.BackgroundColor3 = this.theme.paint.card.color;
+		button.BackgroundTransparency = this.theme.paint.card.transparency;
 		button.BorderSizePixel = 0;
 		button.AutoButtonColor = false;
 		button.Text = "";
+		button.ZIndex = CARD_Z_INDEX;
 		button.LayoutOrder = order;
 		button.Parent = parent;
 
-		// **A card is clickable, so it gets the depth.** The picker's "nine cards you cannot tell apart" problem is the
-		// same one the inventory had: a flat rectangle with a hairline in its rarity colour says nothing about being
-		// pressable, and an offer screen is the one place a player must understand that immediately.
-		const chrome = applyChunkyChrome(button, {
-			color: this.theme.paint.card.color,
-			shadowColor: shadowOf(this.theme.paint.card.color),
-			zIndex: CARD_Z_INDEX,
-			corner: SPACING.sm,
-		});
+		const corner = new Instance("UICorner");
+		corner.CornerRadius = new UDim(0, SPACING.sm);
+		corner.Parent = button;
+
+		// The card's only stroke, and its only rarity indicator. `Border` mode is named because this object is a
+		// `TextButton`: left contextual it would stroke the button's (empty) glyphs rather than its edge.
+		const stroke = new Instance("UIStroke");
+		stroke.Color = tint;
+		stroke.Thickness = CARD_STROKE;
+		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
+		stroke.Parent = button;
+
+		// **The scale is the whole press state now.** `setRaised` was the pressed cue while the card had a plate to cover;
+		// one flat surface has nothing to sink into, so the press is the hover/press `UIScale` every other control in this
+		// tree already has, and it leaves the card's layout box alone so the row cannot shift under the pointer.
+		attachPressFeedback(button);
 
 		// A card is a button, so it clicks like one. Attached here rather than at the call site because the cards are
 		// built in a loop: one call covers every card in every offer, including the nine-card premium set.
@@ -360,7 +432,7 @@ export class PickerController implements OnStart {
 		cardPadding.PaddingBottom = new UDim(0, SPACING.sm);
 		cardPadding.PaddingLeft = new UDim(0, SPACING.sm);
 		cardPadding.PaddingRight = new UDim(0, SPACING.sm);
-		cardPadding.Parent = chrome.face;
+		cardPadding.Parent = button;
 
 		const layout = new Instance("UIListLayout");
 		layout.FillDirection = Enum.FillDirection.Vertical;
@@ -369,13 +441,13 @@ export class PickerController implements OnStart {
 		layout.VerticalAlignment = Enum.VerticalAlignment.Center;
 		layout.SortOrder = Enum.SortOrder.LayoutOrder;
 		layout.Padding = new UDim(0, SPACING.xs);
-		layout.Parent = chrome.face;
+		layout.Parent = button;
 
 		// 1. Name.
-		const nameLabel = this.label(chrome.face, ballName(ballId), "body2", "primary", 1);
+		const nameLabel = this.label(button, ballName(ballId), "body2", "primary", 1);
 		nameLabel.TextWrapped = true;
 
-		// 2. The ball placeholder: a tinted circle, not an invented asset.
+		// 2. The ball placeholder: a tinted circle, not an invented asset, and not in a box of its own.
 		const ball = new Instance("Frame");
 		ball.Name = "Ball";
 		ball.Size = UDim2.fromOffset(CARD_BALL, CARD_BALL);
@@ -383,24 +455,21 @@ export class PickerController implements OnStart {
 		ball.BackgroundTransparency = 0.1;
 		ball.BorderSizePixel = 0;
 		ball.LayoutOrder = 2;
-		ball.Parent = chrome.face;
+		ball.Parent = button;
 
 		const ballCorner = new Instance("UICorner");
 		ballCorner.CornerRadius = new UDim(1, 0);
 		ballCorner.Parent = ball;
 
-		// 3. The description slot: the rarity, because no ball has a power, an effect or any other text to put here.
-		const description = this.label(chrome.face, rarityLabel(rarity), "caption", "secondary", 3);
+		// 3. The description slot: the rarity, because no ball has a power, an effect or any other text to put here. Kept
+		// alongside the stroke rather than replaced by it - a colour alone is not a rarity for a reader who cannot separate
+		// the four, and the caption is the one indicator that survives that.
+		const description = this.label(button, rarityLabel(rarity), "caption", "secondary", 3);
 		description.TextXAlignment = Enum.TextXAlignment.Center;
-
-		// **A ring on its own frame, not a stroke on the face.** A GuiObject honours one `UIStroke` and the newer wins, so a
-		// rarity stroke parented to the face would replace the chunky black outline instead of sitting inside it - the
-		// failure that made every inventory card change colour once (item 118).
-		const ring = addChunkyRing(chrome.face, tint, BORDER);
 
 		button.Activated.Connect(() => this.pick(ballId));
 
-		return { ballId, button, chrome, ring, nameLabel };
+		return { ballId, button, stroke, nameLabel };
 	}
 
 	/** Loading, not empty: before an offer arrives the band says so rather than showing zero cards. */
@@ -416,30 +485,23 @@ export class PickerController implements OnStart {
 	 * By id rather than by card index, because an offer legitimately repeats an id — a player who owns one ball is offered
 	 * that ball three times, and all three cards *are* that choice. A per-card highlight would make the three identical
 	 * cards look like three different balls that happened to share a name.
+	 *
+	 * The stroke's rarity colour is recomputed from `card.ballId` rather than remembered on the card, for the same reason
+	 * the mark is by id: an offer can hold the same ball three times, and a remembered colour is a second copy of
+	 * `rarityOfBall` that a re-offer could leave stale.
 	 */
 	private markChosen(ballId: string | undefined): void {
 		for (const card of this.cards) {
 			const selected = ballId !== undefined && card.ballId === ballId;
 
-			// **Selection is depth, plus one face tint.** The card's plates are children now, so `button.BackgroundColor3`
-			// would paint a surface nothing can see; the face is what changes. And a selected card is drawn *pressed* - the
-			// same cue the rail and the sheet tabs use - so the state reads even for a player who cannot tell two blues
-			// apart.
-			card.chrome.setRaised(!selected);
-			const face = selected ? this.theme.colors.accent : this.theme.paint.card.color;
-			card.chrome.face.BackgroundColor3 = face;
-			// The plate behind follows the face. A neutral shadow under an accent face is the "two different materials"
-			// mistake the style guide's colour section warns about, and `shadowOf` cannot drift out of hue.
-			card.chrome.shadow.BackgroundColor3 = shadowOf(face);
-
-			const ringStroke = card.ring.FindFirstChildOfClass("UIStroke");
-			if (ringStroke !== undefined) {
-				ringStroke.Thickness = selected ? SELECTED_BORDER : BORDER;
-				ringStroke.Color = selected
-					? this.theme.colors.onAccent
-					: this.theme.colors.rarity[rarityOfBall(card.ballId) ?? "common"];
-			}
-
+			// **Selection is one fill, one stroke and one text colour, and nothing else** (item 215). It used to be
+			// `setRaised` plus a shadow that followed the face, because the card had two plates; a single card has neither,
+			// so the whole statement is the four lines below and there is no second place for the state to disagree.
+			card.button.BackgroundColor3 = selected ? this.theme.colors.accent : this.theme.paint.card.color;
+			card.stroke.Color = selected
+				? this.theme.colors.onAccent
+				: this.theme.colors.rarity[rarityOfBall(card.ballId) ?? "common"];
+			card.stroke.Thickness = selected ? CARD_STROKE_SELECTED : CARD_STROKE;
 			card.nameLabel.TextColor3 = selected ? this.theme.colors.onAccent : this.theme.colors.textPrimary;
 		}
 	}

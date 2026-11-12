@@ -76,4 +76,17 @@ describe("splashTargetUserId", () => {
 		// a teardown, the answer is still nobody.
 		expect(splashTargetUserId(owner(1), "teardown")).toBeUndefined();
 	});
+
+	it("tells nobody when the owner has left the game (item 211)", () => {
+		// A disconnect is an elimination for the round's accounting and **not** something to splash: the owner's client is gone, so
+		// a remote fired at them is a `FireClient` into nothing. Same answer as a teardown, for a different reason - hence its own
+		// cause rather than reusing `teardown`, which would also have claimed there was no elimination to report.
+		expect(splashTargetUserId(owner(1), "left-game")).toBeUndefined();
+	});
+
+	it("still splashes a real owner for the two causes that are a player's doing", () => {
+		// The boundary of the change above: `left-belt` and `culled` are unchanged, so this round did not turn the splash off.
+		expect(splashTargetUserId(owner(1), "left-belt")).toBe(1);
+		expect(splashTargetUserId(owner(1), "culled")).toBe(1);
+	});
 });

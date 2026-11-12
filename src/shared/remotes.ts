@@ -259,3 +259,40 @@ export const ROUND_PAYOUT_REMOTE_NAME = "RoundPayout";
  * from the server rather than being re-derived here from the schedule.
  */
 export const REWARD_TOAST_REMOTE_NAME = "RewardToast";
+
+/**
+ * The **reason a round cannot start**, as one global string, or `""` when there is none.
+ *
+ * ## Why a second value and not a fifth `RoundState`
+ *
+ * The whole tree branches on the four phase names - every `if (phase === "Waiting")`, the camera's `ARENA_CAMERA_PHASES`, the
+ * banner's own table. A `Refused` state would make each of them decide what "refused" means for itself, and the ones that were
+ * not edited would silently treat it as "not a phase I know". This stays a *phase* plus a *reason*, which is what it is.
+ *
+ * ## Why not an attribute on the player
+ *
+ * The fact is global: an `Intermission` with one enrolled player is refused for everyone on the server. A per-player attribute
+ * would be one write per player carrying the same string, and a client joining mid-refusal would read `nil` until something
+ * wrote it again.
+ *
+ * `""` rather than `nil` for "no refusal", matching `WINNER_NAME_VALUE_NAME` and `PLAYING_DEADLINE_VALUE_NAME`: a client reading
+ * `""` has an answer, and every reader can test one thing.
+ */
+export const ROUND_REFUSAL_VALUE_NAME = "RoundRefusal";
+
+/**
+ * When the current `Intermission` ends, as `Workspace:GetServerTimeNow()` seconds, or `0` for "not in one".
+ *
+ * **Distinct from `PLAYING_DEADLINE_VALUE_NAME`, which is `Waiting`'s deadline** - the countdown (item 149) and the round song
+ * read it to know when `Playing` begins. The name is historical and means "the deadline that ends in `Playing`". This one ends
+ * in `Waiting`, so sharing the name would have made the two clocks unreadable from each other's values.
+ */
+export const INTERMISSION_DEADLINE_VALUE_NAME = "RoundIntermissionDeadline";
+
+/**
+ * When the current `Playing` phase reaches its time cap (`PLAYING_CAP_SECONDS`, item 209), or `0`.
+ *
+ * The banner's clock reads it. Nothing ends the round from it client-side: the server still owns every transition, and this is a
+ * readout of a deadline that already exists there.
+ */
+export const ROUND_PLAYING_DEADLINE_VALUE_NAME = "RoundPlayingDeadline";

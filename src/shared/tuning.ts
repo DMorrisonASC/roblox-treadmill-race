@@ -385,6 +385,24 @@ export const PICKER_WINDOW_SECONDS = 11;
 export const ENROLLMENT_CUTOFF_SECONDS = 5;
 
 /**
+ * How many **enrolled** players a live server needs before `Intermission` is allowed to become `Waiting`. **The designer's
+ * number, not a Placeholder.**
+ *
+ * ## Why enrolled and not connected
+ *
+ * `enrolledUserIds` is frozen when the enrollment window closes (`ENROLLMENT_CUTOFF_SECONDS` before the phase ends), so a player
+ * who joined after that cutoff is connected and **not** racing this round. Counting connected players would let the round start
+ * with one competitor and one spectator - the same broken round this guard exists to prevent, with a log line claiming the
+ * count was satisfied.
+ *
+ * ## Why Studio is exempt
+ *
+ * A Studio session has one player by definition, and `spawnStudioBots` fills the field for it. Applying this rule there would make
+ * every Studio test sit in `Intermission` forever - the one environment where "wait for a second human" cannot be satisfied.
+ */
+export const MIN_ENROLLED_PLAYERS = 2;
+
+/**
  * **Placeholder.** Seconds for the belt to reach full speed once `Playing` begins.
  *
  * Linear, not eased. A linear ramp means the acceleration is constant and identical for every ball

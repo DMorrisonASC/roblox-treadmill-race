@@ -12,12 +12,14 @@ import { Players } from "@rbxts/services";
  * private constructors: a caller names a layer and gets a correctly configured gui, and has no way to
  * pass a wrong draw order.
  *
- * ## Why there are two HUD functions and no device branch
+ * ## Why the two HUD layers use different insets, and no device branch exists
  *
- * An element that must not leak under the Roblox topbar wants `TopbarSafeInsets`; an element that should
- * sit inside the core UI area wants `CoreUISafeInsets`. **The element chooses, not the device.** An
- * earlier sketch branched on device type, which made the same element sit at two different heights
- * depending on the phone — a difference the designer never asked for and could not see in Studio.
+ * `hudCore` keeps `CoreUISafeInsets`: its tenants are interactive controls that must stay clear of the top bar buttons and
+ * the chat button. `hudTopbar` uses **`DeviceSafeInsets`** - device cutouts only, no core-UI inset - because its tenant is a
+ * full-bleed status strip whose whole job is to span the screen; see `topbarHudGui` for the engine quote that decided it and
+ * for the vertical offset that a `DeviceSafeInsets` gui makes each tenant responsible for. **The element chooses its layer,
+ * not the device.** An earlier sketch branched on device type, which made the same element sit at two different heights
+ * depending on the phone - a difference the designer never asked for and could not see in Studio.
  *
  * ## Why the full-screen gui is a third function and not a third HUD
  *
@@ -179,8 +181,36 @@ export function getScreenGui(layer: UiLayer): ScreenGui {
 	return topbarHudGui();
 }
 
+/**
+ * The topbar HUD layer: **`DeviceSafeInsets`, not `TopbarSafeInsets`** (item 213).
+ *
+ * ## Why this changed, quoted from the engine's own description of the two values
+ *
+ * `TopbarSafeInsets` - *"Top bar safe area insets are added to the `DeviceSafeInsets` area ... **this area's position and size
+ * is dynamic and is limited to the space available within the top bar area itself**, outside of `CoreUISafeInsets`."*
+ *
+ * That is a box **sized to the top bar's own space**, not to the screen. A tenant that centres itself inside it is centred on
+ * that narrow box, which is not the screen's centre - the reported symptom was a banner visibly off-centre, and the size of the
+ * error depends on how much horizontal room the top bar happens to leave on the device.
+ *
+ * `DeviceSafeInsets` - *"Device safe area insets are added to the fullscreen area. The resulting area is guaranteed to not be
+ * occluded by any **device** screen cutouts such as the camera notch, although no inset is added for Roblox core UI elements
+ * like the top bar buttons."* No core-UI inset means the full physical width on desktop and the notch-safe width on a phone,
+ * which is exactly "as wide as the screen allows" and what a full-bleed status strip wants.
+ *
+ * **`CoreUISafeInsets` would not have fixed it.** It is `DeviceSafeInsets` *plus* the core-UI inset, so it is narrower still on a
+ * phone - the top bar buttons and the chat button take their space out of it horizontally too.
+ *
+ * ## What this costs, and why it is affordable
+ *
+ * The layer's top edge is now the physical top of the screen rather than the bottom of the top bar, so **each tenant owns its
+ * own vertical offset**. That is a real cost and worth stating: a tenant that forgets it draws under the topbar. There is
+ * exactly one tenant today - `PhaseBannerController`, which is the element this round exists for and which already reads
+ * `GuiService:GetGuiInset()` for its offset (item 213). A second tenant would need the same three lines, and the alternative -
+ * a gui whose width is decided by the top bar - is what put the banner off-centre.
+ */
 function topbarHudGui(): ScreenGui {
-	return configureGui("hudTopbar", HUD_TOPBAR_GUI_NAME, Enum.ScreenInsets.TopbarSafeInsets, HUD_TOPBAR_DISPLAY_ORDER);
+	return configureGui("hudTopbar", HUD_TOPBAR_GUI_NAME, Enum.ScreenInsets.DeviceSafeInsets, HUD_TOPBAR_DISPLAY_ORDER);
 }
 
 function coreHudGui(): ScreenGui {
