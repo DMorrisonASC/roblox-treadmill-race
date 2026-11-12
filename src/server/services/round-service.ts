@@ -30,6 +30,8 @@ import {
 import { PickerOfferMessage, PickerResult, REROLL_COST_COINS } from "shared/picker";
 import { ECONOMY_ACTION_COOLDOWN_MS } from "shared/economy.config";
 import { payoutAwards, RoundPayoutMessage } from "shared/round-payout";
+import { LeaderboardEntry } from "shared/leaderboard";
+import { distanceFromSpawnEdge } from "shared/position";
 import { powerForBallId } from "shared/powers.config";
 import { lastToucherOf, setHitEffectRemote, setPower, spawnsDecoy } from "server/powers";
 import { TAGS } from "shared/tags";
@@ -41,6 +43,7 @@ import {
 	INTERMISSION_SECONDS,
 	PICKER_WINDOW_SECONDS,
 	POST_GAME_SECONDS,
+	PLAYING_CAP_SECONDS,
 	ROUND_IDLE_WARN_SECONDS,
 	TICK_INTERVAL_SECONDS,
 	WAITING_SECONDS,
@@ -192,6 +195,34 @@ export class RoundService implements OnStart {
 	 * would be a plausible-looking ranking that is not the race's result.
 	 */
 	private eliminatedOwners = new Array<BallOwner>();
+
+	/**
+	 * The **leaderboard rows** for this round's eliminated competitors, at the distance each had when it died (item 208).
+	 *
+	 * ## Why this is a second list and not a widening of `eliminatedOwners`
+	 *
+	 * `eliminatedOwners` is the payout order: `{ userId, displayName }`, in the order bodies died, and `shared/round-payout`
+	 * reads it as exactly that. A leaderboard row needs a *distance* and a *stable key*, which the payout does not, and adding
+	 * them to the payout type would put a display concern into a reward rule - the coupling `shared/round-payout`'s docblock
+	 * argues against.
+	 *
+	 * ## Why the distance has to be captured here
+	 *
+	 * A destroyed body reports its default properties, so a post-destroy read is not "far away", it is **nothing**. Both call
+	 * sites therefore compute this row immediately before `Destroy()`, and the value is frozen from that instant: an
+	 * eliminated body stops moving on the belt at the moment it leaves it, which is precisely what "where they were when it
+	 * happened" means.
+	 *
+	 * ## Why the rank is *not* frozen with it
+	 *
+	 * The client re-derives every place from the merged sort order (see `shared/leaderboard`'s `eliminated` field), so an
+	 * eliminated body's place improves as live bodies fall behind it. A frozen ordinal would keep claiming the place it held
+	 * when it stopped while the board showed other bodies passing it.
+	 */
+	private eliminatedRows = new Array<LeaderboardEntry>();
+
+	/** Serial for `eliminatedRows` keys. See `eliminationRowFor` for why the body's full name is not one. */
+	private nextEliminationKey = 1;
 
 	/** The linear ramp's frame connection. `undefined` whenever the belt is not ramping. */
 	private rampConnection?: RBXScriptConnection;
@@ -1306,7 +1337,7 @@ export class RoundService implements OnStart {
 	 * says how long the round took, and it is read from `frozenElapsed` — the same clock that used to feed
 	 * the cap, which is why removing the cap did not remove the timer.
 	 */
-	private endPlaying(reason: string, winner: BallOwner | undefined): void {
+	private endPlaying(reason: string, winner: BallOwner | undefined, survivors?: ReadonlyArray<BallOwner>): void {
 		if (this.phase !== "Playing") {
 			return;
 		}
@@ -1340,7 +1371,7 @@ export class RoundService implements OnStart {
 		// fast DataStore answered. Arming the timer first makes the phase's duration a constant and the payout a thing that
 		// finishes inside it. The bodies are already frozen and the winner already published, so nothing below can change the
 		// result — it only prices it.
-		this.payOut(winner);
+		this.payOut(winner, survivors);
 	}
 
 	/**
@@ -1363,11 +1394,14 @@ export class RoundService implements OnStart {
 	 * `grantCoins` returns false when there is no profile or the save failed, and it has already warned with the reason. A
 	 * panel counting up coins that were never added would be a second, worse report of the same failure.
 	 */
-	private payOut(winner: BallOwner | undefined): void {
+	private payOut(winner: BallOwner | undefined, survivors?: ReadonlyArray<BallOwner>): void {
 		const awards = payoutAwards({
 			participants: this.roundParticipants,
 			eliminated: this.eliminatedOwners,
 			winner,
+			// **Omitted on a natural end, so that path is unchanged** (item 208). `undefined` and an empty array mean the same
+			// thing to `payoutAwards`; passing it only from the cap keeps the difference visible at the call site.
+			survivors,
 		});
 
 		if (awards.size() === 0) {
@@ -1471,6 +1505,8 @@ export class RoundService implements OnStart {
 		// countdown ran — a round of five would pay nobody.
 		this.roundParticipants = new Array<BallOwner>();
 		this.eliminatedOwners = new Array<BallOwner>();
+		this.eliminatedRows = new Array<LeaderboardEntry>();
+		this.nextEliminationKey = 1;
 
 		// **Every player stops being a competitor when the round's bodies go (item 193).** Written from the `Players` list
 		// rather than by remembering who was spawned, because the two cannot disagree: a player who joined mid-round never had
@@ -1811,7 +1847,7 @@ export class RoundService implements OnStart {
 			// order — `getLiveBalls` is walked once per tick and bodies leave it permanently — so the order these pushes
 			// happen in *is* the result the payout is derived from. Recorded before the destroy, while the owner value is
 			// still meaningful.
-			this.recordElimination(owner);
+			this.recordElimination(owner, ball);
 
 			this.forgetBall(ball);
 			ball.Destroy();
@@ -1904,28 +1940,23 @@ export class RoundService implements OnStart {
 	 * second. That is the requested rule; the alternative that keeps a solo race alive is a finish-line signal this tree
 	 * does not have, not a guard on this check.
 	 *
+	 * ## The time limit is back, and for a different reason (item 208)
+	 *
+	 * A third branch used to end the round when a `PLAYING_CAP_SECONDS` cap expired, awarding the win to whoever was furthest
+	 * along. It was deleted because its only observed effect was to fire before an elimination that was about to happen and
+	 * name a winner whose ranking contradicted the race in progress. **It is now reinstated at 120 seconds, and that objection
+	 * is answered rather than ignored** - see `checkTimeCap`, which takes its winner from `distanceFromSpawnEdge`, the same
+	 * function the leaderboard ranks with, so the body named is the body the HUD already showed at rank 1.
+	 *
+	 * **The consequence item 37 named is still real:** a competitor wedged at the belt's edge, moving backwards, or parked
+	 * against a wall now keeps the round alive only until the cap, and the cap then decides a race that had no result of its
+	 * own. `ROUND_IDLE_WARN_SECONDS` still says so in the log at 60 seconds; the cap is what stops the wait being unbounded.
+	 *
 	 * ## Why the count and not the branch decides the log
 	 *
 	 * Both lines carry `live=`, so a log reader can tell a genuine wipe-out from a last-standing result without knowing
 	 * which branch this function took — and a future third branch cannot accidentally reuse a reason string that no longer
 	 * describes it.
-	 *
-	 * ## There is no time limit, and that is deliberate
-	 *
-	 * A third branch used to end the round when a `PLAYING_CAP_SECONDS` cap expired, awarding the win to
-	 * whoever was furthest along. **It is deleted.** Its only observed effect in the logs was to fire
-	 * before an elimination that was about to happen and name a winner while the actual leader was still
-	 * travelling — a result nobody could act on. `Playing` can now run forever.
-	 *
-	 * **The accepted consequence, named because it will happen:** a competitor that never crosses the
-	 * `EliminationZone` — wedged at the belt's edge, moving backwards, or parked against a wall — keeps
-	 * the round alive indefinitely. That is a manual-intervention case in Studio, not a bug to be papered
-	 * over here. `ROUND_IDLE_WARN_SECONDS` exists to make it visible in the log rather than as a round
-	 * that silently does nothing; it does not end anything.
-	 *
-	 * `elapsed` is no longer a parameter: it existed only for the cap comparison. The round's duration is
-	 * still recorded — `endPlaying` reads the frozen clock — so removing it from this signature loses
-	 * nothing.
 	 */
 	private checkEndCondition(): boolean {
 		const live = this.getCompetitors();
@@ -1944,7 +1975,7 @@ export class RoundService implements OnStart {
 		const outcome = decideRoundOutcome(owners);
 
 		if (outcome.kind === "continue") {
-			return false;
+			return this.checkTimeCap(live);
 		}
 
 		if (outcome.kind === "no-survivors") {
@@ -1960,6 +1991,88 @@ export class RoundService implements OnStart {
 			userId: outcome.winner.userId,
 			displayName: outcome.winner.displayName,
 		});
+		return true;
+	}
+
+	/**
+	 * The **third** end condition: `Playing` has run for `PLAYING_CAP_SECONDS` with more than one competitor alive (item 208).
+	 *
+	 * ## Why this fires only after `decideRoundOutcome` said "continue"
+	 *
+	 * "Last standing" and "no survivors" are real results and they must win every race against a clock: a round that resolves
+	 * itself at 119.9 seconds is a decisive round, and a cap that fired on the same tick would throw away the result it was
+	 * about to produce. Reaching this method already means the round had no winner of its own.
+	 *
+	 * ## Why the winner is rank 1 rather than anything else
+	 *
+	 * `distanceFromSpawnEdge` is the same function `LeaderboardService` ranks by, so the body named here is the body the HUD
+	 * has been showing at rank 1 for the last two minutes. That is the whole difference from the cap item 37 deleted: the old
+	 * one invented a ranking, this one reads the ranking that is already on screen.
+	 *
+	 * `math.huge` as the seed rather than `0`: the smallest distance wins, and a seed of `0` would be a claim that some body
+	 * is at the spawn edge when none is.
+	 */
+	private checkTimeCap(live: ReadonlyArray<BasePart>): boolean {
+		const elapsed = os.clock() - this.runningStartedAt;
+		if (elapsed < PLAYING_CAP_SECONDS) {
+			return false;
+		}
+
+		const frame = this.treadmill.getBeltFrame();
+		const length = this.treadmill.getBeltLength();
+		if (frame === undefined || length <= 0) {
+			// No belt, no ranking. Ending here would name a winner from nothing, which is the specific failure item 37
+			// recorded - so the cap declines and the idle warning keeps saying the round is going nowhere.
+			return false;
+		}
+
+		let leader: BasePart | undefined;
+		let leaderDistance = math.huge;
+		let leaderOwner: BallOwner | undefined;
+		// **Every other survivor, with its distance** (item 208). A capped round's result is a *ranking*, not just a winner,
+		// and the ranking has to be captured here - the bodies are destroyed moments later and `payOut` runs from the record.
+		const others = new Array<{ owner: BallOwner; distance: number }>();
+
+		for (const body of live) {
+			const owner = readOwner(body);
+			if (owner === undefined) {
+				continue;
+			}
+
+			const distance = distanceFromSpawnEdge(frame, length, body.Position);
+			if (distance < leaderDistance) {
+				// The previous leader becomes an ordinary survivor; the new one takes the top slot.
+				if (leaderOwner !== undefined) {
+					others.push({ owner: leaderOwner, distance: leaderDistance });
+				}
+
+				leaderDistance = distance;
+				leader = body;
+				leaderOwner = owner;
+				continue;
+			}
+
+			others.push({ owner, distance });
+		}
+
+		if (leader === undefined || leaderOwner === undefined) {
+			return false;
+		}
+
+		// Places 2..N, best distance first, so a capped round pays by position rather than by "who fell last" - which is the
+		// only ordering an elimination-based ranking has, and the wrong one for a race the clock stopped.
+		others.sort((a, b) => a.distance < b.distance);
+		const survivorOrder = new Array<BallOwner>();
+		for (const entry of others) {
+			survivorOrder.push(entry.owner);
+		}
+
+		this.endPlaying(
+			`time cap, live=${live.size()}: ${leader.GetFullName()} at ${formatSeconds(elapsed)} (distance=${tostring(math.round(leaderDistance * 10) / 10)})`,
+			{ userId: leaderOwner.userId, displayName: leaderOwner.displayName },
+			survivorOrder,
+		);
+
 		return true;
 	}
 
@@ -2119,7 +2232,7 @@ export class RoundService implements OnStart {
 		// A culled body is an eliminated competitor, so it takes its place in the payout order here too: `KillY` and the
 		// `MaxLiveBalls` cap are removal paths the round does not control, and a player whose body fell out of the world
 		// still finished where it finished. Teardown never reaches this line — `clearAllBodies` forgets first.
-		this.recordElimination(owner);
+		this.recordElimination(owner, ball);
 
 		this.forgetBall(ball);
 
@@ -2141,15 +2254,130 @@ export class RoundService implements OnStart {
 	}
 
 	/**
-	 * Appends one competitor to the payout order.
+	 * Appends one competitor to the payout order **and** to the leaderboard's eliminated rows.
 	 *
 	 * `undefined` for an orphan: an ownerless body (a decoy twin) can leave the belt, and it is nobody's placement. The
 	 * record is only ever appended to — the order is the result, so nothing may reorder or remove an entry.
+	 *
+	 * **`ball` is read here, before the caller destroys it** (item 208). Its position is the only place the eliminated row's
+	 * distance can come from, and a destroyed body has none. The two call sites (`settleEliminations`,
+	 * `handleExternalDestruction`) both still hold the instance at this point and both destroy it a line or two later.
 	 */
-	private recordElimination(owner: BallOwner | undefined): void {
+	private recordElimination(owner: BallOwner | undefined, ball: BasePart): void {
 		if (owner !== undefined) {
 			this.eliminatedOwners.push(owner);
 		}
+
+		const row = this.eliminationRowFor(owner, ball);
+		if (row !== undefined) {
+			this.eliminatedRows.push(row);
+		}
+
+		// **The player stops competing here** (item 208). Both removal paths (`settleEliminations` and
+		// `handleExternalDestruction`) call `recordElimination`, so hanging the write off it is what makes "eliminated" and
+		// "no longer competing" the same event by construction rather than by two call sites remembering to agree.
+		this.clearCompeting(owner);
+	}
+
+	/**
+	 * Clears a player's `Competing` flag the moment their competitor leaves the round (item 208).
+	 *
+	 * ## Why this is the bug behind "players can walk around when spectating"
+	 *
+	 * `Competing` used to be written in exactly two places, `spawnRoundCompetitors` (`true`) and `clearAllBodies` (`false`).
+	 * A player whose ball was eliminated mid-round therefore stayed **`Competing = true` for the rest of the race** - which
+	 * meant `spectateAvailable(phase, competing)` said the spectate button was not for them, `cameraWantsArena` kept the arena
+	 * camera engaged, and nothing stopped their character walking around the lobby. They were not spectating by the tree's own
+	 * model; the tree still thought they were racing.
+	 *
+	 * Writing it at the elimination makes every one of those follow from one fact. `clearAllBodies` still writes `false` at
+	 * the end of the round, but it is now the backstop rather than the only writer.
+	 *
+	 * ## Why the owner is filtered again
+	 *
+	 * The same `userId > 0` test the payout makes: synthetic `Debug#N` owners are negative and have no `Player`, and a twin
+	 * has no owner at all. `notifyEliminated` filters through `splashTargetUserId` for its own reasons; this is a different
+	 * question ("is there a player attribute to clear") and it is asked here rather than reused.
+	 */
+	private clearCompeting(owner: BallOwner | undefined): void {
+		if (owner === undefined || owner.userId <= 0) {
+			return;
+		}
+
+		const player = Players.GetPlayerByUserId(owner.userId);
+		if (player === undefined) {
+			return;
+		}
+
+		if (player.GetAttribute(PLAYER_COMPETING_ATTRIBUTE) !== false) {
+			player.SetAttribute(PLAYER_COMPETING_ATTRIBUTE, false);
+			print(`[Round] eliminated player=${owner.displayName} owner=${tostring(owner.userId)} competing=false`);
+		}
+	}
+
+	/**
+	 * The leaderboard row for a body that is about to be destroyed, or `undefined` when it cannot be measured.
+	 *
+	 * `undefined` for a **decoy twin**, which has no owner identity and is deliberately not a competitor: the board shows
+	 * every body on the belt, but an eliminated twin is not somebody's result, and a row named `Decoy 12` struck through
+	 * would publish the fake the whole power exists to hide.
+	 *
+	 * `undefined` too when no belt is bound - without one there is no origin to measure from, and a guessed `0` would sort an
+	 * eliminated body to the top of the board as if it had never moved.
+	 */
+	private eliminationRowFor(owner: BallOwner | undefined, ball: BasePart): LeaderboardEntry | undefined {
+		// `owner === undefined` only: a **synthetic** `Debug#N` owner gets a row, because the live pass gives it one too. A
+		// `decoy` twin has no owner at all and is excluded, which is also what the live pass does not do - see the note in
+		// `getEliminationsThisRound` for that asymmetry.
+		if (owner === undefined) {
+			return undefined;
+		}
+
+		const frame = this.treadmill.getBeltFrame();
+		const length = this.treadmill.getBeltLength();
+		if (frame === undefined || length <= 0) {
+			return undefined;
+		}
+
+		// **A serial key, not the body's full name (item 209).** `GetFullName()` looked unique and is not: every spawned body is
+		// `Workspace.SpawnedBalls.Ball`, so five eliminated competitors produced five rows sharing ONE key - which the
+		// leaderboard's `byKey` map collapsed into a single row, and the client's row map did the same. That is what made an
+		// eliminated body appear to hold a rank it had not earned: the surviving row carried whichever distance won the insert.
+		//
+		// The live pass uses `LeaderboardService.keyFor` (`B1`, `B2`, ...) for the same reason. `RoundService` cannot call it -
+		// it would be the dependency cycle this round's other half exists to avoid - so eliminated rows get their own namespace.
+		const key = `E${this.nextEliminationKey}`;
+		this.nextEliminationKey++;
+
+		return {
+			key,
+			userId: owner.userId,
+			name: owner.displayName,
+			distance: distanceFromSpawnEdge(frame, length, ball.Position),
+			eliminated: true,
+		};
+	}
+
+	/**
+	 * This round's eliminated competitors, as leaderboard rows, best distance first.
+	 *
+	 * `LeaderboardService` merges these into its own list; nothing here sorts them, because the merged sort is what decides
+	 * both the order and every rank. Read-only and defensive-copied: the caller must not be able to reorder the record.
+	 */
+	public getEliminationsThisRound(): ReadonlyArray<LeaderboardEntry> {
+		// **Reversed, so the most recently eliminated comes first - the "stack" order (item 209).** `eliminatedRows` is appended
+		// chronologically, and the board reads eliminated bodies as a stack with the newest on top: the body that just fell is the
+		// one a player is looking for, and the body that fell two minutes ago is history.
+		const rows = new Array<LeaderboardEntry>();
+		const lastIndex = this.eliminatedRows.size() - 1;
+		for (let index = lastIndex; index >= 0; index--) {
+			const row = this.eliminatedRows[index];
+			if (row !== undefined) {
+				rows.push(row);
+			}
+		}
+
+		return rows;
 	}
 
 	/**

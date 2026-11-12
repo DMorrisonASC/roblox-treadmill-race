@@ -24,7 +24,7 @@
  *
  * ## The exchange rate the magnitudes are chosen against
  *
- * `BALL_SPEED` decays at `BALL_SPEED_DECAY_RATE` = 0.1 per second, so **one point of `BALL_SPEED` is about 10 seconds of
+ * `BALL_SPEED` decays at `BALL_SPEED_DECAY_RATE` = 2 per second, so **one point of `BALL_SPEED` is about half a second of
  * ride**. Transfer magnitudes below are reported against that: "steals 1.0" means "steals giving up ten seconds"; pop
  * chances are probabilities, not ride-time values.
  *
@@ -40,7 +40,9 @@
  * > Balance is the designer's to tune. The agent reports magnitudes; it does not cap them.
  *
  * Nothing in this file enforces any of that. `BALL_SPEED_MAX` in `tuning.ts` is a safety net against unbounded
- * accumulation, not a balance guard: it sits above every value a power is designed to reach.
+ * accumulation, not a balance guard. It does **not** sit above every value a power asks for: `ROCKET_TARGET_SPEED` is
+ * `130` against a maximum of `100`, so a rocket snap is clamped to `100` (item 204). That is the clamp working, not a
+ * bug - but a reader tuning a power needs to know the ceiling is live.
  *
  * Every number here is **Placeholder.** — the shape is the point, the numbers are not.
  */
@@ -235,37 +237,49 @@ export const ECLIPSE_WINDOW_SECONDS = 4;
 // #region rocket / sprinter / recycle — the two that raise a speed, and the one that keeps a pad in play
 
 /**
- * **Placeholder.** The `BALL_SPEED` a `rocket` ball snaps to when its timer fires, in studs/second.
+ * **Placeholder.** The `BALL_SPEED` a `rocket` ball snaps to when its trigger fires, in studs/second.
  *
- * Above `BOOST_TARGET_BALL_SPEED` (12) and below `BALL_SPEED_MAX` (20). At 18 against a belt at 10, `RELATIVE_SPEED` is
- * +8, the fastest forward drift any power produces — roughly 27 seconds of ride bought in one frame. It is a *snap*, not
- * an addition: a delta would depend on what the ball happened to be at, so two rocket balls would get different boosts,
- * and the whole point of a once-per-round event is that its value is known.
+ * It is a *snap*, not an addition: a delta would depend on what the ball happened to be at, so two rocket balls would get
+ * different boosts, and the whole point of a once-per-round event is that its value is known.
+ *
+ * **This docblock used to say "above `BOOST_TARGET_BALL_SPEED` (12) and below `BALL_SPEED_MAX` (20). At 18 ...".** Every
+ * number in that sentence is now wrong: `BOOST_TARGET_BALL_SPEED` is `80`, so this is `130`, and `BALL_SPEED_MAX` is
+ * `100`. **The snap is therefore clamped** - `stepBallSpeeds` applies `math.clamp(..., BALL_SPEED_MIN, BALL_SPEED_MAX)`
+ * after every contributor has spoken, which is the rule this file's header promises for deltas. A rocket ball reaches
+ * `100`, not `130`; the surplus is discarded and cannot accumulate. Corrected in item 204; the value is the designer's and
+ * is **not** retuned here.
  */
-export const ROCKET_TARGET_SPEED = 18;
+export const ROCKET_TARGET_SPEED = BOOST_TARGET_BALL_SPEED + 50;
 
 /**
- * **Placeholder.** The earliest second after `Playing` entry at which a `rocket` may fire.
+ * **Placeholder.** How far along the belt a `rocket` fires, as a fraction of the belt's length measured from the spawn
+ * edge.
  *
- * Three seconds, so the snap is not the first thing that happens in a round — a boost at `t = 0` is indistinguishable
- * from a bigger starting speed and teaches the viewer nothing.
- */
-export const ROCKET_MIN_DELAY = 3;
-
-/**
- * **Placeholder.** The latest second after `Playing` entry at which a `rocket` may fire.
+ * `0.8` - four fifths of the way down the belt. The trigger used to be a random moment in `[3, 10]` seconds, which made two
+ * rocket balls fire at different *times* and therefore at different *places*: one snapped in the middle of the field, one at
+ * the edge, and neither event was legible as a position. Keyed on position instead, the snap happens where a viewer can see
+ * it - a ball visibly closing on the exit and then shooting away from it - and two rockets fire at the same place, which is
+ * the observable a `Playing` round actually has.
  *
- * Ten seconds, drawn uniformly against `ROCKET_MIN_DELAY`. The spread is the design: two rocket balls in one round fire
- * at different moments, so the power reads as a random event rather than as a fixed schedule.
+ * ## Why a fraction of the length and not a distance
+ *
+ * The belt is a scene part and its length is a scene fact: `333` studs today, and nothing in `tuning.ts` owns that number.
+ * A stud threshold would silently mean a different fraction the first time the belt was resized in Studio, and the bug
+ * would read as "the rocket fires at the wrong time" rather than as "the belt moved".
  */
-export const ROCKET_MAX_DELAY = 10;
+export const ROCKET_TRIGGER_PROGRESS = 0.8;
 
 /**
  * **Placeholder.** The `BALL_SPEED` a `sprinter` ball's pickup sets, in studs/second.
  *
- * Above `BOOST_TARGET_BALL_SPEED` (12) by four points, which is about 13 seconds of extra ride per pickup, and below
- * `ROCKET_TARGET_SPEED` (18) so the two are not the same event. This is the *event* kind: the sprinter has no power of
- * its own, it has a better response to something already in the world.
+ * `BOOST_TARGET_BALL_SPEED + 20` = `100` today, which **equals `BALL_SPEED_MAX`**: the sprinter is the fastest a body can
+ * legally be, and the clamp is exactly the value it asks for rather than a lower ceiling. It is also the body that wears
+ * the afterimage, because it is the only power that spends the round above `BELT_SPEED` - see
+ * `SPRINTER_AFTERIMAGE_ATTRIBUTE`.
+ *
+ * **This docblock used to say "above `BOOST_TARGET_BALL_SPEED` (12) by four points ... below `ROCKET_TARGET_SPEED` (18)".**
+ * The arithmetic has been retuned twice since; the *ordering* it describes is still the design intent and still not true of
+ * the numbers (`ROCKET_TARGET_SPEED` is `130` before the clamp). Corrected in item 204.
  */
 export const SPRINTER_BOOST_SPEED = BOOST_TARGET_BALL_SPEED + 20;
 
@@ -367,7 +381,7 @@ export const POWERS: ReadonlyArray<PowerDefinition> = [
 		ballId: "ghost_ball",
 		powerId: "ghost",
 		kind: "world",
-		effect: "cannot collide with other balls; walls still collide",
+		effect: "intangible for 10 s of every 25 s cycle; solid and colliding for the other 15; walls always collide",
 	},
 	{
 		ballId: "heavy_ball",
@@ -391,7 +405,7 @@ export const POWERS: ReadonlyArray<PowerDefinition> = [
 		ballId: "rocket_ball",
 		powerId: "rocket",
 		kind: "timed",
-		effect: "once per round, at a random moment, BALL_SPEED snaps to ROCKET_TARGET_SPEED",
+		effect: "once per round, 80% of the way down the belt, BALL_SPEED snaps to ROCKET_TARGET_SPEED",
 	},
 	{
 		ballId: "recycle_ball",
@@ -409,7 +423,7 @@ export const POWERS: ReadonlyArray<PowerDefinition> = [
 		ballId: "sprinter_ball",
 		powerId: "sprinter",
 		kind: "event",
-		effect: "a pickup boosts it further than the standard value",
+		effect: "a pickup boosts it further than the standard value, and it wears an afterimage while boosted",
 	},
 ];
 

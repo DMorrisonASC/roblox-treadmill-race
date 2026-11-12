@@ -45,6 +45,19 @@ export interface LeaderboardEntry {
 	 * `leaderboard-service` for the long form; the short form is that this number measures ground *lost*, not ground gained.
 	 */
 	readonly distance: number;
+	/**
+	 * Whether this row's body has left the round, and the row is a **record** rather than a position.
+	 *
+	 * A thrown, eliminated competitor's row stays on the board with its `distance` frozen at the moment it died. The client
+	 * draws it struck through and in the error colour, which is the only thing that distinguishes "still racing, far back"
+	 * from "out of the race - and here is where they stopped".
+	 *
+	 * **The rank is not frozen with it.** Rank comes from the merged sort order, so an eliminated body's place *improves* as
+	 * live bodies fall behind it: "you were 5th when you died, you finished 3rd because two others were worse" is what a race
+	 * result means, and a frozen ordinal would claim a body placed where it was when it stopped moving while the board
+	 * continued to show everybody else passing it.
+	 */
+	readonly eliminated: boolean;
 }
 
 /*

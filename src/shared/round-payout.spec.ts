@@ -172,4 +172,57 @@ describe("payoutAwards", () => {
 	it("pays nobody when nobody raced", () => {
 		expect(payoutAwards(race([], [], undefined)).size()).toBe(0);
 	});
+
+	it("ranks a capped round's survivors between the winner and the fallen (item 208)", () => {
+		// **The case the cap creates and elimination-only ranking cannot express.** Two survivors were still racing when the
+		// clock ran out, so neither fell and the derived order knows nothing about them: without `survivors` both would be
+		// `placement = 0` (base only) while an already-eliminated body collected second place - the opposite of "rewarded by
+		// position". Read best-first, so `second` is ahead of `third`.
+		const first = owner(1, "first");
+		const second = owner(2, "second");
+		const third = owner(3, "third");
+		const fallen = owner(4, "fallen");
+
+		const capped = payoutAwards({
+			participants: [first, second, third, fallen],
+			eliminated: [fallen],
+			winner: first,
+			survivors: [second, third],
+		});
+		const places = byUser(capped);
+
+		expect(places.get(1)?.placement).toBe(1);
+		expect(places.get(2)?.placement).toBe(2);
+		expect(places.get(3)?.placement).toBe(3);
+		// The body that actually left the belt is behind every survivor, however long ago it fell.
+		expect(places.get(4)?.placement).toBe(4);
+	});
+
+	it("changes nothing on a natural end when survivors is absent", () => {
+		// The additive guarantee: an elimination-ended round passes no `survivors`, and the ranking there is
+		// `winner ++ reversed(eliminated)` - untouched by the cap's new field.
+		const winner = owner(1, "winner");
+		const firstOut = owner(2, "first out");
+		const lastOut = owner(3, "last out");
+		const natural = payoutAwards(race([winner, firstOut, lastOut], [firstOut, lastOut], winner));
+		const places = byUser(natural);
+
+		expect(places.get(1)?.placement).toBe(1);
+		// Last eliminated takes second; first eliminated takes third.
+		expect(places.get(3)?.placement).toBe(2);
+		expect(places.get(2)?.placement).toBe(3);
+	});
+
+	it("does not double-count a winner listed in survivors", () => {
+		// `RoundService` builds the survivor list without the winner, but the rule must not depend on that: a caller that
+		// included it would otherwise push the winner twice and shift every place below it.
+		const first = owner(1, "first");
+		const second = owner(2, "second");
+		const awards = byUser(
+			payoutAwards({ participants: [first, second], eliminated: [], winner: first, survivors: [first, second] }),
+		);
+
+		expect(awards.get(1)?.placement).toBe(1);
+		expect(awards.get(2)?.placement).toBe(2);
+	});
 });

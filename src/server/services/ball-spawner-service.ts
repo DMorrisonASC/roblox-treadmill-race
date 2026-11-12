@@ -18,11 +18,17 @@ import {
 	CHOSEN_BALL_ID_ATTRIBUTE,
 	SPAWNER_KILL_Y_ATTRIBUTE,
 	SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE,
+	POWER_ATTRIBUTE,
+	SPRINTER_AFTERIMAGE_ATTRIBUTE,
+	GHOST_ACTIVE_ATTRIBUTE,
 } from "shared/attributes";
 import { powerForBallId } from "shared/powers.config";
 import {
+	BALL_GROUP,
+	collisionGroupFor,
 	DECOY_OFFSET_STUDS,
 	forgetBall as forgetBallPower,
+	GHOST_GROUP,
 	onRoundActive,
 	presentPower,
 	setPower,
@@ -30,6 +36,7 @@ import {
 	spawnsDecoy,
 	tickDelta,
 } from "server/powers";
+import { ghostActiveAt, GHOST_CYCLE_ENABLED } from "shared/config/ghost.config";
 
 import {
 	pickPoolEntry,
@@ -620,7 +627,20 @@ export class BallSpawnerService implements OnStart {
 		// rewrite the same value twice. It is gated on `roundActive` ? the flag `RoundService` sets at
 		// `Playing` entry and clears on the way out ? so `Waiting`, `PostGame` and `Intermission` cost one
 		// boolean test per frame and no writes at all.
-		RunService.Heartbeat.Connect((dt) => this.stepBallSpeeds(dt));
+		RunService.Heartbeat.Connect((dt) => {
+			this.stepBallSpeeds(dt);
+			// **The ghost cycle rides the same connection** (item 204): same rate, same body list, and one place to read the
+			// phase from. It returns immediately outside `Playing` (`playingStartedAt` is cleared with the round).
+			this.stepGhostCycle();
+		});
+
+		// **Both ends of the two effect wires, named once (item 207).** A writer that sets `"Boosted"` and a reader that
+		// subscribes to `"Boosted"` are one constant away from disagreeing, and when they do the effect is silent in exactly
+		// the way a broken condition is silent. Both strings come from the constants rather than being hard-coded, so this
+		// line reports what the code actually uses rather than what someone believed it used.
+		print(
+			`[Spawner] attributes boosted="${BOOSTED_ATTRIBUTE}" tailWind="${TAIL_WIND_ATTRIBUTE}" tailWindMinSpeed=${formatNumber(TAIL_WIND_MIN_BALL_SPEED)} boostHysteresis=${formatNumber(BOOST_HYSTERESIS)}`,
+		);
 
 		// TEMPORARY INSTRUMENTATION. Separate from the cleanup loop because observation must run at
 		// `BALL_OBSERVE_SECONDS`, not at cleanup's 0.5 s — see the constant's comment. Read-only, so
@@ -721,6 +741,16 @@ export class BallSpawnerService implements OnStart {
 		this.holdReported = false;
 		this.heldThisPhase = 0;
 
+		// **The ghost cycle's phase origin (item 204).** Stamped on the way in, cleared on the way out, and the cycle itself
+		// starts from `0` on the next `Playing` so the first window is always the intangible one - the state a player sees at
+		// the green light is the state the power promises.
+		if (active) {
+			this.playingStartedAt = os.clock();
+		} else {
+			this.playingStartedAt = undefined;
+			this.resetGhostCycle();
+		}
+
 		// **Pending twins do not survive a phase change (item 183).** A twin scheduled by a round that has ended would
 		// otherwise be born into `PostGame` or `Intermission` — a fake body in a cleared arena, which is the leftover this
 		// tree keeps removing. Dropping them here is the same rule `clearAllBodies` applies to real bodies: the round's
@@ -803,6 +833,9 @@ export class BallSpawnerService implements OnStart {
 				ball.SetAttribute(BALL_SPEED_ATTRIBUTE, BALL_SPEED_MIN);
 				const settledBoosted = this.writeBoosted(ball, BALL_SPEED_MIN, referenceBeltSpeed);
 				this.writeTailWind(ball, BALL_SPEED_MIN - referenceBeltSpeed, BALL_SPEED_MIN, settledBoosted);
+				// The same question once more for the afterimage: `Boosted` has just gone false, so the trail must go with it
+				// rather than outliving the state it reports (`PostGame` on a sprinter would otherwise keep its ghost copy).
+				this.writeSprinterAfterimage(ball, settledBoosted);
 			}
 		}
 	}
@@ -1820,6 +1853,9 @@ export class BallSpawnerService implements OnStart {
 		const right = this.treadmill.getBeltRightVector();
 		// Read once for the whole loop: it is the frame every ball's `localZ` is measured in.
 		const beltFrame = this.treadmill.getBeltFrame();
+		// Hoisted with the frame: the rocket's trigger is a fraction of the belt's length (item 204), and re-reading it per
+		// ball would walk the bound-surface list fifty times a tick for a number that cannot change inside one tick.
+		const beltLength = this.treadmill.getBeltLength();
 		// Angular rate of the sway, **per ball** since item 153: `2 * pi * SWAY_FREQUENCY_HZ * that ball's multiplier`,
 		// drawn at spawn and carried in `lateral`. It used to be one constant hoisted out here, which is exactly the bug -
 		// one period for the field means the phase offsets never drift, so a well-drawn field still reads as synchronised.
@@ -1839,7 +1875,17 @@ export class BallSpawnerService implements OnStart {
 			// signed delta — a rocket's snap, an eclipse or magnet victim's extra decay — and the clamp is applied here so
 			// that every contributor's arithmetic lands inside the model's range exactly once. A power that clamped its own
 			// delta would disagree with one that did not.
-			const delta = tickDelta(ball, { dt, roundActive: true });
+			// **The one frame of belt-local position the rocket's trigger needs (item 204).** Read here rather than inside the
+			// sway below, because `tickDelta` runs first and the trigger is a *position* now: the loop is already the only place
+			// that knows the belt frame, so this is one component of a transform already being taken for the sway - not a second
+			// lookup, and there is no clock to compare against any more.
+			const beltOffset = beltFrame === undefined ? undefined : beltFrame.PointToObjectSpace(ball.Position);
+			const delta = tickDelta(ball, {
+				dt,
+				roundActive: true,
+				alongPosition: beltOffset === undefined ? 0 : beltOffset.X,
+				beltLength,
+			});
 			// `advanced`, not `next`: `next` is a Lua global and roblox-ts rejects the identifier outright — the same
 			// reason the line above calls its intermediate `decayed`.
 			const advanced = math.clamp(decayed + delta, BALL_SPEED_MIN, BALL_SPEED_MAX);
@@ -1852,6 +1898,10 @@ export class BallSpawnerService implements OnStart {
 			// attributes in one frame can never see them both true, because the earlier write is the later write's input.
 			const boosted = this.writeBoosted(ball, advanced, beltSpeed);
 			this.writeTailWind(ball, relative, advanced, boosted);
+			// **Third, and fed both of the above** (item 204). The afterimage needs `Boosted` (the state it draws) *and* the
+			// body's power (which boosted bodies earn it), so it can only be settled after `Boosted` exists for this tick and
+			// in the one place that knows the power without a second module reading the attribute.
+			this.writeSprinterAfterimage(ball, boosted);
 			const velocity = ball.AssemblyLinearVelocity;
 			const along = velocity.Dot(right);
 
@@ -2009,6 +2059,14 @@ export class BallSpawnerService implements OnStart {
 
 		if (settled !== current && settled !== undefined) {
 			ball.SetAttribute(BOOSTED_ATTRIBUTE, settled);
+			// **The transition, on the wire (item 207).** `[WindBoost]` has never printed anything after its mount line, so
+			// "the effect mounts and never fires" could not be told apart from "the server never wrote the attribute" - and
+			// for a whole session the second was assumed without evidence. This is the line that separates them, and it is
+			// printed unconditionally rather than behind a debug flag because a body flips `Boosted` a handful of times a
+			// ride: the rate is dozens per round, not thousands.
+			print(
+				`[Spawner] boosted ${ball.GetFullName()} = ${tostring(settled)} (speed=${formatNumber(speed)} belt=${formatNumber(beltSpeed)} relative=${formatNumber(speed - beltSpeed)})`,
+			);
 		}
 
 		return settled;
@@ -2057,6 +2115,161 @@ export class BallSpawnerService implements OnStart {
 
 		if (wanted !== current) {
 			ball.SetAttribute(TAIL_WIND_ATTRIBUTE, wanted);
+			// **The transition, on the wire (item 207).** Same argument as the `[Spawner] boosted` line above: `[TailWind]`
+			// printed only its mount line, so a key that never fired was indistinguishable from a key the server never wrote.
+			// `boosted` is printed from the **parameter**, not from a second attribute read, so the line shows the exact input
+			// this decision was made from - if the two ever disagree, that is the bug and it is visible here.
+			print(
+				`[Spawner] tailWind ${ball.GetFullName()} = ${tostring(wanted)} (speed=${formatNumber(speed)} belt=${formatNumber(speed - relative)} relative=${formatNumber(relative)} boosted=${tostring(boosted)} minSpeed=${formatNumber(TAIL_WIND_MIN_BALL_SPEED)})`,
+			);
+		}
+	}
+
+	/**
+	 * Settles a ball's `SprinterAfterimage` attribute: `true` only for a `sprinter` body that is currently `Boosted`.
+	 *
+	 * ## Why the power is read here and not passed in
+	 *
+	 * The caller is the tick loop, which has the speed and not the power. `POWER_ATTRIBUTE` is written once per body by
+	 * `presentPower` at spawn, so this is one attribute read per ball per tick - the same order as the `BALL_SPEED` read the
+	 * loop already makes, and cheaper than threading a power parameter through a function whose other three inputs came from
+	 * arithmetic it had already done.
+	 *
+	 * ## Why it is written for every body, including `false`
+	 *
+	 * The alternative - write only when the condition is true - leaves the attribute at its last `true` on a body whose power
+	 * or speed changed, and a stale effect is a picture that disagrees with the simulation. A `sprinter` that loses its power
+	 * (a re-pick in `Waiting`, a debug spawn) or decays below `BOOST_HYSTERESIS` must lose the trail on the same tick.
+	 *
+	 * ## Why `boosted` is a parameter rather than re-derived
+	 *
+	 * Same reason `writeTailWind` takes it: `writeBoosted` has just settled the value with its hysteresis, and a second
+	 * derivation here would be a second copy of the rule - the copy that drifts. `undefined` (a body that has not ticked)
+	 * counts as not boosted, which is what the attribute would read anyway.
+	 *
+	 * ## Why the window is as long as `Boosted` and not a timer of its own
+	 *
+	 * `BALL_SPEED_DECAY_RATE` is slow enough that a sprinter stays above `BELT_SPEED - BOOST_HYSTERESIS` for the rest of the
+	 * round, so the afterimage does too. **That is the mechanic.** A shorter duration here would be a second, invisible rule
+	 * about when a ball is "still sprinting", and it would disagree with `windBoost`'s own threshold on the same body.
+	 */
+	private writeSprinterAfterimage(ball: BasePart, boosted: boolean | undefined): void {
+		const rawPower = ball.GetAttribute(POWER_ATTRIBUTE);
+		const power = typeIs(rawPower, "string") ? rawPower : "";
+		const wanted = power === "sprinter" && boosted === true;
+
+		const rawCurrent = ball.GetAttribute(SPRINTER_AFTERIMAGE_ATTRIBUTE);
+		const current = typeIs(rawCurrent, "boolean") ? rawCurrent : undefined;
+
+		if (wanted !== current) {
+			ball.SetAttribute(SPRINTER_AFTERIMAGE_ATTRIBUTE, wanted);
+		}
+	}
+
+	// #endregion
+
+	// #region ghost cycle
+
+	/**
+	 * `os.clock()` at `Playing` entry, or `undefined` outside a round.
+	 *
+	 * The ghost cycle's phase origin (item 204). **The round's clock, not each body's spawn**: the cycle is a property of the
+	 * power, so every ghost has to be intangible at the same moment or the pattern is unlearnable - and a `decoy` twin, which
+	 * `presentPower` also makes a ghost, would otherwise blink on a phase of its own. This is the same choice `PowerTimers`
+	 * makes for `eclipse`.
+	 */
+	private playingStartedAt?: number;
+
+	/**
+	 * Advances every ghost's collision group and `GhostActive` attribute to the phase the round clock is in.
+	 *
+	 * ## Why this lives in the spawner
+	 *
+	 * It needs three things at once: the round's clock origin, the live body list, and the right to write `CollisionGroup` and
+	 * an attribute on a body. The spawner is the only module with all three. `powers/` is a rule module that a `BasePart` is
+	 * passed into - it holds no body list and has no per-frame loop - and a separate service would have to ask the spawner for
+	 * its bodies, which is a dependency pointing the wrong way. It runs from the **existing** `Heartbeat` connection
+	 * immediately after `stepBallSpeeds`: no second connection, no second per-frame walk of the same list.
+	 *
+	 * ## Why it writes only on a change
+	 *
+	 * Two writes per ghost per transition is the whole traffic. An attribute write every tick per ghost would be 60 writes a
+	 * second of replicated state that says nothing new. The current value is read back off the body, so the comparison needs
+	 * no server-side map that would have to be kept in step with bodies dying underneath it.
+	 *
+	 * ## Why `GHOST_CYCLE_ENABLED = false` leaves the group alone
+	 *
+	 * `false` is the revert, not a half-disabled cycle: every ghost keeps whatever group `presentPower` gave it - intangible
+	 * for the whole round, the behaviour before this existed - and `GhostActive` stays `false`, so the client draws an opaque
+	 * skin. That is the shape a broken cycle is rolled back with, without deleting the code that will be needed again.
+	 *
+	 * ## The one interaction worth stating
+	 *
+	 * `CollisionGroup` is written by two owners now: `presentPower` at spawn (and on a re-pick) and this loop. They cannot
+	 * disagree in practice - `presentPower` runs before the body is parented, and this loop only touches bodies whose `Power`
+	 * is `ghost` - and a re-pick mid-round re-enters the cycle on the next tick because the attribute comparison is where the
+	 * decision lives, not a stored timestamp.
+	 */
+	private stepGhostCycle(): void {
+		if (!GHOST_CYCLE_ENABLED) {
+			return;
+		}
+
+		const startedAt = this.playingStartedAt;
+		if (startedAt === undefined) {
+			return;
+		}
+
+		const active = ghostActiveAt(os.clock() - startedAt);
+
+		for (const ball of this.liveBalls) {
+			if (ball.Parent === undefined) {
+				continue;
+			}
+
+			const rawPower = ball.GetAttribute(POWER_ATTRIBUTE);
+			if (!typeIs(rawPower, "string") || rawPower !== "ghost") {
+				continue;
+			}
+
+			const rawActive = ball.GetAttribute(GHOST_ACTIVE_ATTRIBUTE);
+			const current = typeIs(rawActive, "boolean") ? rawActive : undefined;
+			if (current === active) {
+				continue;
+			}
+
+			ball.CollisionGroup = active ? GHOST_GROUP : BALL_GROUP;
+			ball.SetAttribute(GHOST_ACTIVE_ATTRIBUTE, active);
+			// Once per transition per ghost, which is the whole point of the `current === active` skip above: the line is
+			// evidence, and evidence that prints every frame is a flood rather than evidence.
+			print(
+				`[Ghost] active=${tostring(active)} ball=${ball.GetFullName()} group=${ball.CollisionGroup} elapsed=${formatNumber(os.clock() - startedAt)}s`,
+			);
+		}
+	}
+
+	/**
+	 * Returns every ghost to the group `presentPower` gave it and clears the flag.
+	 *
+	 * Called when a round stops rather than when it starts: the spawner is about to have its bodies cleared, and a body that
+	 * outlives the phase (a debug body, a stuck spawn) must not be left intangible and half-drawn. `Playing` entry then
+	 * restarts the cycle from phase `0` because `playingStartedAt` is re-stamped, so the first window is always an active one.
+	 */
+	private resetGhostCycle(): void {
+		for (const ball of this.liveBalls) {
+			if (ball.Parent === undefined) {
+				continue;
+			}
+
+			const rawPower = ball.GetAttribute(POWER_ATTRIBUTE);
+			if (!typeIs(rawPower, "string")) {
+				continue;
+			}
+
+			ball.CollisionGroup = collisionGroupFor(rawPower);
+			if (ball.GetAttribute(GHOST_ACTIVE_ATTRIBUTE) === true) {
+				ball.SetAttribute(GHOST_ACTIVE_ATTRIBUTE, false);
+			}
 		}
 	}
 

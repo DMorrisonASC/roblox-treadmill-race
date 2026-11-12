@@ -3,6 +3,7 @@ import { Controller, OnStart } from "@flamework/core";
 import { PLAYER_COMPETING_ATTRIBUTE } from "shared/attributes";
 import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import { cameraWantsArena } from "shared/spectate";
+import { setSpectating as moduleSetSpectating } from "client/spectating";
 import { TAGS } from "shared/tags";
 
 /**
@@ -273,6 +274,10 @@ export class TreadmillCameraController implements OnStart {
 		}
 
 		this.spectating = on;
+		// **The latch is mirrored into the shared module (item 209).** The freeze controller cannot read this controller without a
+		// controller-to-controller edge for one boolean, and the camera cannot be the only owner of a fact that decides whether a
+		// character may walk. `setSpectating` stays the single writer and this is the one line that publishes it.
+		moduleSetSpectating(on);
 		print(`[TreadmillCamera] spectating=${tostring(on)} phase=${this.phaseName()}`);
 		this.observe();
 	}

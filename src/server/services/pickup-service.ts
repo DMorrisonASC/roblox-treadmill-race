@@ -118,6 +118,16 @@ export class PickupService implements OnStart {
 
 		roundState.GetPropertyChangedSignal("Value").Connect(() => this.onPhaseChanged(roundState.Value));
 		this.onPhaseChanged(roundState.Value);
+
+		// **A warning that the log is about to be noisy, once per session (item 207).** A `recycle` ball parked on a surviving
+		// pad re-touches it every ~14-24 ms (item 91's measurement), and each touch prints a `[Pickup] collected` line - so a
+		// parked recycle ball emits roughly a hundred lines a second and drowns every other diagnostic in the same window.
+		//
+		// This does not change the `collected` line. Item 91 owns that behaviour and its fix; this only means the next reader
+		// knows the wall of text is a known defect rather than a new one, and knows which ball to look for first.
+		print(
+			`[Pickup] re-touch spam is on: 1 pad re-touching at ~60/s from a resting recycle ball; expect ~120 lines/s while a recycle ball is parked on a pad. Known defect (item 91), not a regression.`,
+		);
 	}
 
 	/**

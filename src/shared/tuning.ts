@@ -421,6 +421,34 @@ export const BELT_RAMP_SECONDS = 3;
 export const ROUND_IDLE_WARN_SECONDS = 60;
 
 /**
+ * How long a `Playing` phase may run before the round ends on position, in seconds. **The designer's number, not a
+ * Placeholder.**
+ *
+ * ## This reverses item 37, deliberately
+ *
+ * Item 37 deleted a 60-second cap of the same name. Its argument was that "a time limit that invents a result is worse than
+ * no time limit", and its evidence was real: in the runs that exercised it, the cap fired while a competitor was still
+ * travelling, and it named a winner the race did not support.
+ *
+ * **What item 37 was right about is still true** - a cap does cut rounds where an elimination was about to happen, and the
+ * body it stops is not necessarily the body that would have won. That cost has not gone away and is not argued away here.
+ *
+ * **What has changed is where the winner comes from.** The old cap awarded the win on a different reading from the board.
+ * The cap now takes its winner from `distanceFromSpawnEdge` - the same function the leaderboard ranks with - so the body named
+ * at 120 seconds is the body the HUD was already showing at rank 1. The result is still *cut short* rather than earned, but it
+ * is no longer a *contradiction* of the race in progress, and that was the specific failure item 37 recorded.
+ *
+ * The second reason is the one item 37 could not have known: an uncapped round in a Studio session can run until somebody
+ * manually ends it, which makes the payout, the leaderboard and every `PostGame` transition untestable without intervention.
+ *
+ * ## Why it does not replace the natural end
+ *
+ * "Last standing" fires first and is unchanged. This is a third branch that only reaches bodies which survived the cap - so a
+ * decisive round never reaches it, and the cap only decides the rounds that were never going to end.
+ */
+export const PLAYING_CAP_SECONDS = 120;
+
+/**
  * **Placeholder.** Seconds the `PostGame` phase holds before returning to `Intermission`.
  *
  * The belt is stopped and the surviving balls stay where they are, so the player can see what
@@ -1293,6 +1321,15 @@ export const PICKUPS_FOLDER_NAME = "SpawnedPickups";
 export const HIT_EFFECTS_FOLDER_NAME = "SpawnedHitEffects";
 
 /**
+ * **Placeholder.** The folder the client's ball trail parents its fading copies into, created on demand.
+ *
+ * **Client-side only.** A trail copy is made by `BallTrailController` on each client from that client's own phantom, so the
+ * folder exists separately in every client's `Workspace` and is never replicated - the same shape `HIT_EFFECTS_FOLDER_NAME`
+ * has, and the reason a copy can be tuned without a server round trip.
+ */
+export const BALL_TRAIL_FOLDER_NAME = "SpawnedBallTrail";
+
+/**
  * The folder the **client** parents its round-wide `motionBlur` clone into, created on demand.
  *
  * A folder rather than `Workspace` itself for the reason `SpawnedHitEffects` and `SpawnedPickups` exist: an arena-wide
@@ -1364,8 +1401,8 @@ export const BALL_AVATAR_OFFSET_STUDS = 40;
 export const BALL_AVATAR_THUMBNAIL_SIZE = Enum.ThumbnailSize.Size48x48;
 
 /**
- * **Placeholder.** The spectate button's drawn size, in pixels. Wide enough for `Stop spectating` — the longer of its two
- * labels — at the control text size, and tall enough for a chunky face plus its depth.
+ * **Placeholder.** The spectate button's drawn size, in pixels. Wide enough for `Stop Watching` — the longer of its two (item 208)
+ * labels — at the control text size, and tall enough for a chunky face plus its bezel.
  */
 export const SPECTATE_BUTTON_WIDTH = 200;
 
@@ -1389,8 +1426,8 @@ export const SPECTATE_LABEL_TEXT_SIZE = 20;
  * In `tuning.ts` rather than in the controller because the *words* are the design: a button that says what it does is a
  * requirement of the brief, and `Stop spectating` is long enough that a change to it is a size change here.
  */
-export const SPECTATE_LABEL_OFF = "Spectate";
-export const SPECTATE_LABEL_ON = "Stop spectating";
+export const SPECTATE_LABEL_OFF = "Watch Race";
+export const SPECTATE_LABEL_ON = "Stop Watching";
 
 /**
  * **Placeholder.** The ball radius, in studs, that the VFX pack was drawn against.

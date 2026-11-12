@@ -71,6 +71,14 @@ export class TailWindController implements OnStart {
 	/** One live clone per ball in regular motion, so a repeat `true` cannot stack a second trail. */
 	private readonly trails = new Map<BasePart, BasePart>();
 
+	/**
+	 * When each trail was created, for the `destroy` line's `age=` field (item 207).
+	 *
+	 * A second map rather than a field on the clone: the clone is a `BasePart` the engine owns, and hanging a `os.clock()`
+	 * value on it would mean an attribute or a table keyed by it. This is deleted in the same place the trail is.
+	 */
+	private readonly bornAt = new Map<BasePart, number>();
+
 	/** Per-ball connections, disconnected on `Destroying` so a dead ball takes no listener with it. */
 	private readonly ballConnections = new Map<BasePart, Array<RBXScriptConnection>>();
 
@@ -104,7 +112,7 @@ export class TailWindController implements OnStart {
 
 		// The full path and the class, so a Studio run proves *which* instance was picked rather than leaving it to be inferred.
 		print(
-			`[TailWind] mounted on ${found.GetFullName()} (${found.ClassName}) scale=${TAIL_WIND_SCALE_MULTIPLIER} offset=${TAIL_WIND_HEADING_OFFSET_DEGREES}deg (own tuners, see shared/config/tailWind.config.ts)`,
+			`[TailWind] mounted on ${found.GetFullName()} (${found.ClassName}) scale=${TAIL_WIND_SCALE_MULTIPLIER} offset=${TAIL_WIND_HEADING_OFFSET_DEGREES}deg attribute="${TAIL_WIND_ATTRIBUTE}" (own tuners, see shared/config/tailWind.config.ts)`,
 		);
 
 		// Both discovery paths, for the reason the other two effect controllers keep both: the tag signal is the one that works,
@@ -158,6 +166,17 @@ export class TailWindController implements OnStart {
 
 	/** `true` → a trail exists; anything else → it does not. Idempotent in both directions. */
 	private render(ball: BasePart): void {
+		// **Every read is printed (item 207), initial and on change, and the value is the attribute's raw value.** `nil` is a
+		// *fourth* answer and a different bug from `false`: it means nothing has ever set this key on this body, so a reader
+		// that prints `false` for it would report "the server said no" when the truth is "the server never spoke".
+		//
+		// Unthrottled on purpose. A controller that never prints this line has proved something the mount line cannot: that it
+		// never subscribed to a signal that fired, or that the server never wrote. A body flips `TailWind` a couple of times a
+		// ride, so the volume is bounded by the round, not by the frame rate.
+		print(
+			`[TailWind] read body=${ball.GetFullName()} value=${describeAttribute(ball.GetAttribute(TAIL_WIND_ATTRIBUTE))}`,
+		);
+
 		if (ball.GetAttribute(TAIL_WIND_ATTRIBUTE) === true) {
 			this.attach(ball);
 			return;
@@ -191,6 +210,14 @@ export class TailWindController implements OnStart {
 
 		clone.Parent = ball;
 		this.trails.set(ball, clone);
+		this.bornAt.set(ball, os.clock());
+
+		// **The clone, with its size (item 207).** `size` is what distinguishes a clone of the right asset from a clone of the
+		// wrong one: a trail built from the phantom would read `20,20,20`. Without this line a trail that fires but draws
+		// nothing visible is indistinguishable from one that never fired at all.
+		print(
+			`[TailWind] clone body=${ball.GetFullName()} clone=${clone.GetFullName()} size=${formatVector(clone.Size)}`,
+		);
 	}
 
 	/** Destroys the trail for one ball, if there is one. */
@@ -199,6 +226,15 @@ export class TailWindController implements OnStart {
 		if (trail === undefined) {
 			return;
 		}
+
+		// **The destroy, with the clone's age (item 207).** `age` is how long the trail lived; a trail that is created and
+		// destroyed in the same frame reads here as `0s`, which is the signature of an attribute flapping rather than of a
+		// ball losing ground.
+		const bornAt = this.bornAt.get(ball);
+		print(
+			`[TailWind] destroy body=${ball.GetFullName()} clone=${trail.GetFullName()} age=${tostring(math.round((os.clock() - (bornAt ?? os.clock())) * 100) / 100)}s`,
+		);
+		this.bornAt.delete(ball);
 
 		trail.Destroy();
 		this.trails.delete(ball);
@@ -216,6 +252,8 @@ export class TailWindController implements OnStart {
 		}
 
 		this.trails.delete(ball);
+		// The age map is keyed by the same body, so it is dropped in the same two places: here and in `detach`.
+		this.bornAt.delete(ball);
 	}
 
 	/**
@@ -251,4 +289,29 @@ export class TailWindController implements OnStart {
 			trail.CFrame = this.frameFor(ball);
 		}
 	}
+}
+
+/**
+ * An attribute value as a log field: `true`, `false`, or **`nil` when the key has never been set** (item 207).
+ *
+ * The distinction is the whole reason this is not `tostring(value === true)`: a body whose key was never written and a body
+ * whose key was written `false` look identical after a boolean coercion, and only one of them means the server is not talking
+ * to this effect. `tostring(nil)` would print `nil` naturally, but a `Vector3` or a string set on the same key by a future
+ * change would print as itself rather than as a confusing `false`, so the coercion is explicit.
+ */
+function describeAttribute(value: AttributeValue | undefined): string {
+	if (value === undefined) {
+		return "nil";
+	}
+
+	if (typeIs(value, "boolean")) {
+		return tostring(value);
+	}
+
+	return `${tostring(value)} (not a boolean)`;
+}
+
+/** A `Vector3` as `x,y,z`, for the clone's size field. */
+function formatVector(value: Vector3): string {
+	return `${tostring(math.round(value.X * 100) / 100)},${tostring(math.round(value.Y * 100) / 100)},${tostring(math.round(value.Z * 100) / 100)}`;
 }

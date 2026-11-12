@@ -733,6 +733,33 @@ export class TreadmillService implements OnStart {
 	}
 
 	/**
+	 * The belt's length along its own `X` axis, in studs. **`0` when no belt is bound**, which is the value that disables
+	 * anything derived from a fraction of it rather than making it fire at the origin.
+	 *
+	 * The rocket's trigger is a fraction of this (item 204): "80% of the way down the belt" is a scene fact, and the belt's
+	 * length is authored in Studio rather than in `tuning.ts`, so a stud threshold in a constant would silently become a
+	 * different fraction the first time the belt was resized.
+	 *
+	 * Read from the same first bound belt `getBeltFrame` uses, so the frame and the length can never describe two different
+	 * parts.
+	 */
+	public getBeltLength(): number {
+		for (const [belt] of this.surfaces) {
+			if (belt.Parent !== undefined) {
+				return belt.Size.X;
+			}
+		}
+
+		for (const instance of CollectionService.GetTagged(TAGS.treadmillBelt)) {
+			if (instance.IsA("BasePart") && instance.Parent !== undefined) {
+				return instance.Size.X;
+			}
+		}
+
+		return 0;
+	}
+
+	/**
 	 * The belt's configured speed, ignoring any override.
 	 *
 	 * `RoundService` needs the target to ramp *towards*, and reading `readSpeed` for that would return

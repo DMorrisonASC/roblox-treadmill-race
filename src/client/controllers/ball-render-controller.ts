@@ -1,6 +1,7 @@
 import { CollectionService, ReplicatedStorage, RunService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
-import { BALL_SPEED_ATTRIBUTE } from "shared/attributes";
+import { BALL_SPEED_ATTRIBUTE, GHOST_ACTIVE_ATTRIBUTE } from "shared/attributes";
+import { GHOST_TRANSPARENCY_WHILE_ACTIVE } from "shared/config/ghost.config";
 import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import { TAGS } from "shared/tags";
 import { BALL_PHANTOM_NAME } from "shared/tuning";
@@ -39,6 +40,13 @@ interface PhantomState {
 	/** Accumulated world-space roll about the belt's spin axis. Rotation only — the position comes from the ball. */
 	spin: CFrame;
 	framesSinceNormalize: number;
+	/**
+	 * Whether the ghost fade is currently applied to this phantom and its cloned textures.
+	 *
+	 * Kept so the attribute can be read every frame while the *writes* happen only on a transition - a ghost cycles twice a
+	 * minute, and writing seven properties per frame for a state that has not changed is the kind of cost this tree removes.
+	 */
+	dimmed: boolean;
 }
 
 /**
@@ -191,7 +199,7 @@ export class BallRenderController implements OnStart {
 		this.copyTextures(ball, phantom);
 
 		phantom.Parent = ball;
-		this.phantoms.set(ball, { phantom, spin: new CFrame(), framesSinceNormalize: 0 });
+		this.phantoms.set(ball, { phantom, spin: new CFrame(), framesSinceNormalize: 0, dimmed: false });
 
 		// Hidden only once the skin exists, so there is no frame in which the ball has vanished and nothing has replaced it.
 		ball.LocalTransparencyModifier = 1;
@@ -231,8 +239,39 @@ export class BallRenderController implements OnStart {
 		}
 	}
 
-	/** The belt's `RightVector`, or `+X` before a belt has replicated. See `apparentSpinAxis` for what it feeds. */
-	private beltRight(): Vector3 {
+	/**
+	 * Fades or restores a phantom's **visible skin** while the body it stands for is an intangible ghost.
+	 *
+	 * ## Two writes, and the second is the one that matters
+	 *
+	 * **A `Texture` renders on a fully transparent part** - the same engine fact `copyTextures` exists for (item 99). So
+	 * `phantom.Transparency` alone fades only the sphere underneath the six face images and leaves the skin itself solid, which
+	 * would read as a half-done ghost. Each cloned `Texture` needs its own `Transparency`.
+	 *
+	 * ## Why the clone's `Transparency` and not its `LocalTransparencyModifier`
+	 *
+	 * `LocalTransparencyModifier` is the property `copyTextures` uses to hide the **source** textures on this client (item 98):
+	 * a local-only multiplier, with the clones deliberately left at `0` so the phantom's images draw normally. Fading the clone
+	 * is a statement about what should be seen, not about what this client may see, so it belongs on `Transparency` - the
+	 * property the drawn result is a function of - and it must leave the source's `1` alone, or the un-rolled originals would
+	 * reappear underneath.
+	 *
+	 * Restoring writes `0` rather than unsetting anything: `Transparency` has no unset state, and `0` is what the clone was
+	 * born with.
+	 */
+	private applyGhostSkin(phantom: BasePart, dimmed: boolean): void {
+		const transparency = dimmed ? GHOST_TRANSPARENCY_WHILE_ACTIVE : 0;
+
+		phantom.Transparency = transparency;
+
+		for (const child of phantom.GetChildren()) {
+			if (child.IsA("Texture")) {
+				child.Transparency = transparency;
+			}
+		}
+	}
+
+	/** The belt's `RightVector`, or `+X` before a belt has replicated. See `apparentSpinAxis` for what it feeds. */ private beltRight(): Vector3 {
 		if (this.cachedBelt === undefined || this.cachedBelt.Parent === undefined) {
 			this.cachedBelt = undefined;
 
@@ -285,6 +324,15 @@ export class BallRenderController implements OnStart {
 			}
 
 			state.phantom.CFrame = new CFrame(ball.Position).mul(state.spin);
+
+			// **The ghost fade, applied from the state the server publishes (item 204).** Read every frame - one attribute read
+			// beside the `BALL_SPEED` read above - but \`applyGhostSkin\` writes only when the value changed, because a ghost
+			// cycles twice a minute and seven property writes per frame for an unchanged state is pure cost.
+			const dimmed = ball.GetAttribute(GHOST_ACTIVE_ATTRIBUTE) === true;
+			if (dimmed !== state.dimmed) {
+				state.dimmed = dimmed;
+				this.applyGhostSkin(state.phantom, dimmed);
+			}
 		}
 
 		// Removal is deferred: mutating a `Map` while iterating it is unspecified in Luau, and the symptom — a skipped ball —

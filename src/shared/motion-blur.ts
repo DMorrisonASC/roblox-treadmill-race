@@ -66,7 +66,8 @@ export const MOTION_BLUR_FADE_SECONDS = 0.5;
  * zone, exactly" and `2` means "twice the zone". That is a meaningful reference and it is not a length, which is why it stays
  * here beside the ramp constants rather than in a fourth config file holding a number already documented below it.
  *
- * So the multiplier is local, defaults to `1` (fill the zone), and is applied through `scaleEffect` — the shared five-property
+ * So the multiplier is local, **ships at `0.5`** (half the zone - the designer trimmed it down from the `1` this sentence
+ * used to claim, item 204), and is applied through `scaleEffect` — the shared five-property
  * implementation — rather than by writing a second scale routine. A designer who wants the effect bigger changes this one
  * number and nothing else moves.
  */

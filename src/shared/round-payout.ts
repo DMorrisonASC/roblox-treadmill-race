@@ -85,6 +85,21 @@ export interface RoundPayoutRace {
 	readonly eliminated: ReadonlyArray<RoundPayoutOwner>;
 	/** `undefined` when the round ended with no survivors, which is a definite result and not a missing one. */
 	readonly winner: RoundPayoutOwner | undefined;
+	/**
+	 * The competitors still racing when a **time cap** ended the round, best distance first, **excluding the winner**.
+	 *
+	 * ## Why this exists (item 208)
+	 *
+	 * Without it the ranking is `winner ++ reversed(eliminated)`, which is the whole result of a round that ended by
+	 * elimination: somebody was last to fall, so the order is the order they fell, backwards. A capped round has no such
+	 * order ? it has survivors who never fell, and the old ranking would have given every one of them `placement = 0`
+	 * (unranked, base coins only) while an eliminated body collected second place. That is the opposite of "rewarded based on
+	 * their position", which is what the cap was asked for.
+	 *
+	 * Empty on every round that ended naturally, which is what keeps this a strictly additive change: an empty array leaves the
+	 * derived ranking byte-identical to before.
+	 */
+	readonly survivors?: ReadonlyArray<RoundPayoutOwner>;
 }
 
 /**
@@ -166,6 +181,17 @@ export function payoutAwards(race: RoundPayoutRace): Array<RoundPayoutAward> {
 	const ranked = new Array<RoundPayoutOwner>();
 	if (race.winner !== undefined) {
 		ranked.push(race.winner);
+
+		// **The capped round's remaining survivors, before the fallen** (item 208). On a natural end this is empty and the
+		// ranking below is unchanged; on a capped one it is the only record of who was where when the clock ran out.
+		const survivors = race.survivors;
+		if (survivors !== undefined) {
+			for (const survivor of survivors) {
+				if (survivor.userId !== race.winner.userId) {
+					ranked.push(survivor);
+				}
+			}
+		}
 
 		const lastIndex = race.eliminated.size() - 1;
 		for (let index = lastIndex; index >= 0; index--) {

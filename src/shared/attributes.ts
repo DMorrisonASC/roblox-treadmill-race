@@ -95,6 +95,35 @@ export const BOOSTED_ATTRIBUTE = "Boosted";
 export const TAIL_WIND_ATTRIBUTE = "TailWind";
 
 /**
+ * Attribute on a ball: whether it should wear the `sprinter` afterimage.
+ *
+ * `true` only when the body's `Power` is `sprinter` **and** it is currently `Boosted`, and it is written by
+ * `BallSpawnerService.writeSprinterAfterimage` on the same tick as `Boosted` and `TailWind`, immediately after both - so a
+ * client reading the three in one frame cannot see them disagree.
+ *
+ * **Written for every body, `false` where it does not apply.** An attribute that is only ever written when the condition
+ * is true is an attribute that goes stale: a body whose power is changed mid-round (a debug `4` spawn, a decoy's parent
+ * re-picked) would carry its old `true` and keep a trail it no longer earns. One `SetAttribute` per state change costs
+ * nothing; a stale effect is a lie about the simulation.
+ *
+ * The `Power` read is the reason this is not folded into `Boosted`: `Boosted` is true for every boosted body - a pickup
+ * gives it to all of them - while this effect belongs to one power.
+ */
+export const SPRINTER_AFTERIMAGE_ATTRIBUTE = "SprinterAfterimage";
+
+/**
+ * Attribute on a ball: whether a `ghost` body is currently **intangible** (in the `GhostBall` collision group).
+ *
+ * The cycle lives on the server (`BallSpawnerService.stepGhostCycle`) because `CollisionGroup` is a server-side physics
+ * fact; this attribute is how the client is told, so the visible skin can be faded on the same phase the collisions change.
+ * Written only on a transition - a value that flips sixty times a second carrying no information is write traffic, not
+ * state.
+ *
+ * `false` for every body that is not a ghost, so the client's test is a single `=== true` and a non-ghost never fades.
+ */
+export const GHOST_ACTIVE_ATTRIBUTE = "GhostActive";
+
+/**
  * `Radius` is retired. There is deliberately no constant for it below.
  *
  * ## Why the sphere radius stopped being an attribute

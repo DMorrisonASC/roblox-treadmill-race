@@ -302,7 +302,13 @@ export class LeaderboardController implements OnStart {
 				continue;
 			}
 
-			const record = item as { key?: unknown; userId?: unknown; name?: unknown; distance?: unknown };
+			const record = item as {
+				key?: unknown;
+				userId?: unknown;
+				name?: unknown;
+				distance?: unknown;
+				eliminated?: unknown;
+			};
 			if (
 				!typeIs(record.key, "string") ||
 				!typeIs(record.userId, "number") ||
@@ -317,6 +323,10 @@ export class LeaderboardController implements OnStart {
 				userId: record.userId,
 				name: record.name,
 				distance: record.distance,
+				// **Absent is `false`, and that is the right default** (item 208): a payload from a server that predates the
+				// field, or a row that simply did not carry it, describes a body still on the belt. A missing `eliminated` must
+				// never strike a live racer's row through.
+				eliminated: record.eliminated === true,
 			});
 		}
 
@@ -582,7 +592,10 @@ export class LeaderboardController implements OnStart {
 		nameLabel.TextColor3 = isSelf ? SELF_COLOR : this.theme.colors.textPrimary;
 		nameLabel.TextXAlignment = Enum.TextXAlignment.Left;
 		nameLabel.TextTruncate = Enum.TextTruncate.AtEnd;
-		nameLabel.Text = entry.name;
+		// **Always on, not only for an eliminated row (item 208).** Toggling `RichText` re-parses the text, so a name containing
+		// `<` or `&` would visibly change at the instant the row died - and the strike-through is `<s>`, which requires it.
+		nameLabel.RichText = true;
+		nameLabel.Text = escapeRichText(entry.name);
 		nameLabel.ZIndex = ROW_Z_INDEX + 1;
 		nameLabel.Parent = face;
 		outlineText(nameLabel);
@@ -620,9 +633,34 @@ export class LeaderboardController implements OnStart {
 				continue;
 			}
 
-			row.nameLabel.Text = entry.name;
+			// **An eliminated row is struck through and coloured, every broadcast (item 208).** The style is applied here rather
+			// than at row creation because a row is reused: the same row object goes from live to eliminated the moment its
+			// body leaves the round, and a style written only in `buildRow` would never reach it.
+			//
+			// `<s>` inside a rich-text label is the only strikethrough a `TextLabel` has - there is no property for it, and a
+			// `UIStroke` outlines text rather than crossing it. `RichText` is on for the name **always**, not only when
+			// eliminated, because toggling it also re-parses the text and a name containing `<` or `&` would change appearance
+			// at the moment the row died.
+			row.nameLabel.Text = entry.eliminated ? `<s>${escapeRichText(entry.name)}</s>` : escapeRichText(entry.name);
 			row.distanceLabel.Text = formatDistance(entry.distance);
 			row.ring.Visible = entry.userId > 0 && entry.userId === this.player.UserId;
+
+			// **Colour from the theme's error slot, never a literal red**, so a light theme brightens it instead of drawing
+			// text that disappears into the panel. The self ring stays gold on an eliminated row: it says "this is you", not
+			// "you are alive", and the two facts are independent.
+			const eliminatedColor = this.theme.colors.error;
+			row.nameLabel.TextColor3 = entry.eliminated
+				? eliminatedColor
+				: entry.userId > 0 && entry.userId === this.player.UserId
+					? SELF_COLOR
+					: this.theme.colors.textPrimary;
+			// The rank goes with the name: a struck-through name beside an ordinary ordinal reads as a formatting accident
+			// rather than as a row that is out of the race.
+			row.rankLabel.TextColor3 = entry.eliminated
+				? eliminatedColor
+				: entry.userId > 0 && entry.userId === this.player.UserId
+					? SELF_COLOR
+					: this.theme.colors.textSecondary;
 		}
 	}
 
@@ -679,4 +717,18 @@ export class LeaderboardController implements OnStart {
 	}
 
 	// #endregion
+}
+
+/**
+ * Escapes the three characters `RichText` interprets, so a display name is drawn as written (item 208).
+ *
+ * `RichText` is on for every name label because an eliminated row needs `<s>`. That makes the label a markup parser, which
+ * means a `<` in a display name is no longer a character - it opens a tag, and an unbalanced one swallows the rest of the
+ * row. Roblox itself strips most of these from display names, but a *Debug#N* body name or a Studio-authored body can
+ * contain anything, and the failure would be a row that silently loses its text.
+ *
+ * `&` first: escaping it after the other two would turn the `&` those introduced into `&amp;`.
+ */
+function escapeRichText(text: string): string {
+	return text.gsub("&", "&amp;")[0].gsub("<", "&lt;")[0].gsub(">", "&gt;")[0];
 }

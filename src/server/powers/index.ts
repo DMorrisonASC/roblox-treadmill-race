@@ -51,9 +51,8 @@ import {
 	HIT_EFFECT_MIN_ROUND_AGE_SECONDS,
 	POWER_COLLISION_COOLDOWN,
 	powerLabel,
-	ROCKET_MAX_DELAY,
-	ROCKET_MIN_DELAY,
 	ROCKET_TARGET_SPEED,
+	ROCKET_TRIGGER_PROGRESS,
 	SPRINTER_BOOST_SPEED,
 } from "shared/powers.config";
 import { TAGS } from "shared/tags";
@@ -80,11 +79,15 @@ export interface PowerAura {
 	readonly eclipsing: boolean;
 }
 
-/** A ball's timers for the current `Playing`. Drawn once at entry; never redrawn inside a round. */
+/** A ball's per-round power state. Drawn once at entry; only the one-shot latches change inside a round. */
 export interface PowerTimers {
-	/** Seconds after `Playing` entry at which a `rocket` snaps. `-1` for a ball that is not a rocket. */
-	readonly rocketAt: number;
-	/** Whether the snap has already been handed out this round. */
+	/**
+	 * Whether a `rocket` has already snapped this round.
+	 *
+	 * The whole of the rocket's state, since item 204: the trigger is a **position** on the belt, not a moment in time, so
+	 * there is no drawn deadline left to store. The latch is what keeps the snap a one-shot - without it the body would be
+	 * pinned at the target speed for every tick it spent past the trigger.
+	 */
 	readonly rocketFired: boolean;
 	/** Seconds after entry at which an `eclipse` window opens. */
 	readonly eclipseAt: number;
@@ -104,6 +107,17 @@ export interface PowerTickInput {
 	readonly dt: number;
 	/** Seconds since `Playing` entry. */
 	readonly elapsed: number;
+	/**
+	 * How far along the belt the body is, as a fraction: `0` at the spawn edge, `1` at the exit edge.
+	 *
+	 * **The rocket's trigger.** It is a position rather than a moment (item 204) because a random moment fired two rocket
+	 * balls at the same *time* and therefore at whatever places they happened to be in - one in mid-field, one at the edge -
+	 * so the event was invisible as a position. A fraction of the belt's length rather than a stud count keeps the trigger
+	 * meaning the same thing when the belt is resized in Studio.
+	 *
+	 * Derived by the caller, which is the only code holding the belt frame; a body with no belt reads `0` and never fires.
+	 */
+	readonly alongProgress: number;
 	readonly timers: PowerTimers;
 	/** Auras that could reach this ball. An empty list is the normal case and must cost nothing. */
 	readonly auras: ReadonlyArray<PowerAura>;
@@ -119,7 +133,6 @@ export interface PowerTickResult {
 
 /** Timers for a ball that has no timed power: they can never open, so every branch below is false. */
 export const NO_TIMERS: PowerTimers = {
-	rocketAt: -1,
 	rocketFired: false,
 	eclipseAt: -1,
 	eclipseUntil: -1,
@@ -132,10 +145,16 @@ export const NO_TIMERS: PowerTimers = {
  *
  * 1. **Not in a round, or no power** → `0`. A power is a property of the race, not of the body: a ball pushed into
  *    `Waiting` must not spend its rocket there, and a ball with no `Power` attribute is a decoy or an un-picked body.
- * 2. **`rocket`, at its drawn moment, once** → a delta that lands exactly on `ROCKET_TARGET_SPEED`. A delta and not an
- *    addition because the *value* is the design: two rocket balls must arrive at the same speed, so the delta is
- *    `target - current`. `rocketFired` is returned so the caller can write it back; without that the snap would re-fire
- *    every frame and the ball would be pinned at the target, which turns a one-shot event into a permanent buff.
+ * 2. **`rocket`, past its trigger position, once** → a delta that lands exactly on `ROCKET_TARGET_SPEED`. The trigger is
+ *    `alongProgress >= ROCKET_TRIGGER_PROGRESS` - a **place**, not a moment (item 204) - so two rocket balls snap at the
+ *    same point on the belt instead of at unrelated times. A delta and not an addition because the *value* is the design:
+ *    two rocket balls must arrive at the same speed, so the delta is `target - current`. `rocketFired` is returned so the
+ *    caller can write it back; without that the snap would re-fire every frame and the ball would be pinned at the target,
+ *    which turns a one-shot event into a permanent buff.
+ *
+ *    **The snap can be larger than the ceiling.** `ROCKET_TARGET_SPEED` is `130` against `BALL_SPEED_MAX = 100`, and this
+ *    function does not clamp: the loop applies the delta and clamps once, after every contributor has spoken, so the ball
+ *    lands on `100`. Reported rather than "fixed" - the value is the designer's.
  * 3. **Inside an `eclipse` window** → extra negative decay, `DECAY * dt * (multiplier - 1)`. This is the field-wide
  *    counterpart to `magnet` and is applied to the *victim's* tick rather than to the eclipser's, because the tick
  *    function only ever speaks for the ball it was handed.
@@ -153,8 +172,7 @@ export function powerTickDelta(input: PowerTickInput): PowerTickResult {
 	}
 
 	if (input.power === "rocket") {
-		const at = input.timers.rocketAt;
-		if (!input.timers.rocketFired && at >= 0 && input.elapsed >= at) {
+		if (!input.timers.rocketFired && input.alongProgress >= ROCKET_TRIGGER_PROGRESS) {
 			return { delta: ROCKET_TARGET_SPEED - input.speed, rocketFired: true };
 		}
 		return { delta: 0, rocketFired: false };
@@ -338,17 +356,19 @@ export function shouldPop(attackerPower: string, victimPower: string, serial: nu
 /**
  * Draws a ball's timers for a round, at `Playing` entry.
  *
- * `rocketAt` is drawn here rather than read on each tick so the moment is fixed for the round: a re-draw inside the tick
- * would move the target every frame and the snap would fire on whatever frame happened to satisfy the comparison.
+ * **The rocket no longer draws anything (item 204).** It used to take a random moment in `[ROCKET_MIN_DELAY,
+ * ROCKET_MAX_DELAY]` here, which is also why this function took a `random` source - no remaining power draws anything, so
+ * the parameter is gone with the draw rather than left as a hook that nothing tests.
  *
- * `random` is a parameter so a spec can pin it; the default is `math.random`, which is what the server uses.
+ * What the rocket keeps is the **latch**: `rocketFired` starts `false` and is set by `tickDelta` on the tick the position
+ * test first passes. A drawn moment was the old way of making the event one-shot; a position test needs an explicit latch,
+ * because a body past the trigger satisfies the test on every tick.
  */
-export function drawTimers(power: string, random: (min: number, max: number) => number = math.random): PowerTimers {
-	const rocketAt = power === "rocket" ? ROCKET_MIN_DELAY + random(0, ROCKET_MAX_DELAY - ROCKET_MIN_DELAY) : -1;
+export function drawTimers(power: string): PowerTimers {
 	const eclipseAt = power === "eclipse" ? ECLIPSE_START_DELAY : -1;
 	const eclipseUntil = power === "eclipse" ? ECLIPSE_START_DELAY + ECLIPSE_WINDOW_SECONDS : -1;
 
-	return { rocketAt, rocketFired: false, eclipseAt, eclipseUntil };
+	return { rocketFired: false, eclipseAt, eclipseUntil };
 }
 
 /** Whether an `eclipse` window is open at `elapsed` seconds after `Playing` entry. */
@@ -733,6 +753,16 @@ export function onRoundActive(ball: BasePart): void {
 export interface PowerTickContext {
 	readonly dt: number;
 	readonly roundActive: boolean;
+	/**
+	 * The body's position along the belt, in the belt's own frame, in studs from the belt's centre.
+	 *
+	 * The loop already has this number - it computes the belt-local `Z` for the sway from the same `PointToObjectSpace`
+	 * - so the rocket's trigger costs one more component read rather than a second transform. `0` when no belt is bound,
+	 * which never satisfies the trigger and therefore never fires a rocket rather than firing one at the spawn edge.
+	 */
+	readonly alongPosition: number;
+	/** The belt's length along that axis, in studs. `0` when no belt is bound. */
+	readonly beltLength: number;
 }
 
 /**
@@ -761,18 +791,33 @@ export function tickDelta(ball: BasePart, context: PowerTickContext): number {
 
 	const elapsed = os.clock() - state.startedAt;
 	const auras = magnetBalls.size() === 0 && eclipseBalls.size() === 0 ? NO_AURAS : collectAuras(ball);
+	// `0` with no belt: a fraction that can never reach the trigger, so an unbound belt disables the rocket rather than
+	// firing it at the spawn edge. `alongPosition` is measured from the belt's centre, so the `+ 0.5` puts `0` at the
+	// spawn edge and `1` at the exit - the same convention `LeaderboardService` publishes as `distance`.
+	const alongProgress = context.beltLength > 0 ? context.alongPosition / context.beltLength + 0.5 : 0;
 	const result = powerTickDelta({
 		power: state.power,
 		roundActive: context.roundActive,
 		speed: readSpeed(ball),
 		dt: context.dt,
 		elapsed,
+		alongProgress,
 		timers: state.timers,
 		auras,
 	});
 
 	if (result.rocketFired) {
 		state.timers = { ...state.timers, rocketFired: true };
+
+		// **The fire, with the numbers that explain it (item 204).** Three of these exist because the trigger moved from a
+		// moment to a position and the clamp is live: `progress` is where the body was, `target` is what the power asked for,
+		// and `speed` is where it will actually land after the loop clamps. A line that printed only "fired" would leave the
+		// next reader unable to tell a working trigger from a body that spawned past it, or a clamped snap from an unclamped
+		// one - which is exactly the pair of questions this round raised and could not answer from the old log.
+		const landed = math.clamp(readSpeed(ball) + result.delta, BALL_SPEED_MIN, BALL_SPEED_MAX);
+		print(
+			`[Powers] rocket fire: ball=${ball.GetFullName()} progress=${tostring(math.round(alongProgress * 100) / 100)} target=${ROCKET_TARGET_SPEED} speed=${tostring(math.round(landed * 10) / 10)} clamped=${tostring(landed < ROCKET_TARGET_SPEED)}`,
+		);
 	}
 
 	return result.delta;

@@ -1,11 +1,26 @@
 import { CollectionService, ReplicatedStorage } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
 import { LEADERBOARD_INTERVAL_SECONDS, LeaderboardEntry } from "shared/leaderboard";
+import { distanceFromSpawnEdge } from "shared/position";
 import { LEADERBOARD_UPDATE_REMOTE_NAME, REMOTES_FOLDER_NAME } from "shared/remotes";
 import { TAGS } from "shared/tags";
 import { BallSpawnerService } from "./ball-spawner-service";
 import { TreadmillService } from "./treadmill-service";
 import { RoundService } from "./round-service";
+
+/**
+ * Pushes the eliminated rows beneath the live ranking, in the order they arrived (item 209).
+ *
+ * A function rather than a loop written twice: `rank` has two exits - the one-body short-circuit and the normal path - and a
+ * second copy of this loop is the copy that gets forgotten when a third exit appears.
+ *
+ * Deliberately at module scope: a `function` declared inside a class body is not a method, and roblox-ts rejects the shape.
+ */
+function appendEliminated(into: Array<LeaderboardEntry>, rows: ReadonlyArray<LeaderboardEntry>): void {
+	for (const row of rows) {
+		into.push(row);
+	}
+}
 
 /**
  * **Placeholder.** How many studs ahead a body must be before it takes a rank from the body above it.
@@ -204,10 +219,9 @@ export class LeaderboardService implements OnStart {
 			// ownerless body everywhere the simulation looks.
 			const identity = this.spawner.ownerIdentityFor(ball);
 
-			// **Studs from the belt's spawn edge**, in the belt's own frame: `0` at the edge a body is placed on, growing
-			// toward the exit. Measured from the *belt* rather than from the spawner so the number survives the spawner being
-			// moved in Studio, and so every body is measured against one origin instead of its own birth point.
-			const localX = belt.frame.PointToObjectSpace(ball.Position).X;
+			// **Studs from the belt's spawn edge**, from the one shared formula (item 208). It used to be written out here, and
+			// the round machine needs the identical number to name the winner at the time cap - two copies would let the HUD
+			// say rank 1 is one body while the payout names another, which is the one disagreement a player sees instantly.
 			const key = this.keyFor(ball);
 			entries.push({
 				key,
@@ -216,14 +230,26 @@ export class LeaderboardService implements OnStart {
 				// indistinguishable. A body with no owner at all - a debug ball, a stray, an orphaned twin - still carries its
 				// key in its name, because there can be fifty of them and they are all called `Ball` or `Decoy`.
 				name: identity === undefined ? `${ball.Name} ${key.sub(2)}` : identity.name,
-				distance: localX + belt.halfLength,
+				distance: distanceFromSpawnEdge(belt.frame, belt.halfLength * 2, ball.Position),
+				// A body still on the belt is still racing. The eliminated rows below are the other half of the board.
+				eliminated: false,
 			});
 		}
 
+		// **The eliminated stay on the board (item 208).** A competitor that left the belt used to vanish from the standings in
+		// the same frame it vanished from the arena, which loses the one fact a player watching a race wants after the
+		// elimination: where they were when it happened. `RoundService` records those rows at the moment of death - with the
+		// distance frozen - because it is the only place that reads the body before destroying it.
+		//
+		// They merge into the same ascending sort rather than being appended, so an eliminated body sorts to where it stopped.
+		// That is what makes the board readable: the list is still one ordering of "how far along the belt", and being out of
+		// the race is a *style* on the row, not a separate section to scan.
+		const eliminated = this.round.getEliminationsThisRound();
+
 		// The ranking pass. **No cap**: the board shows every body on the belt, which is what a player watching the race can
 		// actually see - at seventeen bodies a five-row window hid the racers being watched. The client scrolls, and the
-		// payload is at most `MaxLiveBalls` entries of four small fields.
-		const ranked = this.rank(entries);
+		// payload is at most `MaxLiveBalls` entries plus the round's eliminations, of five small fields.
+		const ranked = this.rank(entries, eliminated);
 		this.previousRanked = this.idsOf(ranked);
 
 		// **One line per round, at the first broadcast, naming what the board holds.** Twice now the complaint has been "X is
@@ -270,7 +296,10 @@ export class LeaderboardService implements OnStart {
 	 * `SWAP_THRESHOLD_STUDS = 0` the bubble pass is a plain ascending sort, just a slow one - which is exactly the behaviour
 	 * to compare against when the threshold is being tuned.
 	 */
-	private rank(entries: Array<LeaderboardEntry>): Array<LeaderboardEntry> {
+	private rank(
+		entries: Array<LeaderboardEntry>,
+		eliminated: ReadonlyArray<LeaderboardEntry>,
+	): Array<LeaderboardEntry> {
 		const byKey = new Map<string, LeaderboardEntry>();
 		for (const entry of entries) {
 			byKey.set(entry.key, entry);
@@ -299,7 +328,13 @@ export class LeaderboardService implements OnStart {
 		// one entry it ran once and indexed `ordered[2]`, which is `nil`, and the loop thread died on its first `Playing`
 		// tick. The bound is therefore spelled out in a local and the degenerate case returns early, so the lowering has
 		// nothing to get wrong.
+		// **The eliminated block is appended after the live ranking and never sorted into it (item 209).** A body that has left
+		// the belt is not racing: sorting it by its frozen distance let a competitor eliminated near the spawn edge outrank every
+		// live body - which is the "shows me as 1st after I died" report. `eliminated` arrives most-recent-first from
+		// `RoundService.getEliminationsThisRound`, so appending it is the whole of the stack order and this function does not
+		// reorder it.
 		if (ordered.size() < 2) {
+			appendEliminated(ordered, eliminated);
 			return ordered;
 		}
 
@@ -319,6 +354,8 @@ export class LeaderboardService implements OnStart {
 				}
 			}
 		}
+
+		appendEliminated(ordered, eliminated);
 
 		return ordered;
 	}

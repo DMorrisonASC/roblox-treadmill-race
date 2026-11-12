@@ -6165,3 +6165,294 @@ Found while rewriting: `BALL_COLLISION_SHOVE_SPEED`'s docblock still said "at `1
 **Validation:** `npm run build` exit 0; **`npm test` = 505 passed in 36 files** (five new cases: head-on dominance, side-by-side dominance, diagonal has both, equal-and-opposite pair, and no halving across axes); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all five touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged.
 
 **Studio-only:** whether the 360 push reads as a bump or as one ball punting the other; whether `BALL_COLLISION_SHOVE_SPEED = 100` is now too strong along the belt; and whether the sway's `SWAY_TRACK_SECONDS = 1.5` correction fights a lateral shove visibly while leaving the along-belt one permanent (it must -- there is no lane to return to on that axis).
+---
+
+## 204 - Three powers: a sprinter afterimage, a ghost cycle, and a rocket that fires at a place
+
+### 1. Sprinter afterimage (new effect)
+
+- `shared/config/sprinterAfterimage.config.ts` (new): `SPRINTER_AFTERIMAGE_ENABLED` (`**Placeholder.**`), `SPRINTER_AFTERIMAGE_ASSET_NAME = "sprinterAfterimage"`, `SCALE_MULTIPLIER = 0.1`, `HEADING_OFFSET_DEGREES = -90` - its own tuner per item 177, values matching the two trails.
+- `SPRINTER_AFTERIMAGE_ATTRIBUTE = "SprinterAfterimage"` in `attributes.ts`.
+- `BallSpawnerService.writeSprinterAfterimage(ball, boosted)`, called **third** in the tick, after `writeBoosted` and `writeTailWind`: `power === "sprinter" && boosted === true`. Written for every body including `false`, so a re-picked or decayed body cannot keep a stale trail.
+- `client/controllers/sprinter-afterimage-controller.ts` (new), modelled on `tail-wind-controller`: asset resolved once at boot, clone anchored and repositioned by `CFrame` each frame (position from the ball, rotation from the asset, yaw from the belt), `scaleEffect(effectScaleFor(...))`, destroyed on `false` or `Destroying`. `flamework.build` regenerated and lists it.
+
+**No `MaxDistance`.** The prompt asked for `POWER_BADGE_MAX_DISTANCE` to be inherited; that property exists on `BillboardGui` only, and this clone is a `BasePart` - a part has no distance cut, and neither trail sets one. Recorded in the controller's docblock rather than invented.
+
+### 2. Ghost cycle
+
+- `shared/config/ghost.config.ts` (new): `GHOST_ACTIVE_SECONDS = 10`, `GHOST_BREAK_SECONDS = 15`, `GHOST_CYCLE_SECONDS` **derived**, `GHOST_TRANSPARENCY_WHILE_ACTIVE = 0.5`, `GHOST_CYCLE_ENABLED = true`, and the pure `ghostActiveAt(elapsed)` - asserted in `ghost.config.spec.ts` (5 cases: derived cycle, half-open boundaries, wrap, pre-clock bodies, shipped values).
+- `GHOST_ACTIVE_ATTRIBUTE = "GhostActive"` in `attributes.ts`.
+- **The cycle lives in `BallSpawnerService`**, on the **existing** `Heartbeat` connection immediately after `stepBallSpeeds` - no second service, no second per-frame walk. It needs the clock origin, the live body list and the right to write `CollisionGroup`, and the spawner is the only module with all three; `powers/` holds no bodies and a new service would have to ask the spawner for them.
+- **Seeded from `Playing` entry**, not per body (`playingStartedAt`, stamped in `setRoundActive`): every ghost is intangible at the same moment, including a `decoy` twin, so the pattern is learnable. `setRoundActive(false)` clears the clock and calls `resetGhostCycle`, which returns each body to `collisionGroupFor(power)` and clears the flag.
+- Writes only on a transition; one `[Ghost] active=... ball=... group=... elapsed=...s` line per transition.
+- `BallRenderController`: the phantom's skin is faded by `applyGhostSkin`, which sets **`phantom.Transparency` and each cloned `Texture.Transparency`** to `GHOST_TRANSPARENCY_WHILE_ACTIVE`, restoring `0`. The clone's `Transparency`, not `LocalTransparencyModifier` - the latter is what hides the *source* textures (item 98) and the clones are deliberately left at `0`.
+
+### 3. Rocket: a place, not a moment
+
+- `ROCKET_MIN_DELAY` / `ROCKET_MAX_DELAY` **deleted**; `ROCKET_TRIGGER_PROGRESS = 0.8` (**Placeholder.**) added - 80% of the belt's length from the spawn edge, which is the prompt's `0.3 x L` expressed as progress and does not move if the belt is resized.
+- `PowerTimers.rocketAt` removed; `rocketFired` remains as the one-shot latch. `PowerTickInput` gains `alongProgress`; `PowerTickContext` gains `alongPosition` and `beltLength`; `TreadmillService.getBeltLength()` added (same first-bound-belt read as `getBeltFrame`).
+- `stepBallSpeeds` computes one `PointToObjectSpace` per ball per tick and passes its `X` and the hoisted belt length - no second lookup, no clock.
+- **`drawTimers` is kept** for `eclipse`; the rocket's draw and therefore the `random` parameter are gone (`drawTimers(power)`), and its three spec cases were rewritten around that.
+- Added the `[Powers] rocket fire: ball=... progress=... target=... speed=... clamped=...` line: **none existed**, so the acceptance criterion could not have been observable. It prints the progress, the requested target and the speed the body actually lands on, so the clamp is visible on the wire.
+
+### Found while verifying
+
+- **`ROCKET_TARGET_SPEED` is `130` and `BALL_SPEED_MAX` is `100`.** The snap is clamped to `100`; the surplus is discarded. Reported, not retuned - `stepBallSpeeds` clamps after every contributor, which is the model's stated rule.
+- `powers.config.ts`'s header claimed "`BALL_SPEED_DECAY_RATE` = 0.1" (it is `2`) and "`BALL_SPEED_MAX` ... sits above every value a power is designed to reach" (it does not). Both corrected.
+- `ROCKET_TARGET_SPEED` and `SPRINTER_BOOST_SPEED` docblocks described values from two retunes ago (`12`/`20`/`18`). Corrected with a note.
+- The three `<Power>_...` placeholder rows the prompt asked to keep are not in the header; nothing to do.
+
+### Two pre-existing red tests, fixed because they blocked the signal
+
+`npm test` was **failing at `HEAD`** before this round: `motion-blur.spec.ts` pinned `MOTION_BLUR_SCALE` to `1` after the designer moved it to `0.5`, and `powers.spec.ts` asserted `BALL_SPEED_MAX >= ROCKET_TARGET_SPEED` after `BOOST_TARGET_BALL_SPEED` moved to `80`. Both were un-pinned to the rule rather than the tuning (a positive trim; the clamp relationship that actually runs), and `motion-blur.ts`'s "defaults to `1`" docblock was corrected.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 510 passed in 37 files** (5 new ghost cases, plus rewritten rocket and drawTimers cases); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all thirteen touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` regenerated and lists `SprinterAfterimageController`.
+
+**Studio-only:** whether `sprinterAfterimage` exists in `ReplicatedStorage` (the agent cannot author it); whether `0.5` reads as translucent rather than as spawning-in; whether a 10/15 cycle is legible at the game camera; whether a ghost at `0.5` still hides the ball behind it; and whether the rocket's snap at 80% leaves a ball with any belt left to cross before the `EliminationZone`.
+---
+
+## 205 - A fading copy trail behind a boosted ball
+
+**Reported:** the ball should leave a short trail of fading copies of itself, like the reference effect's look, without porting the reference's rig.
+
+### What the clone is
+
+**The phantom, not the ball.** `BallRenderController` sets `LocalTransparencyModifier = 1` on the server's ball and hides the ball's six `Texture`s the same way one level down (item 99). `Clone()` copies properties, so a copy of the **ball** would carry both hides, fade invisibly and destroy itself - a working trail in the Explorer and nothing on screen. The phantom (`BALL_PHANTOM_NAME`, a `Ball`-shaped `Part` with the body's `Size`/`Color`/`Material` and six cloned `Texture`s) is the visible thing, so the copy is `phantom.Clone()` found with one `FindFirstChild` - the same read `marker-spin-controller` makes rather than adding a controller-to-controller edge.
+
+**No `effectScaleFor`.** The phantom is authored at the body's size, so any multiplier other than `1` draws a trail that is not the size of the ball it trails. `effectScaleFor` is a *ball-relative* formula for assets authored at `BASE_BALL_RADIUS`; applying it here would need a multiplier chosen to cancel it, which is a roundabout way of saying "do not scale".
+
+**Orientation is the phantom's `CFrame` wholesale** - position from the body, roll accumulated by the render controller. That is the reference's own rule (a copy preserves the source's orientation at the moment it is made); an `assetRotation` copy would draw a row of identically-facing spheres behind a rolling ball, which reads as a duplicate rather than a trail once the camera is close enough to see the skin.
+
+### The effect
+
+- `shared/config/ballTrail.config.ts` (new): `TRAIL_SPAWN_INTERVAL_SECONDS = 0.05`, `TRAIL_LIFETIME_SECONDS = 0.25`, `TRAIL_FADE_TRANSPARENCY_END = 1` (all `**Placeholder.**`), and `BALL_TRAIL_DEBUG_LOGGING = false`.
+- `BALL_TRAIL_FOLDER_NAME = "SpawnedBallTrail"` in `tuning.ts` - client-side only, created on demand.
+- `client/controllers/ball-trail-controller.ts` (new): tag scan + added signal, one `RenderStepped` loop over `Map<BasePart, TrailState>`, `Boosted` read **once and then subscribed** (not polled), a spawn deadline per body, and clones parented into the folder - **not** to the ball, so an eliminated ball's trail fades out instead of vanishing with it.
+- Fade: `TweenService` on the copy's `Transparency` **and each of its six `Texture`s**, from whatever the phantom was at (a ghost's copy starts at half) to `1`. Destroy on `Completed`, `Debris` as the backstop.
+- One boot line: `[BallTrail] mounted interval=0.05s lifetime=0.25s fade=0->1 cloneSource=phantom(BallPhantom) scale=1 ...`. Per-copy lines behind the flag.
+
+### The overlap this ships with
+
+`Boosted` is the trigger, so a boosted ball now carries the wind-boost particles **and** this trail; a boosted `sprinter` carries those two **and** the single-copy afterimage from the previous round. Three effects on one state. Recorded in the controller's docblock with the two alternatives (a second attribute with its own writer, or `BALL_SPEED > BOOST_TARGET_BALL_SPEED`, which is sprinter territory) and left for a later round to fold or gate.
+
+### Where the prompt was wrong
+
+- **`DEBUG_LOGGING` does not exist in this tree.** The prompt assumed a shared flag; inventing one every other controller would have to honour is worse than a local `BALL_TRAIL_DEBUG_LOGGING`.
+- **`vfx-scale.ts`'s `vfxForward(beltCFrame)` takes a frame** - the trails use the arg-less `beltForward()` from `client/belt-frame`. Neither is needed by this effect at all, because the phantom is already posed.
+- **The reference file was not in this round's attachments.** The mechanism described in the prompt (server-tweened per-layer transparency plus a local `LocalTransparencyModifier = 1` hide for the viewer's own body) is what the report relies on; it could not be re-read from source.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 510 passed in 37 files** (no test changes this round - the effect is a client controller with no pure surface); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; the three touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` regenerated and lists `ball-trail-controller@BallTrailController`; `wind-boost-controller.ts` and `tail-wind-controller.ts` are untouched.
+
+**Studio-only:** whether the trail reads as speed rather than as duplication; whether `0.05 s` / `0.25 s` is the right pair at the game camera; whether the copies at the phantom's own size are the right size (the acceptance criterion says they must be, and the arithmetic agrees); and whether the ball's frozen roll in each copy looks right at close range.
+---
+
+## 206 - The copy trail is the sprinter's, not every fast ball's
+
+**Reported (designer's decision):** only a sprinter body should leave a copy trail.
+
+### The gate
+
+`ball-trail-controller.ts` now requires **both** conditions in `step()`:
+
+```ts
+if (!state.boosted || state.power !== SPRINTER_POWER) {
+    state.nextSpawnAt = 0;
+    continue;
+}
+```
+
+- `TrailState` gained `power: string | undefined`, read once in `track()` and updated from a new `GetAttributeChangedSignal(POWER_ATTRIBUTE)` subscription, pushed onto the **same** connection list the `Destroying` teardown disconnects - so nothing new to clean up.
+- `POWER_ATTRIBUTE` **is a real exported constant** (`"Power"`, `shared/attributes.ts:287`), so it is imported rather than re-typed. The power *value* `"sprinter"` is a module-scope `SPRINTER_POWER`, named once so the gate and the boot line cannot disagree. It is deliberately **not** imported from `powers.config.ts`: a client controller depending on the server's power table for one word is the wrong direction, and `POWER_IDS` is an array with no per-id export.
+- `powerOf(ball)` narrows `GetAttribute`'s `AttributeValue` explicitly, returning `undefined` for a body with no power - **a third state, not folded into "some other power"**, because "no power yet" and "a different power" both mean no trail but only one of them means the body is not competing.
+- Boot line: `gate=Boosted+Power(sprinter)`. `enabledBodies=` became `emitting=`, counting bodies that pass the **full** gate - a count of boosted bodies would have read as "about to fire" on a round where every body is boosted and none is a sprinter, which is exactly the state this round removed.
+
+### The class docblock
+
+Rewritten. It argued the trail as a `Boosted` effect and called the overlap "deliberate for now"; it now states the two-condition gate, why `Boosted` alone was a duplicate of `windBoost`, and a three-row table of what a boosted sprinter carries (`windBoost` / this trail / the single-copy afterimage) versus a boosted `bully` (`windBoost` only).
+
+### Finding: the previous round's afterimage was **already** sprinter-only
+
+The prompt's decision 4 says it "is also `Boosted`-only, so it is also every boosted ball today". **That is not what shipped.** `SprinterAfterimageController` reads `SPRINTER_AFTERIMAGE_ATTRIBUTE`, and the *server* writes that attribute in `BallSpawnerService.writeSprinterAfterimage` as `power === "sprinter" && boosted === true` - a writer added in the same round. So it never saw a bare `Boosted`; the power check was simply made on the server instead of the client. No follow-up round is needed for correctness, only for the design question of whether two sprinter trails at once is the intended look.
+
+### Decisions
+
+1. **`POWER_ATTRIBUTE` is a constant** and is imported; only the value `"sprinter"` is a local literal, in one place.
+2. `power` lives on `TrailState`; the new connection goes in the same `ballConnections` array, disconnected by `forget()` on `Destroying`.
+3. **A sprinter's decoy twin trails too**, because `presentPower` gives it its parent's power. Intended: the twin is visually a second sprinter, and a twin without the trail would be identifiable at a glance - which is the one thing a decoy must not be.
+4. The afterimage needed no change (see the finding).
+5. The `gate=` field is the statement; the trail's *look* cannot say which power produced it.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 510 passed in 37 files** (unchanged - a client controller with no pure surface); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; the touched file passes `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged; `wind-boost-controller.ts`, `tail-wind-controller.ts` and `sprinter-afterimage-controller.ts` untouched.
+
+**Studio-only:** whether two sprinter trails (five-copy trail plus single-copy afterimage) read as one effect or as a doubled one, and that a boosted `bully` now shows only `windBoost` - the whole point of the gate, and not something the report can confirm without a playtest.
+---
+
+## 207 - Diagnostics for `tailWind` and `BallTrail`: which link is broken
+
+**Reported:** both effects mount and never fire, and the log cannot say whether the server never wrote the attribute, the client never read it, or the clone failed.
+
+### The headline finding, which needs no playtest
+
+**Neither controller has ever printed anything after its mount line.** `tail-wind-controller.ts` and `wind-boost-controller.ts` each contain exactly one `print` (the mount) plus two `warn`s (asset refusals); `attach` and `detach` were silent. `BallTrail`'s only per-copy lines were behind `BALL_TRAIL_DEBUG_LOGGING = false`.
+
+So "mounts and never prints" was **never evidence of a broken chain** - it was the absence of instrumentation. Two rounds of reasoning treated silence as a fault, and the silence was by design.
+
+### The attribute names are not the bug
+
+| constant | literal | importers |
+| --- | --- | --- |
+| `BOOSTED_ATTRIBUTE` | `"Boosted"` | writer `ball-spawner-service.ts`, readers `ball-trail-controller.ts`, `wind-boost-controller.ts` |
+| `TAIL_WIND_ATTRIBUTE` | `"TailWind"` | writer `ball-spawner-service.ts`, reader `tail-wind-controller.ts` |
+
+Writer and reader import **the same exported constant** in both cases, so a string mismatch is not possible without someone re-typing a literal. `[Spawner] attributes boosted="Boosted" tailWind="TailWind" ...` now prints both at boot, from the constants, so this stays true.
+
+### Lines added
+
+- `[Spawner] attributes boosted="…" tailWind="…" tailWindMinSpeed=… boostHysteresis=…` - once at boot.
+- `[Spawner] boosted <path> = <bool> (speed=… belt=… relative=…)` - in `writeBoosted`, **on transition only**.
+- `[Spawner] tailWind <path> = <bool> (speed=… belt=… relative=… boosted=… minSpeed=…)` - in `writeTailWind`, on transition only. `belt` is reconstructed as `speed - relative` because the writer is not passed the belt speed; `boosted` is printed **from the parameter**, so a disagreement between what the decision saw and what the attribute says would be visible here.
+- `[TailWind] read body=… value=<true|false|nil>` - every read, initial and on change, unthrottled.
+- `[BallTrail] read body=… value=<true|false|nil> power=<…|nil>` - same, plus the `Power` gate, because a sprinter-only trail that reads `value=true power=nil` is a *different* fault from one that reads `value=false`.
+- `[TailWind] clone body=… clone=… size=x,y,z` / `[TailWind] destroy body=… clone=… age=…s`.
+- `[BallTrail] spawn body=… clone=… size=x,y,z` / `[BallTrail] despawn clone=… age=…s` - **now unconditional**, out from behind the debug flag.
+- `attribute="…"` added to both existing mount lines.
+- `[Pickup] re-touch spam is on: …` once at `PickupService.onStart`.
+
+`nil` is printed as `nil` rather than coerced to `false`: a key that was never set is a fourth answer and a different bug.
+
+**Transition-only for the server lines**, and that is the design: a body flips `Boosted` a handful of times a ride and `TailWind` twice, so the volume is dozens per round. A per-tick line would be the recycle-spam problem the same round is trying to see past.
+
+### Where this prompt was wrong
+
+- **Decision 3's premise** ("the mount line found zero markers on `Intermission`") does not describe a marker: neither effect uses markers. `BallTrail`'s mount reads `bodies=` from its tag scan, which is `0` before any body exists - expected, and not a finding.
+- **The log quoted in the prompt is stale.** It shows `enabledBodies=0`, a field item 206 renamed to `emitting=`. So the evidence predates the sprinter gate: since then a body needs `Power === "sprinter"` **and** `Boosted`, and a round where nobody picks sprinter correctly produces no trail at all.
+- **`BALL_TRAIL_DEBUG_LOGGING` was not "off by design" in a useful sense** - it was off, and the effect had no other evidence. That flag is now consulted for nothing but the tween's start-transparency detail; the spawn and despawn lines are unconditional.
+- `tail-wind-controller` had no `bornAt` map, so the `age=` field is new state: one map, deleted in the same two places the trail map is.
+
+### What the log will say, per breakage
+
+| breakage | what appears |
+| --- | --- |
+| server never calls the writer | `[Spawner] attributes …` prints; no `[Spawner] tailWind`/`boosted` lines at all |
+| condition never fires | `[Spawner] tailWind` absent **and** no `[Spawner] boosted` transition where one is expected - the parenthetical shows why (`relative`, `boosted`, `minSpeed`) |
+| client never reads | `[Spawner] … = true` prints, no `[TailWind] read` follows |
+| clone fails | `[TailWind] read … value=true` and no `[TailWind] clone`; or `clone` then `destroy … age=0s` |
+
+**Validation:** `npm run build` exit 0; **`npm test` = 510 passed in 37 files** (unchanged - diagnostics only); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all four touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged. `git diff -U0` on the four files shows this round's deletions are **one line**: the old `[TailWind] mounted` string, replaced by the same line plus `attribute=`. The two other deletion lines in the working tree are item 204's, from earlier this session.
+
+**Studio-only:** which of the four links is actually broken, whether `[Pickup] re-touch spam is on:` fires (it prints at `onStart`, so it always will, but the *spam it describes* only appears while a recycle ball is parked), and whether the sprites/particles appear once the chain is proved intact.
+---
+
+## 208 - A 120-second cap, eliminated rows on the board, Stop Watching / Watch Race, and a frozen character
+
+### 1. `Playing` ends at two minutes, ranked by the leaderboard's own formula
+
+- `PLAYING_CAP_SECONDS = 120` in `tuning.ts`, marked as **the designer's number, not a Placeholder**, with a docblock that records the reversal of item 37 honestly: what item 37 was right about (a cap cuts a round where an elimination was about to happen, and the body it stops is not necessarily the winner) is still true and is not argued away; what changed is that the winner now comes from `distanceFromSpawnEdge`, the same function the leaderboard ranks with, so the body named at 120 s is the body the HUD already showed at rank 1. The old cap invented a ranking; this one reads the one on screen.
+- `src/shared/position.ts` (new): `distanceFromSpawnEdge(beltCFrame, beltLength, position)`. It has to be shared because `LeaderboardService` **injects** `RoundService`, so the reverse read is a cycle. `leaderboard-service.ts` now calls it instead of writing the formula out, and `round-service.ts` imports it.
+- `RoundService.checkTimeCap(live)`, reached only from `checkEndCondition`'s `continue` branch - so "last standing" and "no survivors" win every race against the clock. It declines when no belt is bound rather than naming a winner from nothing, which is the specific failure item 37 recorded.
+- The line: `[Round] Playing → PostGame (elapsed=120.03, time cap, live=4: <path> at 120s (distance=88.4), winner=…, owner=…)`.
+
+### 2. Eliminated competitors stay on the board, red and struck through
+
+- `LeaderboardEntry` gains `eliminated: boolean`.
+- `RoundService` gains a second elimination list, `eliminatedRows: Array<LeaderboardEntry>`, written in `recordElimination(owner, ball)` - **with the distance read before the caller destroys the body**, which is the only moment it exists. `eliminatedOwners` is left alone: it is the payout order and `shared/round-payout` reads it as exactly that.
+- `getEliminationsThisRound()` returns a defensive copy; `LeaderboardService.collect()` merges those rows into the live ones and sorts the whole list ascending, so an eliminated body sorts to where it stopped.
+- **Rank is re-derived, not frozen** (decision 4). The distance is frozen; the place improves as live bodies fall behind it, which is what a race result means.
+- `leaderboard-controller.ts`: `RichText = true` on the name label **always** (toggling it re-parses the text, so a name would visibly change at the moment a row died), `<s>` around the name when eliminated, and `theme.colors.error` on both the name and the rank. A new `escapeRichText` escapes `&`, `<`, `>` so a debug body name cannot swallow the row. The self ring stays gold - it says "this is you", not "you are alive".
+
+### 3. Stop Watching / Watch Race, and the `Competing` bug behind it
+
+- `SPECTATE_LABEL_OFF = "Watch Race"`, `SPECTATE_LABEL_ON = "Stop Watching"` (were `"Spectate"` / `"Stop spectating"`).
+- **`Competing` is now written at elimination**, not only at spawn and teardown: `clearCompeting(owner)` is called from `recordElimination`, so both removal paths get it by construction rather than by two call sites remembering to agree. That is the root of "players can walk around when spectating": an eliminated player kept `Competing = true`, so `spectateAvailable` never offered the button and `cameraWantsArena` kept the arena camera engaged while their character was free to walk.
+- `cameraWantsArena` needed **no change** (decision 6): its body is `return spectating || competing;` inside `ARENA_CAMERA_PHASES`, which already produces the right answer for both labels.
+
+### 3.1 The freeze
+
+- New `client/controllers/character-freeze-controller.ts`; `flamework.build` regenerated and lists it.
+- `WalkSpeed` / `JumpHeight` are captured on freeze entry and restored from the capture - **never** 16 / 50 - and a `Humanoid` swap (respawn) drops the capture, so a restore cannot be applied to a body that no longer exists.
+- `lockControls()` is taken on freeze and released on thaw: the lock covers touch, `WalkSpeed = 0` covers everything the lock cannot reach, and `WalkSpeed = 0` leaves the state machine in `idle` so the freeze reads as standing still rather than as lag.
+- `player.CharacterAdded` re-poses, so a player who dies while frozen does not come back walking.
+- Lines: `[CharacterFreeze] mounted …`, and one `frozen reason=…` / `thawed reason=…` per transition.
+
+### Where the prompt was wrong
+
+1. **`endPlaying` does not take an ordered list.** It takes `(reason, winner, survivors?)`; `payOut` derives the ranking from `roundParticipants` + `eliminatedOwners` + `winner` inside `shared/round-payout`. So decision 3's "does `payOut` accept a cap-length ordered list" has no length bound to widen - it takes no list at all.
+2. **That exposed a real gap the prompt's criterion 3 assumed was solved.** The derived ranking is `winner ++ reversed(eliminated)`, so a capped round's *other* survivors would each have got `placement = 0` - base coins only - while an already-eliminated body collected second place. `RoundPayoutRace` therefore gained an optional `survivors` field, filled only by the cap path, ranked between the winner and the fallen. An empty/absent value leaves the natural-end ranking byte-identical, which three new spec cases pin.
+3. **`ROUND_IDLE_WARN_SECONDS` fires at most once per round, not at 60 s and again at 120 s.** `idleWarned` is a latch and the clock resets on every elimination, so a quiet round prints it once, 60 s after the last body left.
+4. **The `spectate` button was already bottom centre on `hudCore`** and already reads `spectateAvailable`; only the two words changed.
+5. **`Humanoid.WalkSpeed` is written nowhere in the tree** - confirmed by a full search, not assumed. The freeze is the first writer, which is why capture-and-restore is cheap to get right now and would not have been later.
+
+### Decisions
+
+1. `shared/position.ts`, imported by `leaderboard-service.ts` and `round-service.ts`; the cycle forbids the alternative.
+2. `eliminatedRows` is a **second** list of `LeaderboardEntry`, written in `recordElimination(owner, ball)` from both removal sites, distance read before `Destroy()`.
+3. `payOut` accepts no list; its ranking gained an optional `survivors` list instead.
+4. **Re-derived rank**, frozen distance.
+5. **New controller** (`CharacterFreezeController`), not an extension of `spectate-controller`: the spectate button owns an ask, this owns a character, and one is a control while the other runs on every phase change whether or not the button exists.
+6. `cameraWantsArena` unchanged.
+7. Label was `"Spectate"` / `"Stop spectating"`.
+8. `RichText` + `<s>` is the only strikethrough a `TextLabel` has - there is no property for it and a `UIStroke` outlines rather than crosses. Escaped, because `RichText` makes the label a markup parser.
+9. Nowhere.
+10. **Worked example, 4 survivors + 4 eliminated at the cap:** places are `1` winner, `2`..`4` survivors by distance ascending, `5`..`8` eliminated in *reverse* elimination order (last to fall is 5th). Bonuses come from `[10, 5, 0]`, so `placement=1 base=10 bonus=10 total=20`, `placement=2 base=10 bonus=5 total=15`, and every other place `base=10 bonus=0 total=10`.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 517 passed in 38 files** (four new `position` cases, three new `payoutAwards` cases); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all eight touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` regenerated and lists `character-freeze-controller@CharacterFreezeController`.
+
+**Studio-only:** whether `RichText` renders `<s>` in the leaderboard's Gotham font at the caption size; whether the bottom-centre button sits under the elimination splash when item 73's layer fires; whether the freeze reads as "standing still" rather than as "lagged"; and whether 120 s is the right cap once a payout has been seen.
+---
+
+## 209 - The freeze mirrors the camera, and the eliminated block sits under the live field
+
+### Bug 1: the freeze asked the wrong question
+
+**Before:** `character-freeze-controller.ts`'s predicate was `!this.competing || this.phase !== PLAYING_PHASE`. It asked *"is this player competing"*; the question that decides whether a character may walk is *"where is the camera"*. Three states separate the two, and the session log shows two of them:
+
+- `Intermission`, not competing - lobby view, camera on the character, character frozen. The log's opening line is `mounted phase=Intermission competing=false frozen=true`, so a player could not walk in the lobby at all.
+- `Playing`, eliminated, `spectating` false - `19:03:12.643 [TreadmillCamera] restored (phase Playing) to=Custom` and **no `[CharacterFreeze] thawed` line ever after it**, twice.
+
+**After:** `return cameraWantsArena(this.phase, this.competing, isSpectating())` - the same function the camera decides with.
+
+- `cameraWantsArena` **was already in `shared/spectate.ts`** (item 193); no extraction was needed, only a second reader.
+- `spectating` reaches the freeze through a new `client/spectating.ts` - a module-level boolean with `isSpectating` / `setSpectating` / `onSpectatingChanged`. A `Player` attribute is **not possible here**: the ask is made on the client, and a client cannot `SetAttribute` on a `Player`, so option (b) would have needed a remote the prompt forbids. `TreadmillCameraController.setSpectating` remains the single writer and now mirrors its latch into that module.
+- **Respawn is now correct in all three states**, and a leak was found while wiring it: a respawn while frozen re-captured `WalkSpeed` and took a *second* `lockControls()` hold, which `thaw` would release once - leaving the touch stick disabled for the session. The capture and the lock are now released together on a humanoid swap.
+
+### Bug 2: the eliminated block, and a key collision that was mine
+
+**State: C plus a defect introduced by item 208's own leaderboard change.**
+
+- The merge **had** landed: `collect()` appends `round.getEliminationsThisRound()`, and the distance is captured **before** `Destroy()` in both removal paths - so not State A and not State B.
+- **The row key was the bug.** `eliminationRowFor` used `ball.GetFullName()`, which looked unique and is not: every body is `Workspace.SpawnedBalls.Ball`. Five eliminated competitors produced five rows sharing **one** key, which `rank()`'s `byKey` map collapsed into a single row, and the client's row map did the same. The surviving row carried whichever distance won the insert - which is how an eliminated competitor could appear to hold a rank it had not earned. The live pass uses `LeaderboardService.keyFor` (`B1`, `B2`, …) for exactly this reason; `RoundService` cannot call it without the cycle this round's other half exists to avoid, so eliminated rows get their own namespace (`E1`, `E2`, …), reset per round.
+- **The sort was also wrong** (State C proper): eliminated rows were merged into the live ascending-by-distance order, so a body eliminated near the spawn edge outranked every live body.
+
+**Now:** `rank(live, eliminated)` ranks the live field with the existing swap-threshold algorithm and **appends** the eliminated block, most-recent-first, without reordering it. `getEliminationsThisRound()` iterates its record backwards to produce that order.
+
+Worked example - 3 live at distance `100 / 200 / 300`, 3 eliminated at `t1 < t2 < t3`:
+
+| rank | row |
+| --- | --- |
+| 1 | live, 100 |
+| 2 | live, 200 |
+| 3 | live, 300 |
+| 4 | eliminated at `t3` (most recent) |
+| 5 | eliminated at `t2` |
+| 6 | eliminated at `t1` |
+
+An eliminated body **never** outranks a live one, whatever its frozen distance. The frozen distance is display only.
+
+**Alternative, for a later round if the stack reads wrong on screen:** sort the eliminated block by frozen distance ascending instead of by elimination time. That is one comparator inside `getEliminationsThisRound`.
+
+### Also fixed
+
+- `freeze()` printed on **every** `sync()`, so the log carried repeated `frozen reason=competing phase=Intermission` lines for an unchanged state. It now prints on the transition only, and the reason is one of `spectating` / `competing` / `phase` - the distinction the log could not make.
+- Synthetic `Debug#N` owners now get eliminated rows too, because the live pass gives them live rows; only a body with **no** owner (a decoy twin) is excluded. Decoy twins appearing live but not eliminated is a pre-existing asymmetry, noted rather than changed.
+
+### Where the prompt was wrong
+
+1. **`cameraWantsArena` was already in `shared/`** (item 193), not inside `treadmill-camera-controller.ts`. No extraction.
+2. **Option (b) - a `Player` attribute - is not available**: a client cannot set an attribute on a `Player`. It would need a remote.
+3. **Item 208's merge had landed and its distance capture was already before `Destroy()`** - so neither State A nor State B. The defect was a **key collision you could not have seen from the prompt**, plus the sort.
+4. `@rbxts/lemon-signal` is not a dependency of this project; `client/spectating.ts` uses a plain listener list instead of adding one.
+5. The prompt's `ARENA_CAMERA_PHASES` guess was right: `Waiting`, `Playing`, `PostGame`. `Intermission` is excluded, which is what unfreezes the lobby.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 517 passed in 38 files** (unchanged - the changed ordering lives inside `LeaderboardService.rank`, which cannot be constructed in Jest, so it is verified by reading rather than by a case); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; all five touched files pass `prettier --check`; `\uXXXX` under `src/` = 0; `flamework.build` unchanged (no controller added or removed).
+
+**Studio-only:** that the character actually walks after Stop Watching (the new `[CharacterFreeze] thawed reason=spectating` line proves the decision changed, not the effect); that an eliminated row reads as red strikethrough **below** the live field; and that reset in each of the three states leaves the character walkable exactly when the camera is on it.

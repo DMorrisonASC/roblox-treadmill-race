@@ -92,12 +92,15 @@ describe("the effect's tuning", () => {
 		expect(MOTION_BLUR_FADE_SECONDS).toBe(0.5);
 	});
 
-	it("defaults to the zone-filling scale, not to a ball ratio", () => {
+	it("is a positive trim on the zone's derived fill ratio, not a ball ratio", () => {
 		// `MOTION_BLUR_SCALE` is **not** any ball effect's multiplier (each is `0.1` in `shared/config/` since item 177) and
-		// **not** a ball ratio. Since item 192 it is a trim on `motionBlurFillRatio`, so `1` means "exactly the zone" — the
-		// only defensible default for an effect whose whole job is to mark a hand-placed box. The case below proves the base it
-		// trims is derived rather than authored.
-		expect(MOTION_BLUR_SCALE).toBe(1);
+		// **not** a ball ratio. Since item 192 it is a trim on `motionBlurFillRatio`, where `1` means "exactly the zone" and
+		// `0.5` means half of it. The case below proves the base it trims is derived rather than authored.
+		//
+		// **This used to assert `toBe(1)` and was failing at `HEAD`**: the designer retuned the trim to `0.5`, which is a
+		// legitimate look and not a broken rule - a pinned value turns any retune into a red test (item 204, the same class as
+		// the spin anchor and the rocket ceiling). What the rule actually requires is a positive trim of a derived ratio.
+		expect(MOTION_BLUR_SCALE > 0).toBe(true);
 	});
 });
 

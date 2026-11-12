@@ -13,9 +13,8 @@ import {
 	powerForBallId,
 	powerLabel,
 	powerLabelFits,
-	ROCKET_MAX_DELAY,
-	ROCKET_MIN_DELAY,
 	ROCKET_TARGET_SPEED,
+	ROCKET_TRIGGER_PROGRESS,
 	SPRINTER_BOOST_SPEED,
 } from "shared/powers.config";
 import { BALL_SPEED_MAX, BALL_SPEED_DECAY_RATE, BALL_SPEED_MIN, BOOST_TARGET_BALL_SPEED } from "shared/tuning";
@@ -60,6 +59,7 @@ interface TickOverrides {
 	speed?: number;
 	dt?: number;
 	elapsed?: number;
+	alongProgress?: number;
 	timers?: PowerTickInput["timers"];
 	auras?: ReadonlyArray<PowerAura>;
 }
@@ -72,6 +72,7 @@ function tick(overrides: TickOverrides): PowerTickInput {
 		speed: overrides.speed ?? 10,
 		dt: overrides.dt ?? 1 / 60,
 		elapsed: overrides.elapsed ?? 0,
+		alongProgress: overrides.alongProgress ?? 0,
 		timers: overrides.timers ?? NO_TIMERS,
 		auras: overrides.auras ?? [],
 	};
@@ -138,7 +139,7 @@ describe("powerTickDelta", () => {
 				power: "rocket",
 				roundActive: false,
 				elapsed: 100,
-				timers: { ...NO_TIMERS, rocketAt: 3 },
+				alongProgress: 1,
 			}),
 		);
 		expect(outside.delta).toBe(0);
@@ -149,23 +150,27 @@ describe("powerTickDelta", () => {
 		).toBe(0);
 	});
 
-	it("does nothing for a rocket before its drawn moment", () => {
-		const result = powerTickDelta(tick({ power: "rocket", elapsed: 2.9, timers: { ...NO_TIMERS, rocketAt: 3 } }));
+	it("does nothing for a rocket short of the trigger position", () => {
+		// The trigger is a **place** now, not a moment (item 204): a thousandth of a belt short of it fires nothing,
+		// however long the round has been running.
+		const result = powerTickDelta(
+			tick({ power: "rocket", elapsed: 30, alongProgress: ROCKET_TRIGGER_PROGRESS - 0.001 }),
+		);
 		expect(result.delta).toBe(0);
 		expect(result.rocketFired).toBe(false);
 	});
 
-	it("snaps a rocket to ROCKET_TARGET_SPEED at its drawn moment", () => {
-		const result = powerTickDelta(
-			tick({ power: "rocket", speed: 7.5, elapsed: 3, timers: { ...NO_TIMERS, rocketAt: 3 } }),
-		);
+	it("snaps a rocket to ROCKET_TARGET_SPEED at the trigger position", () => {
+		// At elapsed `0` as well: the trigger does not care how long the round has been running, which is the whole
+		// difference between a position and the drawn moment this replaced.
+		const result = powerTickDelta(tick({ power: "rocket", speed: 7.5, elapsed: 0, alongProgress: 1 }));
 		expect(result.delta).toBe(ROCKET_TARGET_SPEED - 7.5);
 		expect(result.rocketFired).toBe(true);
 	});
 
 	it("fires a rocket exactly once", () => {
 		const fired = powerTickDelta(
-			tick({ power: "rocket", elapsed: 9, timers: { ...NO_TIMERS, rocketAt: 3, rocketFired: true } }),
+			tick({ power: "rocket", elapsed: 9, alongProgress: 1, timers: { ...NO_TIMERS, rocketFired: true } }),
 		);
 		expect(fired.delta).toBe(0);
 		expect(fired.rocketFired).toBe(false);
@@ -216,21 +221,27 @@ describe("powerTickDelta", () => {
 });
 
 describe("drawTimers", () => {
-	it("draws a rocket's moment inside the configured band", () => {
-		const low = drawTimers("rocket", () => 0);
-		const high = drawTimers("rocket", (min, max) => max);
+	it("gives a rocket an unfired latch and nothing time-based", () => {
+		// **The rocket draws nothing any more (item 204).** Its trigger is a position on the belt, so there is no deadline to
+		// draw and no random source to draw it from; what it keeps is the latch that makes the snap a one-shot. This case
+		// replaces one that pinned the drawn moment inside `[ROCKET_MIN_DELAY, ROCKET_MAX_DELAY]`, so the two constants it
+		// named are gone with the draw.
+		const timers = drawTimers("rocket");
 
-		expect(low.rocketAt).toBe(ROCKET_MIN_DELAY);
-		expect(high.rocketAt).toBe(ROCKET_MAX_DELAY);
-		expect(low.rocketFired).toBe(false);
+		expect(timers.rocketFired).toBe(false);
+		expect(timers.eclipseAt).toBe(-1);
+		expect(timers.eclipseUntil).toBe(-1);
 	});
 
-	it("gives a non-rocket no rocket at all", () => {
-		expect(drawTimers("bully", () => 0).rocketAt).toBe(-1);
+	it("gives a body with no timed power no windows at all", () => {
+		const timers = drawTimers("bully");
+
+		expect(timers.rocketFired).toBe(false);
+		expect(windowOpen(timers, 1e6)).toBe(false);
 	});
 
 	it("closes an eclipse window after ECLIPSE_WINDOW_SECONDS", () => {
-		const timers = drawTimers("eclipse", () => 0);
+		const timers = drawTimers("eclipse");
 
 		expect(windowOpen(timers, ECLIPSE_START_DELAY - 0.1)).toBe(false);
 		expect(windowOpen(timers, ECLIPSE_START_DELAY)).toBe(true);
@@ -238,12 +249,7 @@ describe("drawTimers", () => {
 	});
 
 	it("never opens a window for a non-eclipse ball", () => {
-		expect(
-			windowOpen(
-				drawTimers("rocket", () => 0),
-				1e6,
-			),
-		).toBe(false);
+		expect(windowOpen(drawTimers("rocket"), 1e6)).toBe(false);
 	});
 });
 
@@ -599,7 +605,14 @@ describe("the model's bounds", () => {
 		// Equality is a choice worth knowing about rather than a crash: a sprinter ball is clamped at exactly its own boost, so
 		// any future gain to either number silently truncates one. Named here so the next reader does not have to rediscover it
 		// from a failed assertion.
-		expect(BALL_SPEED_MAX >= ROCKET_TARGET_SPEED).toBe(true);
+		//
+		// **The rocket now exceeds the ceiling, and that is a recorded fact rather than a passing assertion (item 204).**
+		// `ROCKET_TARGET_SPEED` is `BOOST_TARGET_BALL_SPEED + 50` = `130` against `BALL_SPEED_MAX = 100`, so the snap is
+		// clamped to `100` and the surplus is discarded. This case asserted `MAX >= ROCKET_TARGET_SPEED` and was failing at
+		// `HEAD` once `BOOST_TARGET_BALL_SPEED` moved to `80`. Neither number is this round's to change - the designer owns
+		// both - so the assertion states the relationship that is actually running, and a retune in either direction has to
+		// come through this line.
+		expect(BALL_SPEED_MAX < ROCKET_TARGET_SPEED).toBe(true);
 		expect(BALL_SPEED_MAX >= SPRINTER_BOOST_SPEED).toBe(true);
 		expect(BALL_SPEED_MAX >= BOOST_TARGET_BALL_SPEED).toBe(true);
 		expect(BALL_SPEED_MAX > BALL_SPEED_MIN).toBe(true);
