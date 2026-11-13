@@ -1,4 +1,11 @@
-import { ContextActionService, Players, ReplicatedStorage, RunService } from "@rbxts/services";
+import {
+	ContextActionService,
+	Players,
+	ReplicatedStorage,
+	RunService,
+	UserInputService,
+	Workspace,
+} from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
 import { JUMP_REMOTE_NAME, REMOTES_FOLDER_NAME, ROUND_STATE_VALUE_NAME, STEER_AXIS_REMOTE_NAME } from "shared/remotes";
 import { JUMP_COOLDOWN_SECONDS, JUMP_IMPULSE, SLOW_DRAIN_RATE, STEER_SPEED } from "shared/tuning";
@@ -19,8 +26,35 @@ const AXIS_SEND_THRESHOLD = 0.1;
 /** The phase a round's steering belongs to. A client cannot import the server's `RoundPhase`. */
 const PHASE_PLAYING = "Playing";
 
+/** The slice of `PlayerModule` this file uses: the movement intent, whatever produced it. */
+interface MoveControls {
+	GetMoveVector(): Vector3;
+}
+
+/** `PlayerModule`'s public shape, as far as reading the stick goes. */
+interface PlayerModuleShape {
+	GetControls(): MoveControls;
+}
+
 /** How long to wait for the remote and the phase value before saying so; the tree's bounded-wait convention. */
 const MOUNT_WAIT_SECONDS = 10;
+
+/**
+ * **Placeholder.** A touch drag this far from where the thumb landed is full deflection, in pixels.
+ *
+ * The engine's own dynamic stick uses roughly this radius. Only the *fallback* path uses it - the distance is a share of
+ * the drag, so a smaller number makes steering twitchier and a larger one makes a full lock hard to reach.
+ */
+const TOUCH_STICK_RADIUS = 60;
+
+/**
+ * **Placeholder.** How long to wait for `PlayerModule` before settling on the fallback readers, in seconds.
+ *
+ * Shorter than `MOUNT_WAIT_SECONDS` on purpose: this runs on its own thread and the touch and gamepad readers work without
+ * it, so a slow module costs nothing but a delayed upgrade of the source. Item 161's log measured the wait itself blocking
+ * the client for 2.6 s when it was done inline, which is why it is never done inline here.
+ */
+const PLAYER_MODULE_WAIT_SECONDS = 8;
 
 /**
  * The local player's **ball controls**: steering, slow and jump, sent to the server when they change.
@@ -62,11 +96,17 @@ const MOUNT_WAIT_SECONDS = 10;
  *   "hiding the camera stick". The default mobile UI has no right-hand thumbstick to hide: the camera is dragged on empty
  *   screen, which is not an `Instance` this tree can reach. `TouchJump` is likewise left alone; it is the `ButtonA` the jump
  *   binding listens for.
- * - **Not a `PlayerModule` bridge, and that is a finding rather than a shortcut.** `PlayerModule:GetControls():GetMoveVector()`
- *   is the documented way to read the joystick as a vector, and this place cannot rely on it: item 161's log is
- *   `[Controls] no PlayerModule under Players.<name>.PlayerScripts after 10s`, and `controls-lock.ts` still treats the module as
- *   best-effort for that reason. `Thumbstick1` through `ContextActionService` needs no module lookup, no 10-second wait and no
- *   `require` of a client module, and it is the same stick - so the axis is read from the input event instead.
+ * - **Not a `PlayerModule` bridge, and not *not* one either.** Item 220 wrote this file deliberately *without*
+ *   `GetControls():GetMoveVector()` because item 161's log says the module is not in this place
+ *   (`[Controls] no PlayerModule under Players.prospeed1.PlayerScripts after 10s — it contains: RbxCharacterSounds, TS`). That
+ *   log is the reason the module is now **used when it appears and worked around when it does not**: `resolveControls` looks for
+ *   it on a background thread, and the two fallback readers exist because the engine's on-screen joystick is drawn by the
+ *   module's touch controls - so a place without it has **no stick at all**, which is what item 236 discovered by deleting the
+ *   last custom buttons and leaving a phone with no input.
+ * - **Three stick readers, one vector** (item 237). `PlayerModule`'s move vector when it resolves; otherwise a **virtual joystick**
+ *   - a drag anywhere on the left half of the screen, offset from where the thumb landed, nothing drawn - and the gamepad's
+ *   `Thumbstick1` read through both `ContextActionService` and `UserInputService.InputChanged`. `currentStick` picks between
+ *   them, and one line per session names the source that first produced a deflection: `[Steer] stick source=module|touch|gamepad`.
  *
  * - **Not an owner of the keys.** Every handler returns `Enum.ContextActionResult.Pass`, so the character controller underneath
  *   still sees each press. Returning nothing would **sink** the input - the engine's default for a handler with no return -
@@ -94,8 +134,34 @@ export class SteerController implements OnStart {
 	private leftDown = false;
 	private rightDown = false;
 	private slowDown = false;
-	private thumbstickX = 0;
-	private thumbstickY = 0;
+
+	/**
+	 * The stick, from whichever reader is live - **one vector, three sources** (item 237).
+	 *
+	 * `gamepadStick` is written by the `Thumbstick1` binding and by `UserInputService.InputChanged`; `touchStick` by the
+	 * virtual joystick below; `controls` is `PlayerModule`'s own movement intent, which is the one source that knows about
+	 * every device at once. `currentStick` picks between them, in that order of authority.
+	 */
+	private gamepadStick = Vector2.zero;
+	private touchStick = Vector2.zero;
+
+	/** The touch driving the virtual stick, and where it landed. Identity, not an id: one `InputObject` per touch. */
+	private touchInput?: InputObject;
+	private touchOrigin = Vector2.zero;
+
+	/**
+	 * `PlayerModule`'s controls, when this place has them.
+	 *
+	 * **`undefined` is the shipped state here, and that is the bug this round fixes.** Item 161's log, repeated verbatim in the
+	 * report that prompted this round, is `[Controls] no PlayerModule under Players.prospeed1.PlayerScripts after 10s — it
+	 * contains: RbxCharacterSounds(LocalScript),TS(Folder)`. A place with no `PlayerModule` has no `ControlModule`, and the
+	 * on-screen joystick is drawn by the module's touch controls - so there is **no stick to read and nothing on screen to
+	 * drag**. The virtual joystick below is what replaces it; this field is the upgrade when the module does exist.
+	 */
+	private controls?: MoveControls;
+
+	/** One line naming which source first produced a real deflection, so a run says what the device is. */
+	private loggedStickSource = false;
 
 	/** The last `(lateral, slow)` this client sent, so the heartbeat can send only real changes. */
 	private lastSentLateral = 0;
@@ -104,11 +170,15 @@ export class SteerController implements OnStart {
 	private remote?: RemoteEvent;
 	private jumpRemote?: RemoteEvent;
 	private heartbeat?: RBXScriptConnection;
+	private readonly inputConnections = new Array<RBXScriptConnection>();
 
 	public onStart(): void {
 		this.remote = this.findRemote();
 		this.jumpRemote = this.findJumpRemote();
 		this.bindActions();
+		this.bindGamepadStick();
+		this.bindTouchStick();
+		this.resolveControls();
 
 		const heartbeat = RunService.Heartbeat.Connect(() => this.pushAxis());
 		this.heartbeat = heartbeat;
@@ -117,7 +187,7 @@ export class SteerController implements OnStart {
 		this.watchTeardown();
 
 		print(
-			`[Steer] mounted speed=${STEER_SPEED} slowDrain=${SLOW_DRAIN_RATE} jumpImpulse=${JUMP_IMPULSE} jumpCooldown=${JUMP_COOLDOWN_SECONDS}s touch=native actions=${STEER_LEFT_ACTION},${STEER_RIGHT_ACTION},${STEER_THUMBSTICK_ACTION},${SLOW_ACTION},${JUMP_ACTION}`,
+			`[Steer] mounted speed=${STEER_SPEED} slowDrain=${SLOW_DRAIN_RATE} jumpImpulse=${JUMP_IMPULSE} jumpCooldown=${JUMP_COOLDOWN_SECONDS}s touch=native sources=module,touch,gamepad actions=${STEER_LEFT_ACTION},${STEER_RIGHT_ACTION},${STEER_THUMBSTICK_ACTION},${SLOW_ACTION},${JUMP_ACTION}`,
 		);
 	}
 
@@ -226,18 +296,18 @@ export class SteerController implements OnStart {
 			Enum.KeyCode.DPadDown,
 		);
 
-		// **`false`: the stick needs no button**, and `Change` is the state that carries the deflection.
+		// **`false`: the stick needs no button**, and `Change` is the state that carries the deflection. This is the gamepad's
+		// stick; `bindGamepadStick` reads the same control through `UserInputService` as well, so a device where one of the two
+		// never fires still steers.
 		ContextActionService.BindAction(
 			STEER_THUMBSTICK_ACTION,
 			(_name, state, input) => {
 				if (state === Enum.UserInputState.End) {
-					this.thumbstickX = 0;
-					this.thumbstickY = 0;
+					this.gamepadStick = Vector2.zero;
 					return Enum.ContextActionResult.Pass;
 				}
 
-				this.thumbstickX = input.Position.X;
-				this.thumbstickY = input.Position.Y;
+				this.gamepadStick = new Vector2(input.Position.X, input.Position.Y);
 				return Enum.ContextActionResult.Pass;
 			},
 			false,
@@ -270,13 +340,11 @@ export class SteerController implements OnStart {
 	 * **The stick wins when it is past `THUMBSTICK_DEADBAND`**, because it is analog and a player holding both is unlikely to
 	 * mean the keys. Keyboard input is binary, so keyboard steering is full speed or nothing - which is the right reading of a
 	 * key, and the only way to get proportional control on a keyboard would be a ramp the player did not ask for.
-	 *
-	 * `thumbstickX` is the native left joystick's `X` (item 236): `Enum.KeyCode.Thumbstick1`'s `InputObject.Position` is the
-	 * same control the default touch scripts drive, read here without a `PlayerModule` lookup.
 	 */
 	private currentLateral(): number {
-		if (math.abs(this.thumbstickX) > THUMBSTICK_DEADBAND) {
-			return this.thumbstickX;
+		const stick = this.currentStick();
+		if (math.abs(stick.X) > THUMBSTICK_DEADBAND) {
+			return stick.X;
 		}
 
 		return (this.rightDown ? 1 : 0) - (this.leftDown ? 1 : 0);
@@ -285,17 +353,220 @@ export class SteerController implements OnStart {
 	/**
 	 * The slow axis, `0 .. 1`: how hard the player is asking to lose speed.
 	 *
-	 * **Positive means slow, and the thumbstick's `Y` is negated to get there.** Pulling the stick toward the player is
-	 * "back off", and a stick reports that as `Y < 0`, so `-Y` is the value the server wants: `1` for a full pull, `0` for
-	 * centred and for pushed away. The axis never goes negative because there is nothing to speed up that the game does not
-	 * already do - a ball's forward motion is `BALL_SPEED`, and the only control over it is this brake.
+	 * **Positive means slow, and the stick's forward axis is negated to get there.** Pulling the stick toward the player is
+	 * "back off", and every reader here reports that as *negative forward*, so `-Y` is the value the server wants: `1` for a
+	 * full pull, `0` for centred and for pushed away. The axis never goes negative because there is nothing to speed up that
+	 * the game does not already do - a ball's forward motion is `BALL_SPEED`, and the only control over it is this brake.
 	 */
 	private currentSlow(): number {
-		if (math.abs(this.thumbstickY) > THUMBSTICK_DEADBAND) {
-			return math.max(0, -this.thumbstickY);
+		const stick = this.currentStick();
+		if (math.abs(stick.Y) > THUMBSTICK_DEADBAND) {
+			return math.max(0, -stick.Y);
 		}
 
 		return this.slowDown ? 1 : 0;
+	}
+
+	/**
+	 * The stick, from the reader that can actually see one: **touch, then gamepad, then `PlayerModule`**.
+	 *
+	 * **The order is not aesthetic - `PlayerModule` cannot be first.** During `Playing`, `CharacterFreezeController` calls
+	 * `lockControls()`, which sets `GuiService.TouchControlsEnabled = false` and (when it resolves) `controls:Disable()`. Both are
+	 * how movement is taken from a frozen character, and a disabled controls object answers `GetMoveVector()` with **zero**. So a
+	 * module-first order would report "no stick" for the entire race - precisely when a player needs to steer - and would shadow
+	 * the readers that can still see input. The raw `UserInputService` touches behind `touchStick` are not affected by that flag,
+	 * which is why they come first.
+	 *
+	 * **This is the same interaction that hid the engine's on-screen joystick for the whole race**: `TouchControlsEnabled = false`
+	 * removes the stick's UI, so a phone with a perfectly good `PlayerModule` has nothing to drag once the countdown ends. The
+	 * virtual joystick below exists because of that, not only because this place has no module.
+	 *
+	 * `PlayerModule` stays last rather than being deleted: it is the only reader that knows about a device this file has not
+	 * thought of, and while the character is unfrozen (the lobby, a spectated round) it answers honestly.
+	 *
+	 * `Vector3` to `Vector2` is `(X, -Z)`: `GetMoveVector` reports `-Z` as forward, and this file's convention is `+Y` forward so
+	 * that `currentSlow` can negate it once.
+	 *
+	 * **`pcall`ed per read, not cached.** The module is somebody else's code holding a controls object this tree disables; a throw
+	 * here would be a sixty-times-a-second error, and a cached vector would be a ball that steers itself.
+	 */
+	private currentStick(): Vector2 {
+		if (this.touchInput !== undefined) {
+			if (
+				math.abs(this.touchStick.X) > THUMBSTICK_DEADBAND ||
+				math.abs(this.touchStick.Y) > THUMBSTICK_DEADBAND
+			) {
+				this.logStickSource("touch");
+			}
+
+			return this.touchStick;
+		}
+
+		if (
+			math.abs(this.gamepadStick.X) > THUMBSTICK_DEADBAND ||
+			math.abs(this.gamepadStick.Y) > THUMBSTICK_DEADBAND
+		) {
+			this.logStickSource("gamepad");
+			return this.gamepadStick;
+		}
+
+		const controls = this.controls;
+		if (controls !== undefined) {
+			const [ok, move] = pcall(() => controls.GetMoveVector());
+			if (ok && typeIs(move, "Vector3")) {
+				if (math.abs(move.X) > THUMBSTICK_DEADBAND || math.abs(move.Z) > THUMBSTICK_DEADBAND) {
+					this.logStickSource("module");
+				}
+
+				return new Vector2(move.X, -move.Z);
+			}
+		}
+
+		return Vector2.zero;
+	}
+
+	/** One line per session, the first time any reader produces a real deflection. A run should say what moved the ball. */
+	private logStickSource(source: string): void {
+		if (this.loggedStickSource) {
+			return;
+		}
+
+		this.loggedStickSource = true;
+		print(`[Steer] stick source=${source}`);
+	}
+
+	/**
+	 * The gamepad's stick, read **twice over**: the `Thumbstick1` binding and `UserInputService.InputChanged`.
+	 *
+	 * Both write `gamepadStick`, so whichever the engine delivers is enough, and the pair covers the one thing this round could
+	 * not settle from source: whether a `BindAction` on `Enum.KeyCode.Thumbstick1` (typed in `@rbxts/types` as *"Gamepad primary
+	 * thumbstick"*) also receives the *touch* joystick's synthetic stick on a device where the module exists. `InputChanged` is
+	 * the unarguable reader - it is the raw event - so a device that never reaches the binding still steers.
+	 */
+	private bindGamepadStick(): void {
+		this.inputConnections.push(
+			UserInputService.InputChanged.Connect((input) => {
+				if (input.KeyCode !== Enum.KeyCode.Thumbstick1) {
+					return;
+				}
+
+				this.gamepadStick = new Vector2(input.Position.X, input.Position.Y);
+			}),
+		);
+
+		// **`InputEnded` as well as `Changed`.** A controller that is unplugged mid-race stops sending `Changed` events, and the
+		// last one would otherwise be a held deflection for the rest of the session - a ball that steers itself into the wall.
+		this.inputConnections.push(
+			UserInputService.InputEnded.Connect((input) => {
+				if (input.KeyCode === Enum.KeyCode.Thumbstick1) {
+					this.gamepadStick = Vector2.zero;
+				}
+			}),
+		);
+	}
+
+	/**
+	 * **The virtual joystick: a drag anywhere on the left half of the screen, with nothing drawn** (item 237).
+	 *
+	 * This is the path that actually runs in this place. The engine's on-screen stick is created by `PlayerModule`'s touch
+	 * controls, and this place has no `PlayerModule` (see `controls`) - so before this round, a phone had **no movement control
+	 * at all** once the custom `◀ ▶` buttons came out: one steer message was sent in the whole session, `axis=0,0`.
+	 *
+	 * **Why a drag and not a fixed pad.** Where a thumb lands is where the stick is; the deflection is the offset from that
+	 * point, so the gesture is the same one the engine's dynamic stick teaches and there is no target to look at. `60` pixels is
+	 * full lock, and the offset is clamped, so over-dragging cannot exceed full deflection.
+	 *
+	 * **Left half only.** The right half is where the camera is dragged, and taking touches there would fight it. That split is
+	 * the same one the engine's own controls make.
+	 */
+	private bindTouchStick(): void {
+		this.inputConnections.push(
+			UserInputService.TouchStarted.Connect((input) => {
+				if (this.touchInput !== undefined) {
+					return;
+				}
+
+				const camera = Workspace.CurrentCamera;
+				const width = camera !== undefined ? camera.ViewportSize.X : 0;
+				if (input.Position.X > width / 2) {
+					return;
+				}
+
+				this.touchInput = input;
+				this.touchOrigin = new Vector2(input.Position.X, input.Position.Y);
+				this.touchStick = Vector2.zero;
+			}),
+		);
+
+		this.inputConnections.push(
+			UserInputService.TouchMoved.Connect((input) => {
+				if (input !== this.touchInput) {
+					return;
+				}
+
+				const dx = (input.Position.X - this.touchOrigin.X) / TOUCH_STICK_RADIUS;
+				// Screen `Y` grows downward and the convention here is `+Y` forward, so a drag *up* is positive.
+				const dy = (this.touchOrigin.Y - input.Position.Y) / TOUCH_STICK_RADIUS;
+				this.touchStick = new Vector2(math.clamp(dx, -1, 1), math.clamp(dy, -1, 1));
+			}),
+		);
+
+		const release = (input: InputObject) => {
+			if (input !== this.touchInput) {
+				return;
+			}
+
+			this.touchInput = undefined;
+			this.touchStick = Vector2.zero;
+		};
+
+		this.inputConnections.push(UserInputService.TouchEnded.Connect(release));
+		// A touch cancelled by the OS (a notification, a call) never fires `Ended` on some devices; the same reset on
+		// `TouchTapInWorld` would be wrong, so cancellation is handled by `InputEnded` for touch too.
+		this.inputConnections.push(
+			UserInputService.InputEnded.Connect((input) => {
+				if (input.UserInputType === Enum.UserInputType.Touch) {
+					release(input);
+				}
+			}),
+		);
+	}
+
+	/**
+	 * Finds `PlayerModule` on a background thread and upgrades the stick source, or says why it could not.
+	 *
+	 * **Never inline.** Item 161 measured the blocking `WaitForChild` at 2.6 s, which delayed every panel that mounted after it;
+	 * this runs on its own thread, the touch and gamepad readers work while it waits, and a failure costs nothing but the log
+	 * line - which is the same line `controls-lock.ts` prints, kept here because this file is the one that now *depends* on the
+	 * answer.
+	 */
+	private resolveControls(): void {
+		task.spawn(() => {
+			const scripts = this.player.FindFirstChild("PlayerScripts");
+			const module =
+				scripts !== undefined ? scripts.WaitForChild("PlayerModule", PLAYER_MODULE_WAIT_SECONDS) : undefined;
+			if (module === undefined || !module.IsA("ModuleScript")) {
+				warn(
+					`[Steer] no PlayerModule after ${PLAYER_MODULE_WAIT_SECONDS}s — steering reads the virtual touch stick and the gamepad instead`,
+				);
+				return;
+			}
+
+			const [ok, result] = pcall(() => {
+				// eslint-disable-next-line @typescript-eslint/no-require-imports -- a runtime `ModuleScript` inside the player, not a build-time import; the instance is the only way to reach `GetControls()`.
+				const loaded = require(module) as PlayerModuleShape;
+				return loaded.GetControls();
+			});
+
+			if (!ok || result === undefined) {
+				warn(`[Steer] PlayerModule.GetControls() failed (${tostring(result)}) — using the fallback readers`);
+				return;
+			}
+
+			this.controls = result as MoveControls;
+			print(`[Steer] stick source=playermodule`);
+			this.loggedStickSource = true;
+		});
 	}
 
 	/** Sends both axes when either has moved enough to matter. Called from `Heartbeat`. */
@@ -398,6 +669,11 @@ export class SteerController implements OnStart {
 			ContextActionService.UnbindAction(STEER_THUMBSTICK_ACTION);
 			ContextActionService.UnbindAction(SLOW_ACTION);
 			ContextActionService.UnbindAction(JUMP_ACTION);
+
+			for (const connection of this.inputConnections) {
+				connection.Disconnect();
+			}
+			this.inputConnections.clear();
 
 			const heartbeat = this.heartbeat;
 			if (heartbeat !== undefined) {

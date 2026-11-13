@@ -8429,3 +8429,51 @@ set on this one panel rather than in the shared builder, because the store, the 
 Whether the left joystick's `X` really lands on `lateral` (a stick's `Position.X` is positive right, which the server writes as positive lateral - the sign chain is source-readable but only a device confirms the feel); whether pulling down at full deflection gives a slow strong enough to read; whether the native jump button still fires `ButtonA` into `ContextActionService` now that no button of ours holds the `Jump` action - it should, since the binding is unchanged and only the drawn button is gone; and whether a half-transparent board over the belt is legible at 210 pixels wide on a phone.
 
 **Validation:** `npm run build` exit 0; **`npm test` = 566 passed in 44 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on both touched files; `grep "\uXXXX" src` = 0; `flamework.build` unchanged - no controller or service added or removed.
+## 237 - The joystick had nothing to read: three stick sources, and the raw touch fallback that works
+
+Reported: *"i can't move the ball with joycon"*, with a 1003-line session log. The log answers it completely, and the answer is that item 236 removed the last touch control this place had.
+
+### What the log says
+
+```
+08:28:34.339  [Steer] mounted speed=45 ... touch=native actions=SteerLeft,...
+08:29:08.621  [Spawner] steer player=prospeed1 lateral=0 slow=1        <- the only steer line all session
+08:29:52.303  [Steer] reassert axis=0,0
+08:29:44.820  [Controls] no PlayerModule under Players.prospeed1.PlayerScripts after 10s — it contains:
+              RbxCharacterSounds(LocalScript),TS(Folder)
+08:30:08.036  [Ball:9] ... steerAxis=0 slowAxis=0 ... roundActive=true owner=prospeed1
+```
+
+One steer message in two minutes, and it was the round-entry reassert of `0,0`. The player's ball held its lane for the whole race (`localZ=-79.453`, unchanged) while the belt carried it (`along=9.994`).
+
+**`PlayerScripts` contains no `PlayerModule`.** That is not a detail - the on-screen joystick is drawn and driven by the module's touch controls, so in this place **there is no stick to drag and no `Thumbstick1` to read**. Item 236 deleted the only remaining touch input (the `◀ ▶` pad) on the assumption that a native joystick existed. It did not.
+
+**And a second, worse discovery while fixing it:** `CharacterFreezeController.freeze()` calls `lockControls()`, which sets `GuiService.TouchControlsEnabled = false` for the whole of `Playing`. That flag removes the engine's touch-control UI. So even in a place *with* a `PlayerModule`, the joystick disappears at the countdown - and `controls:Disable()` makes `GetMoveVector()` answer zero for the entire race. **The module can never be the primary stick source for this game.**
+
+### The fix: one vector, three readers, ordered by what can see input
+
+| order | reader | why it is here |
+| --- | --- | --- |
+| 1 | **virtual touch stick** - `TouchStarted`/`TouchMoved`/`TouchEnded` on the left half | Raw `UserInputService`, so `TouchControlsEnabled` cannot switch it off. This is the path that runs in this place. |
+| 2 | **gamepad** - `Thumbstick1` via `ContextActionService` **and** `InputChanged` | Two readers for one device, because whether a `BindAction` on `Thumbstick1` receives a Joy-Con's stick could not be settled from source. `InputEnded` zeroes it so an unplugged pad cannot leave a held deflection. |
+| 3 | **`PlayerModule:GetControls():GetMoveVector()`** | Last, not first: the freeze disables it exactly when it is needed. Kept because it is the only reader that knows a device this file has not thought of, and it answers honestly while the character is unfrozen. |
+
+**The virtual stick draws nothing.** Where the thumb lands is the origin, the offset is the deflection, `TOUCH_STICK_RADIUS = 60` is full lock and the offset is clamped - the gesture the engine's dynamic stick teaches, with no pad to look at. Left half only, because the right half is the camera's.
+
+One line per session names the reader that first produced a deflection: `[Steer] stick source=touch|gamepad|module`, and a missing module prints `[Steer] no PlayerModule after 8s — steering reads the virtual touch stick and the gamepad instead`. The boot line now carries `sources=module,touch,gamepad`.
+
+**Sign convention kept:** the vector is `+Y` forward, so `currentSlow` is still `max(0, -Y)` - pull toward the player to brake. Touch `Y` is negated on the way in (screen Y grows downward); `GetMoveVector`'s `-Z` forward becomes `+Y`.
+
+**Nothing else moved.** No physics, no `SteerAxis` payload, no server change, no drawn control.
+
+### Where the previous round was wrong, and this one's own near-miss
+
+- **Item 236 read the prompt's "the native left joystick feeds `GetMoveVector()`" as a fact about this place.** The log in that round's own attachment already said the module was missing; the docblock quoted it and then still assumed a native joystick existed.
+- **Item 236 also missed `lockControls`.** `TouchControlsEnabled = false` for the whole race is the reason the custom buttons were the only thing that ever worked on a phone, and it is why the module cannot lead.
+- **This round's first draft had the module first**, which would have shipped a steering path that returns zero for the entire race. The log's `[Controls]` line is what caught it - a reminder that the order in a precedence chain is a behavioural decision, not a preference.
+
+### Studio-only
+
+Whether the virtual stick's gesture reads well at `60` pixels of radius (a drag inside the radius is a partial deflection, outside is full lock); whether a drag on the left half fights a camera that is dragged anywhere on a screen with no `PlayerModule` camera script; whether a Joy-Con reaches `InputChanged` with `KeyCode = Thumbstick1` on the user's platform; and whether the two gamepad readers ever disagree - `[Steer] stick source=gamepad` plus a moving ball answers all four.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 566 passed in 44 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean; `grep "\uXXXX" src` = 0; `flamework.build` unchanged.
