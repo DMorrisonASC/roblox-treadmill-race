@@ -2,6 +2,8 @@ import { Controller, OnStart } from "@flamework/core";
 import { Players, TweenService, Workspace } from "@rbxts/services";
 import { PLAYER_COINS_ATTRIBUTE } from "shared/attributes";
 import { ballName, rarityLabel } from "shared/ball-name";
+import { colorForBall } from "shared/ball-color";
+import { attachBallIcon } from "shared/ui/ball-swatch";
 import { canAffordChests, chestBatchCost, Rarity, rarityOfBall } from "shared/economy.config";
 import { getScreenGui } from "shared/ui/layers";
 import { addChunkyRing, applyChunkyChrome, dimChunkyChrome, shadowOf } from "shared/ui/chunky-chrome";
@@ -590,7 +592,9 @@ export class RevealController implements OnStart {
 		ball.AnchorPoint = new Vector2(0.5, 0.5);
 		ball.Position = UDim2.fromScale(0.5, 0.5);
 		ball.Size = UDim2.fromOffset(BALL_SWATCH, BALL_SWATCH);
-		ball.BackgroundColor3 = tint;
+		// **The prize's own colour on the face, the rarity on the card's ring and art wash** (item 226). The reveal is the moment a
+		// player learns *which* ball they got, so the swatch is the ball; the ring and the wash are what say how rare it was.
+		ball.BackgroundColor3 = colorForBall(ballId) ?? tint;
 		ball.BorderSizePixel = 0;
 		ball.ZIndex = z + 2;
 		ball.Parent = art;
@@ -598,6 +602,11 @@ export class RevealController implements OnStart {
 		const ballCorner = new Instance("UICorner");
 		ballCorner.CornerRadius = new UDim(1, 0);
 		ballCorner.Parent = ball;
+
+		// **The prize's own drawing** (item 233), inside the colour swatch that item 226 put on this face. The face is the moment a
+		// player learns which ball they got, so it is the one site where the drawing matters most - and the one where the colour
+		// behind it does the least, because it is only ever glimpsed through the icon's transparent corners.
+		attachBallIcon(ball, ballId);
 
 		if (!revealed) {
 			// The facedown card says nothing. Its rarity is the ring around the whole card, which is the aura the user described — the

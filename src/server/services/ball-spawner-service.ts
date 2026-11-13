@@ -1,4 +1,4 @@
-import { CollectionService, RunService, Workspace } from "@rbxts/services";
+import { CollectionService, Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
 import {
 	BALL_SPEED_ATTRIBUTE,
@@ -23,6 +23,7 @@ import {
 	GHOST_ACTIVE_ATTRIBUTE,
 } from "shared/attributes";
 import { powerForBallId } from "shared/powers.config";
+import { colorForBall } from "shared/ball-color";
 import {
 	BALL_GROUP,
 	collisionGroupFor,
@@ -52,6 +53,7 @@ import {
 	BALL_SPEED_MIN,
 	BALL_SPEED_START,
 	BALL_SPEED_START_JITTER,
+	BALL_COLOR_FALLBACK,
 	BALL_PHYSICAL_DENSITY,
 	BALL_PHYSICAL_ELASTICITY,
 	BALL_PHYSICAL_FRICTION,
@@ -61,12 +63,17 @@ import {
 	BOOST_HYSTERESIS,
 	DECOY_SPAWN_DELAY_SECONDS,
 	TAIL_WIND_MIN_BALL_SPEED,
+	STEER_SPEED,
+	SLOW_DRAIN_RATE,
+	JUMP_IMPULSE,
+	JUMP_COOLDOWN_SECONDS,
 	SWAY_AMPLITUDE,
 	SWAY_FREQUENCY_HZ,
 	SWAY_FREQUENCY_JITTER,
 	SWAY_PHASE_JITTER,
 	SWAY_TRACK_SECONDS,
 } from "shared/tuning";
+import { JUMP_REMOTE_NAME, REMOTES_FOLDER_NAME, STEER_AXIS_REMOTE_NAME } from "shared/remotes";
 import { forgetLateralShove, lateralShoveFor } from "server/lateral-shove";
 import { TreadmillService } from "./treadmill-service";
 
@@ -166,11 +173,13 @@ const MARKER_RING_THICKNESS = 0.1;
  */
 const MARKER_RING_OVERSIZE = 2.1;
 
-/** **Placeholder.** Pole marker colour. High-contrast red against a grey-ish plastic ball. */
-const MARKER_POLE_COLOR = Color3.fromRGB(255, 80, 80);
-
-/** **Placeholder.** Equatorial ring colour, deliberately a different hue from the poles. */
-const MARKER_RING_COLOR = Color3.fromRGB(80, 80, 255);
+/*
+ * The markers have no colours of their own any more (item 226). They take the ball's `Color`, so the one thing a viewer can
+ * see at 300 studs - two Neon dots and a Neon band - says *which ball* this is instead of saying "some ball, made by this
+ * game". The old pair was a fixed red/blue, deliberately different hues so the band could be told from the poles; that
+ * distinction is now carried by shape and by Neon-against-Plastic brightness rather than by hue, and it is the trade this
+ * round makes: **identity at distance over internal contrast**. A screenshot decides whether it was the right way round.
+ */
 
 /**
  * Half of a body's largest dimension, used only as the "how close is another body" radius.
@@ -520,46 +529,80 @@ export class BallSpawnerService implements OnStart {
 	private readonly decoyIdentities = new Map<BasePart, { userId: number; name: string }>();
 
 	/**
-	 * Each live ball's decorative sway state: the **phase** its sine wave starts at, **its own angular rate**, and its
-	 * **own clock**, in seconds since it spawned.
+	 * **The player's lateral axis, keyed by `UserId`** (item 220).
 	 *
-	 * All three fields are per ball, and each one is load-bearing (item 153):
+	 * Keyed by *who* rather than by *which body* on purpose: the axis is a fact about the player, it outlives every body they
+	 * spawn, and it is read at tick time from the body's `OwnerUserId`. A map keyed by body would need seeding at spawn,
+	 * copying on a decoy and deleting on all four death paths - which is exactly the bookkeeping the deleted sway map carried,
+	 * and the reason this one has none.
 	 *
-	 * - The **phase** stops a belt of balls starting on the same point of the wave - see `SWAY_PHASE_JITTER`.
-	 * - The **rate** stops them staying there. A field of identical periods is a fixed arrangement of offsets that repeats
-	 *   forever, which reads as synchronised however well the phases are drawn - see `SWAY_FREQUENCY_JITTER`. It is stored
-	 *   as radians per second rather than as a multiplier so the tick does not recompute `2 * pi * f * multiplier` per ball
-	 *   per frame.
-	 * - The **clock** is what makes the wave start on the ball's own first tick rather than on a global time, so a ball
-	 *   spawning into a wave that is already running does not snap to an arbitrary point of it. `elapsed` is advanced by the
-	 *   tick's own `dt` in `stepBallSpeeds`; nothing else writes it, and it is never < 0.
-	 *
-	 * ## Why a map and not two attributes on the body
-	 *
-	 * The state is a *tick-local* detail with no consumer outside this loop: no client draws it, no other service
-	 * reads it, and it dies with the ball. An attribute would replicate it to every client and cost a write per tick
-	 * for nothing. The map is cleared in `forgetBall` and `pruneDestroyedBalls` alongside `ballKillY`, so its size
-	 * tracks the live set exactly like every other per-ball map in this file.
-	 *
-	 * **This is the same map the bounce model used** (item 107): it held `{ direction, bound }`, then `{ phase, elapsed }`,
-	 * and holds `{ phase, elapsed, omega }` now. Repurposed rather than replaced so the four call sites - two writes at
-	 * spawn, two deletes on the death paths - kept their shape and no stale map can be left behind.
+	 * `lateral` and `slow` are each `-1 .. 1`, `0` for "no key held", both written by the `SteerAxis` remote's handler and
+	 * removed on `PlayerRemoving`. **One entry per player holding two numbers** (item 222): two maps would be two deletes to
+	 * keep in step for one player's input, and a reader would have to ask both to answer "is anything held".
 	 */
-	private readonly lateral = new Map<BasePart, { phase: number; elapsed: number; omega: number }>();
+	private readonly steerAxes = new Map<number, { lateral: number; slow: number }>();
 
 	/**
-	 * How many sway states this session has created. **The input to the phase stride** — see `newSway` — not a statistic.
+	 * When this player last had a jump accepted, on `os.clock()` (item 222).
+	 *
+	 * The cooldown's whole state. Kept on the server because the server is the authority: a client that spams the remote is
+	 * refused here, silently, and a client-side guard would put the only rate limit on the side of the wire a hack can delete.
+	 *
+	 * **Not cleared at `setRoundActive`.** A player who jumped a moment before the round ended carries that timestamp into the
+	 * next one, so their first press of the new round can be refused by a cooldown they cannot see - up to `0.9 s` of it.
+	 * That is the correct reading of "one jump per `0.9 s` per player" and it costs at most a fraction of a second once per
+	 * round; clearing it would let a body jump twice in one second across a boundary that just happened to fall between them.
+	 * It is cleared on `PlayerRemoving`, where the player no longer exists to be rate-limited.
+	 */
+	private readonly lastJumpAt = new Map<number, number>();
+
+	/**
+	 * The players whose jump is waiting for the next tick (item 222).
+	 *
+	 * A remote arrives between ticks, and the impulse has to be written by the loop that owns the velocity - so the handler
+	 * records the intent and `stepBallSpeeds` applies it. Consumed and deleted per body, and **cleared at
+	 * `setRoundActive(true)`**: a press that arrives while the round is not running must not fire into the next one, which is
+	 * the same rule the interrupted-twins path follows.
+	 */
+	private readonly jumpQueue = new Set<number>();
+
+	/**
+	 * **A swaying bot's wave state: its own angular rate, its starting phase and its own clock** (item 221).
+	 *
+	 * Keyed by body and **populated only for bodies with no positive `OwnerUserId`** - a `Debug#N` bot (negative synthetic
+	 * id) or a `decoy` twin (no owner at all). A player's ball never gets an entry: its lateral motion is
+	 * `axis * STEER_SPEED` from `steerAxes`, and a wave on top of that would be the two-writers failure item 220 removed.
+	 *
+	 * The same map, the same shape and the same two seeding sites the tree had before item 220, restored rather than
+	 * reinvented - it is a tick-local detail with no consumer outside the loop, so an attribute would replicate it to every
+	 * client for nothing, and it is deleted on both death paths so its size tracks the live set.
+	 */
+	private readonly botSway = new Map<BasePart, { phase: number; elapsed: number; omega: number }>();
+
+	/**
+	 * How many sway states this session has created. **The input to the phase stride** - see `seedBotSway` - not a statistic.
 	 *
 	 * A session-scoped counter rather than a per-round one, because it must keep advancing across rounds: a per-round
-	 * counter would hand lane 0 the same phase every round, which turns the spread into a fixed pattern the eye can learn.
+	 * counter would hand the first bot the same phase every round, which turns the spread into a fixed pattern the eye can
+	 * learn.
 	 */
-	private swaySpawns = 0;
+	private botSwaySpawns = 0;
+
+	/**
+	 * Which players have already had their axis reported this round (item 220).
+	 *
+	 * **Per round, not per change.** A player holding `A` sends one message, but a player tapping it sends two (`+1`, then
+	 * `0`), and logging every change would put two lines per keypress into a log read for one fact: "did this client's axis
+	 * reach the server at all". Cleared in `setRoundActive(true)`, so a round that never got an axis prints nothing and the
+	 * next round can prove itself.
+	 */
+	private readonly steerLogged = new Set<number>();
 
 	/**
 	 * Each ball's own starting speed, in studs/second, drawn once at spawn and reused at every `Playing` entry.
 	 *
-	 * A map rather than an attribute for the same reason as `lateral`: nothing outside this file reads it. Cleared
-	 * with `ballKillY` and `lateral` in the destroy path, so its size tracks the live set.
+	 * A map rather than an attribute because nothing outside this file reads it. Cleared with `ballKillY` in the destroy
+	 * path, so its size tracks the live set.
 	 */
 	private readonly startSpeeds = new Map<BasePart, number>();
 
@@ -632,6 +675,40 @@ export class BallSpawnerService implements OnStart {
 			// **The ghost cycle rides the same connection** (item 204): same rate, same body list, and one place to read the
 			// phase from. It returns immediately outside `Playing` (`playingStartedAt` is cleared with the round).
 			this.stepGhostCycle();
+		});
+
+		// **The steering wire (item 220).** This service reads the axis, so it owns the remote - the same rule that has
+		// `RoundService` own the picker's three and `PickupService` own the pickup sound. One direction only: there is no
+		// server-side state to publish back, because the axis is the client's own input.
+		let remotesFolder = ReplicatedStorage.FindFirstChild(REMOTES_FOLDER_NAME);
+		if (remotesFolder === undefined || !remotesFolder.IsA("Folder")) {
+			const created = new Instance("Folder");
+			created.Name = REMOTES_FOLDER_NAME;
+			created.Parent = ReplicatedStorage;
+			remotesFolder = created;
+		}
+
+		const steerRemote = new Instance("RemoteEvent");
+		steerRemote.Name = STEER_AXIS_REMOTE_NAME;
+		steerRemote.Parent = remotesFolder;
+		steerRemote.OnServerEvent.Connect((player, lateral: unknown, slow: unknown) =>
+			this.storeSteerAxis(player, lateral, slow),
+		);
+
+		// **A jump is an event, so it has its own wire** (item 222). No payload: the sender is the argument and everything else
+		// the handler needs is already on this side.
+		const jumpRemote = new Instance("RemoteEvent");
+		jumpRemote.Name = JUMP_REMOTE_NAME;
+		jumpRemote.Parent = remotesFolder;
+		jumpRemote.OnServerEvent.Connect((player) => this.queueJump(player));
+
+		// **Both bits of per-player state die with the player.** One entry each, and a departure is the only writer that can
+		// leak either.
+		Players.PlayerRemoving.Connect((player) => {
+			this.steerAxes.delete(player.UserId);
+			this.steerLogged.delete(player.UserId);
+			this.lastJumpAt.delete(player.UserId);
+			this.jumpQueue.delete(player.UserId);
 		});
 
 		// **Both ends of the two effect wires, named once (item 207).** A writer that sets `"Boosted"` and a reader that
@@ -746,6 +823,9 @@ export class BallSpawnerService implements OnStart {
 		// the green light is the state the power promises.
 		if (active) {
 			this.playingStartedAt = os.clock();
+			// **A jump buffered outside the round does not fire into this one** (item 222). The press happened when there was
+			// nothing to jump, and the queue is the only place that intent could survive from.
+			this.jumpQueue.clear();
 		} else {
 			this.playingStartedAt = undefined;
 			this.resetGhostCycle();
@@ -784,13 +864,10 @@ export class BallSpawnerService implements OnStart {
 			// it drew at spawn, so a ball zeroed by `Waiting` resumes the curve it was born with rather than being
 			// re-rolled into a different one.
 			let seeded = 0;
-			// **Every live ball's sway phase *and* period, on the one line that already reports round start (items 151/153).**
-			// The user asked whether a field of balls swaying together was chance; the sampled ball in the log could never
-			// answer it, because only one ball is sampled per session. Phases drawn independently that happen to land close
-			// together are chance; **identical periods are not chance, they are the model** - a field sharing one period keeps
-			// its offsets forever, so it reads as synchronised no matter how the phases were drawn. The period is on the line
-			// so the next report can tell those two apart without a rebuild.
-			const swayPhases = new Array<string>();
+			// **The steering report is re-armed with the round (item 220).** The axes themselves survive - a player holding `A`
+			// into the next round keeps their axis, and the client reasserts it anyway - but "already reported" is a per-round
+			// fact, so it is cleared here rather than left to grow a set the size of the session.
+			this.steerLogged.clear();
 			for (const ball of this.liveBalls) {
 				if (ball.Parent !== undefined) {
 					ball.SetAttribute(BALL_SPEED_ATTRIBUTE, this.startSpeeds.get(ball) ?? BALL_SPEED_START);
@@ -799,20 +876,11 @@ export class BallSpawnerService implements OnStart {
 					// point gets its timers from `spawnBall`, which is the only other entry point.
 					onRoundActive(ball);
 					seeded++;
-
-					const sway = this.lateral.get(ball);
-					// Phase **and period**, because the pair is what decides whether two balls drift apart or stay the
-					// offset they were drawn with: equal periods never drift, however different the phases are (item 153).
-					swayPhases.push(
-						sway === undefined
-							? "none"
-							: `${formatNumber(sway.phase)}@${formatNumber((2 * math.pi) / sway.omega)}s`,
-					);
 				}
 			}
 
 			print(
-				`[Spawner] round start: ${seeded} ball(s) at BALL_SPEED=${formatNumber(BALL_SPEED_START)}+0..${formatNumber(2 * BALL_SPEED_START_JITTER)} sway=${swayPhases.join(",")} (0..${formatNumber(SWAY_PHASE_JITTER)})`,
+				`[Spawner] round start: ${seeded} ball(s) at BALL_SPEED=${formatNumber(BALL_SPEED_START)}+0..${formatNumber(2 * BALL_SPEED_START_JITTER)} steer=${formatNumber(STEER_SPEED)} studs/s`,
 			);
 			return;
 		}
@@ -1185,6 +1253,18 @@ export class BallSpawnerService implements OnStart {
 			ball.SetAttribute(CHOSEN_BALL_ID_ATTRIBUTE, chosenBallId);
 		}
 
+		// **The ball's own colour, written here because this is where the pick is known** (item 226).
+		//
+		// `Color` was never set on a body before this line, so every ball was a fresh `Part`'s default
+		// `Color3.fromRGB(194, 194, 194)` - one grey for ten ball ids, which at the camera's 260-390 studs is the whole of
+		// what a viewer had to tell them apart. Item 98's phantom copies `Color` verbatim, so this one write is the skin a
+		// client renders as well as the part the server owns.
+		//
+		// **A body with no pick gets the fallback**, and that is a real state rather than an error path: a `Debug#N` body
+		// spawned before item 76 draws an id, and any body built without a `ChosenBallId`. The spec asserts every `BALL_POOL`
+		// id has an entry, so the fallback is only ever reached by an id the pool does not have.
+		ball.Color = colorForBall(chosenBallId ?? "") ?? BALL_COLOR_FALLBACK;
+
 		// **The power, derived from the pick and written before `Parent`** — the same block as the owner, for the same
 		// reason: a body must never exist, even for one frame, carrying an owner and a chosen ball but no power, because
 		// the tick loop and every collision handler read `Power` and would spend that frame treating it as powerless.
@@ -1235,11 +1315,14 @@ export class BallSpawnerService implements OnStart {
 		// and re-drawing there would hand a ball a different start from the one it was born with.
 		const startSpeed = BALL_SPEED_START + math.random() * 2 * BALL_SPEED_START_JITTER;
 		this.startSpeeds.set(ball, startSpeed);
-		ball.SetAttribute(BALL_SPEED_ATTRIBUTE, startSpeed);
 
-		// The sway starts here too, for the same reason: seeded at birth so the tick loop needs no fallback
-		// branch, and so the first tick already has a phase and a clock of zero.
-		this.lateral.set(ball, this.newSway());
+		// **A bot sways; a player steers (item 221).** The split is the owner written above: a real player's `UserId` is
+		// positive, a `Debug#N` body's is negative, and a body with no player behind it gets the wave. Seeded here, at
+		// birth, so the tick loop needs no fallback and a body that spawns mid-round starts its wave with its own clock.
+		if (owner.userId <= 0) {
+			this.seedBotSway(ball);
+		}
+		ball.SetAttribute(BALL_SPEED_ATTRIBUTE, startSpeed);
 
 		// Visual only, and attached *after* `Parent` — unlike the textures above. The markers are anchored
 		// and carry their local offset as attributes, so they need the body to be in the DataModel before
@@ -1424,6 +1507,11 @@ export class BallSpawnerService implements OnStart {
 		decoy.Anchored = false;
 		decoy.CanCollide = true;
 		decoy.Material = parent.Material;
+		// **The parent's colour, explicitly** (item 226). The twin copies `Shape`, `Size` and `Material` by hand and never
+		// copied `Color`, which did not matter while every body was the default grey - and now would make the decoy the one
+		// ball on the belt in the wrong colour, i.e. an obvious fake. A decoy that does not look like its parent is not a
+		// decoy (items 77/129).
+		decoy.Color = parent.Color;
 		decoy.CustomPhysicalProperties = BALL_PHYSICAL_PROPERTIES;
 		decoy.TopSurface = Enum.SurfaceType.Smooth;
 		decoy.BottomSurface = Enum.SurfaceType.Smooth;
@@ -1456,7 +1544,8 @@ export class BallSpawnerService implements OnStart {
 
 		this.startSpeeds.set(decoy, startSpeed);
 		decoy.SetAttribute(BALL_SPEED_ATTRIBUTE, startSpeed);
-		this.lateral.set(decoy, this.newSway());
+		// A twin carries no `OwnerUserId` (item 77), so it is a bot by the same test the tick applies and sways like one.
+		this.seedBotSway(decoy);
 
 		// After `Parent`, for the reason the parent's markers are: the poles and the ring are anchored and carry their local
 		// offset as attributes, so they need the body to be in the DataModel before `CFrame.ToObjectSpace` has a meaningful
@@ -1632,48 +1721,6 @@ export class BallSpawnerService implements OnStart {
 	// #region the reference-speed model
 
 	/**
-	 * A fresh sway state: a spread starting phase, this ball's own angular rate, and a clock at zero.
-	 *
-	 * `elapsed` starts at `0` rather than at an absolute time because the wave is the ball's own - see the `lateral`
-	 * map.
-	 *
-	 * ## Why the rate is drawn (item 153)
-	 *
-	 * A phase drawn per ball only decides *where* on a shared wave each ball sits; with one period for the whole belt those
-	 * offsets never change, so the field is a still picture of offsets taken at a moving instant — which is why
-	 * `SWAY_PHASE_JITTER` alone kept reading as synchronised. The multiplier is uniform over
-	 * `1 - SWAY_FREQUENCY_JITTER .. 1 + SWAY_FREQUENCY_JITTER`, drawn once at spawn and never redrawn: a rate that wandered
-	 * would make the wave's velocity term wrong for the phase the ball is actually at.
-	 *
-	 * ## Why the phase is a stride and not a draw (item 153, second half)
-	 *
-	 * Because a uniform draw is only *spread on average*, and the log that prompted this shows what that costs: seven
-	 * balls landed between `1.02` and `2.91` of a possible `0 .. 3.14`, with two pairs within `0.06 rad` — the whole field
-	 * inside a **3 s window of a 10 s cycle**. Nothing was wrong with the draw; it was an ordinary sample. The eye does not
-	 * see the distribution, it sees the sample, and that sample is a field swaying together.
-	 *
-	 * Two terms fix it. The **rotation** is a fresh uniform draw per spawn, so the sequence is not the same picture every
-	 * boot. The **stride** is the golden-ratio conjugate, which places each new phase as far as possible from every phase
-	 * already used — the low-discrepancy sequence that spreads `n` points more evenly than any random draw of `n` points
-	 * will. Consecutive spawns in a round therefore land near `0`, `0.62`, `0.24`, `0.85` … of the range instead of
-	 * wherever the dice fell.
-	 *
-	 * The trade is stated rather than hidden: each ball's phase is *less* individually random, and the field is *more*
-	 * independent. That is the direction the complaint asks for.
-	 */
-	private newSway(): { phase: number; elapsed: number; omega: number } {
-		const multiplier = 1 + (math.random() * 2 - 1) * SWAY_FREQUENCY_JITTER;
-		const stride = this.swaySpawns * ((math.sqrt(5) - 1) / 2);
-		this.swaySpawns++;
-
-		return {
-			phase: ((math.random() + stride) % 1) * SWAY_PHASE_JITTER,
-			elapsed: 0,
-			omega: 2 * math.pi * SWAY_FREQUENCY_HZ * multiplier,
-		};
-	}
-
-	/**
 	 * Decays every ball's speed and hands the engine a velocity derived from it.
 	 *
 	 * ## The model, for a reader who has not seen the brief
@@ -1698,8 +1745,8 @@ export class BallSpawnerService implements OnStart {
 	 * its local `X`, `RightVector` is the **long** axis, and this tree uses it for exactly that everywhere ? this loop, and
 	 * every log field that measures a ball's along-belt velocity as a dot product with it. A reader who assumes
 	 * "right = lateral" gets the sign of `relative` backwards and writes a ball that moves across the belt instead of along
-	 * it. **Lateral is `RightVector:Cross(UpVector)`** ? world `+X` on this scene's belt ? and the only code that touches it
-	 * is the decorative sway below.
+	 * it. **Lateral is `RightVector:Cross(UpVector)`** - world `+X` on this scene's belt - and the code that owns it is the
+	 * steering write below.
 	 *
 	 * In this model **`+RightVector` is toward the back** ? the exit end, where a ball is eliminated ? and **`-RightVector` is
 	 * toward the front**, the spawn end. Decay therefore moves a ball toward the back and a boost moves it toward the front,
@@ -1727,10 +1774,10 @@ export class BallSpawnerService implements OnStart {
 	 * vertical component is left to gravity (the ball still has to land, bounce and settle), so writing a full
 	 * velocity vector every tick would flatten it and a ball that could not fall would never settle onto the floor slab.
 	 *
-	 * **The lateral component is the one exception, and it is deliberate.** The decorative sway below rewrites it for
-	 * every ball that has sway state, because a sine wave expressed as velocity has to be written as velocity. The
+	 * **The lateral component is the one exception, and it is deliberate.** The steering write below rewrites it for
+	 * every ball, because a player's input expressed as velocity has to be written as velocity. The
 	 * consequence is that a ball knocked sideways has its sideways motion overwritten on the next tick rather than
-	 * carried: the sway is the only lateral intent this model has, and a collision is not allowed to leave a ball riding
+	 * carried: steering is the only lateral intent this model has, and a collision is not allowed to leave a ball riding
 	 * off the wave.
 	 *
 	 * **"Overwritten" is a claim the write has to earn.** It wrote `add(lateral)` on top of the carried component until
@@ -1744,7 +1791,7 @@ export class BallSpawnerService implements OnStart {
 	 * ## The inactive round writes nothing, and that is the whole of the freeze
 	 *
 	 * **`if (!this.roundActive) { return; }` is the first line, so an inactive round writes no along-belt velocity, no
-	 * sway, no `BALL_SPEED` decay and no `tickDelta`.** The flag is set in `enterPlaying` and cleared in `PostGame` and on
+	 * lateral term, no `BALL_SPEED` decay and no `tickDelta`.** The flag is set in `enterPlaying` and cleared in `PostGame` and on
 	 * every teardown, so it is false for all of `Waiting` (see `enterWaiting`: "Not `true` any more").
 	 *
 	 * It is worth writing down because the *opposite* change is the tempting one, and it is a bug: **zeroing the along-belt
@@ -1790,7 +1837,7 @@ export class BallSpawnerService implements OnStart {
 	 * wrong on every death path.
 	 *
 	 * **It is not a second model of motion.** It reads the same two axes the active path decomposes with, and it computes no
-	 * `relative`, no decay and no sway -- which is why it cannot reproduce the trap this file's docblock records: writing
+	 * `relative`, no decay and no lateral term -- which is why it cannot reproduce the trap this file's docblock records: writing
 	 * `right x -(BALL_SPEED - BELT_SPEED)` with a zeroed attribute is `+10` toward the exit, while writing **nothing along the
 	 * belt at all** is the only expression of "not moving".
 	 *
@@ -1841,6 +1888,118 @@ export class BallSpawnerService implements OnStart {
 		}
 	}
 
+	/**
+	 * Draws a bot's wave parameters, once, at spawn (item 221; the tree's own draw from items 107/153).
+	 *
+	 * Two independent draws:
+	 *
+	 * - **The rate**, uniform over `1 - SWAY_FREQUENCY_JITTER .. 1 + SWAY_FREQUENCY_JITTER`. Drawn once and never redrawn: a
+	 *   rate that wandered would make the velocity term wrong for the phase the ball is actually at.
+	 * - **The phase**, as a **stride** rather than a plain uniform draw. A uniform draw is only spread *on average*, and the
+	 *   log that prompted item 153's second half showed seven balls inside a `3 s` window of a `10 s` cycle - an ordinary
+	 *   sample that the eye reads as a synchronised field. The golden-ratio conjugate places each new phase as far as
+	 *   possible from every phase already used, and the per-spawn rotation keeps the sequence from being the same picture
+	 *   every boot.
+	 */
+	private seedBotSway(ball: BasePart): void {
+		const multiplier = 1 + (math.random() * 2 - 1) * SWAY_FREQUENCY_JITTER;
+		const stride = this.botSwaySpawns * ((math.sqrt(5) - 1) / 2);
+		this.botSwaySpawns++;
+
+		this.botSway.set(ball, {
+			phase: ((math.random() + stride) % 1) * SWAY_PHASE_JITTER,
+			elapsed: 0,
+			omega: 2 * math.pi * SWAY_FREQUENCY_HZ * multiplier,
+		});
+	}
+
+	/**
+	 * One bot's lateral rate for this tick: the wave's derivative plus the correction that holds it on the wave's position.
+	 *
+	 * Returns `0` for a body with no entry, which is every player body - so a player body whose owner attribute arrives one
+	 * frame late reads as "not steering" rather than as a sway it should never have had.
+	 *
+	 * **The `elapsed` accumulator is this ball's own clock, not `os.clock()`.** `os.clock()` is CPU time shared by every
+	 * ball, so a ball spawned late would begin part-way into the wave at a velocity unrelated to its phase. Accumulating the
+	 * same `dt` the engine integrates with keeps position and velocity in one time base.
+	 */
+	private botSwayRate(ball: BasePart, localZ: number, dt: number): number {
+		const state = this.botSway.get(ball);
+		if (state === undefined) {
+			return 0;
+		}
+
+		state.elapsed += dt;
+
+		const angle = state.omega * state.elapsed + state.phase;
+		const targetZ = math.sin(angle) * SWAY_AMPLITUDE;
+
+		return SWAY_AMPLITUDE * state.omega * math.cos(angle) + (targetZ - localZ) / SWAY_TRACK_SECONDS;
+	}
+
+	/**
+	 * Stores one client's steering axis, after validating it (item 220).
+	 *
+	 * ## Why the validation is here and not on the client
+	 * A remote handler is the boundary; a client is not trusted. The checks are the three that make a number usable as an axis:
+	 * it is a number, it is not `NaN` (which is a `number` in Luau and would poison every velocity it touched), and it is inside
+	 * `-1 .. 1`. Out-of-range values are **clamped rather than rejected** - a controller that sends `1.0001` from a rounding
+	 * error is not an attack, and clamping costs one call.
+	 *
+	 * **Invalid values are dropped silently.** The alternative is a log line per bad message, which is a remote anyone can spam;
+	 * the axis a player actually got is already visible in the `[Spawner] steer` line.
+	 *
+	 * ## Why the first store per round is logged
+	 * "The ball does not steer" has two causes that look identical from outside: the client never sent an axis, or the server
+	 * never applied one. One line per player per round answers which, and a player holding a key sends exactly one message, so
+	 * the line is quiet. `steerLogged` is cleared in `setRoundActive(true)`.
+	 */
+	private storeSteerAxis(player: Player, lateralValue: unknown, slowValue: unknown): void {
+		if (!typeIs(lateralValue, "number") || lateralValue !== lateralValue) {
+			return;
+		}
+
+		if (!typeIs(slowValue, "number") || slowValue !== slowValue) {
+			return;
+		}
+
+		const lateral = math.clamp(lateralValue, -1, 1);
+		const slow = math.clamp(slowValue, -1, 1);
+		this.steerAxes.set(player.UserId, { lateral, slow });
+
+		if ((lateral !== 0 || slow !== 0) && !this.steerLogged.has(player.UserId)) {
+			this.steerLogged.add(player.UserId);
+			print(`[Spawner] steer player=${player.Name} lateral=${formatNumber(lateral)} slow=${formatNumber(slow)}`);
+		}
+	}
+
+	/**
+	 * Records a jump press if the cooldown allows it, and says so once per accepted press (item 222).
+	 *
+	 * **Two gates, both silent on refusal.** No input outside a round (`!roundActive`), and no second press inside
+	 * `JUMP_COOLDOWN_SECONDS`. Silence is deliberate: a refused press is the normal outcome of mashing the button, and a log
+	 * line per refusal would be a log line per button-press.
+	 *
+	 * **The accepted line fires per jump**, unlike `[Spawner] steer`, because a jump is an event rather than a state: the
+	 * question it answers is "did the server accept the press the player felt", and two accepted jumps a second apart are two
+	 * facts worth seeing.
+	 */
+	private queueJump(player: Player): void {
+		if (!this.roundActive) {
+			return;
+		}
+
+		const now = os.clock();
+		const last = this.lastJumpAt.get(player.UserId) ?? 0;
+		if (now - last < JUMP_COOLDOWN_SECONDS) {
+			return;
+		}
+
+		this.lastJumpAt.set(player.UserId, now);
+		this.jumpQueue.add(player.UserId);
+		print(`[Spawner] jump player=${player.Name}`);
+	}
+
 	private stepBallSpeeds(dt: number): void {
 		if (!this.roundActive) {
 			this.holdBodies();
@@ -1856,11 +2015,10 @@ export class BallSpawnerService implements OnStart {
 		// Hoisted with the frame: the rocket's trigger is a fraction of the belt's length (item 204), and re-reading it per
 		// ball would walk the bound-surface list fifty times a tick for a number that cannot change inside one tick.
 		const beltLength = this.treadmill.getBeltLength();
-		// Angular rate of the sway, **per ball** since item 153: `2 * pi * SWAY_FREQUENCY_HZ * that ball's multiplier`,
-		// drawn at spawn and carried in `lateral`. It used to be one constant hoisted out here, which is exactly the bug -
-		// one period for the field means the phase offsets never drift, so a well-drawn field still reads as synchronised.
-		// The wave's position and its derivative still come from one expression per ball, so the velocity cannot be the
-		// derivative of a *different* frequency than the position it tracks.
+		// **The lateral axis, once per tick** (item 220). It used to be computed inside the sway's per-ball branch because
+		// only swaying bodies needed it; every body needs it now, and it is a `CFrame` read rather than a per-ball one, so it
+		// is hoisted beside `right`. `RightVector:Cross(UpVector)` and not `LookVector` - see the axis note on the write below.
+		const across = beltFrame === undefined ? undefined : beltFrame.RightVector.Cross(beltFrame.UpVector).Unit;
 
 		for (const ball of this.liveBalls) {
 			if (ball.Parent === undefined) {
@@ -1868,6 +2026,16 @@ export class BallSpawnerService implements OnStart {
 			}
 
 			const speed = this.readNumber(ball, BALL_SPEED_ATTRIBUTE, BALL_SPEED_START);
+
+			// **The owner is read once here and used twice** (item 222): the slow input drains `BALL_SPEED` below, the lateral
+			// input is written as velocity further down, and both are keyed by the same `UserId`. Reading the attribute twice
+			// would be two lookups for one fact, and a body whose owner replicated between them would take its slow and its
+			// steer from different players.
+			const ownerId = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);
+			const isPlayerBody = typeIs(ownerId, "number") && ownerId > 0;
+			const axes = isPlayerBody && typeIs(ownerId, "number") ? this.steerAxes.get(ownerId) : undefined;
+			const slowAxis = axes === undefined ? 0 : axes.slow;
+
 			// `decayed`, not `next`: `next` is a Lua global and roblox-ts rejects the identifier outright.
 			const decayed = math.max(BALL_SPEED_MIN, speed - BALL_SPEED_DECAY_RATE * dt);
 
@@ -1875,10 +2043,10 @@ export class BallSpawnerService implements OnStart {
 			// signed delta — a rocket's snap, an eclipse or magnet victim's extra decay — and the clamp is applied here so
 			// that every contributor's arithmetic lands inside the model's range exactly once. A power that clamped its own
 			// delta would disagree with one that did not.
-			// **The one frame of belt-local position the rocket's trigger needs (item 204).** Read here rather than inside the
-			// sway below, because `tickDelta` runs first and the trigger is a *position* now: the loop is already the only place
-			// that knows the belt frame, so this is one component of a transform already being taken for the sway - not a second
-			// lookup, and there is no clock to compare against any more.
+			// **The one frame of belt-local position the rocket's trigger needs (item 204).** Read here because `tickDelta` runs
+			// first and the trigger is a *position* now: the loop is already the only place that knows the belt frame, so this is
+			// one component of a transform the tick needs anyway - not a second lookup, and there is no clock to compare
+			// against any more.
 			const beltOffset = beltFrame === undefined ? undefined : beltFrame.PointToObjectSpace(ball.Position);
 			const delta = tickDelta(ball, {
 				dt,
@@ -1886,9 +2054,25 @@ export class BallSpawnerService implements OnStart {
 				alongPosition: beltOffset === undefined ? 0 : beltOffset.X,
 				beltLength,
 			});
+			// ## The slow input: a brake that costs ground (item 222)
+			//
+			// **It is a term in this sum, not a second clamp.** `delta` is the powers' contribution and `slowDrain` is the
+			// player's; both land in one expression, and the single `math.clamp` below applies to the total. A second clamp
+			// would be a second writer to `BALL_SPEED` in the same tick, which is what item 74 exists to prevent.
+			//
+			// **What the player sees is the mechanic, not a bug.** The ball's rotation is driven by `BALL_SPEED`, so draining it
+			// slows the roll while `BELT_SPEED` - the belt's own texture - carries on unchanged. The ball looks like it is
+			// rolling more slowly while the floor keeps moving under it, and because the along-belt velocity is `-relative`, a
+			// ball at `BALL_SPEED = 0` is travelling toward the exit at the full belt speed. Slowing down is *how you lose
+			// ground*, and the ball's own spin is the honest report of that.
+			//
+			// At `BALL_SPEED = 10` and a fully held input this drains `SLOW_DRAIN_RATE = 5`/s, so the ball reaches
+			// `BALL_SPEED_MIN` in `2 s` and then stops falling - the clamp is the floor, so holding the key past that point is
+			// free rather than punishing.
+			const slowDrain = -slowAxis * SLOW_DRAIN_RATE * dt;
 			// `advanced`, not `next`: `next` is a Lua global and roblox-ts rejects the identifier outright — the same
 			// reason the line above calls its intermediate `decayed`.
-			const advanced = math.clamp(decayed + delta, BALL_SPEED_MIN, BALL_SPEED_MAX);
+			const advanced = math.clamp(decayed + delta + slowDrain, BALL_SPEED_MIN, BALL_SPEED_MAX);
 			if (advanced !== speed) {
 				ball.SetAttribute(BALL_SPEED_ATTRIBUTE, advanced);
 			}
@@ -1905,111 +2089,122 @@ export class BallSpawnerService implements OnStart {
 			const velocity = ball.AssemblyLinearVelocity;
 			const along = velocity.Dot(right);
 
-			// ## The decorative sway - lateral, world Z
+			// ## The lateral axis: the player's steering (item 220)
 			//
-			// Axis, and why it is not `LookVector`: a `CFrame`'s `LookVector` is its **-Z** axis, so the belt's local
-			// **+Z** is `RightVector:Cross(UpVector)` (for `RightVector = +X` that is world `+Z`). Using `LookVector`
-			// would sway toward local -Z, which works but disagrees with every `localZ` in the log and with
-			// `PointToObjectSpace`, so the two would need negating against each other forever. `Cross` keeps the term and
-			// the measurement in one frame. **Positive Z is the viewer's right from the front looking toward the back**,
-			// and code-frame Z runs `-6 .. +6` across this belt.
+			// The lateral component of the velocity is **owned by this model**, the same way the along-belt component is. Two
+			// terms go into it:
 			//
-			// ## The law: a sine for position, its derivative for velocity
+			// - **`axis * STEER_SPEED`**, the player's own input. `axis` comes from `steerAxes` keyed by the body's
+			//   `OwnerUserId`, so a player's ball steers, a `decoy` twin (no owner) does not, and a `Debug#N` bot (a negative
+			//   synthetic id that is never in the map) does not. Bots therefore sit in their lane - **the trade this round
+			//   makes**, named here because a still field reads as an empty one and bot AI is the lever, not a sine wave.
+			// - **The contact shove**, as a decaying impulse (item 203). It stays additive: a collision is not something the
+			//   player did, and it is the only lateral motion a body without an owner ever gets.
 			//
-			// The ball is driven to `z(t) = A * sin(omega * t + phase)` in code-frame Z. Physics integrates velocity, so
-			// what this loop can write is the derivative, **`A * omega * cos(omega * t + phase)` - cosine, not sine**.
-			// Writing the sine here is the trap worth restating: the sine is the *position*, so using it as a velocity
-			// would move the ball fastest where the wave is slowest and slowest at its extremes, which shakes in place
-			// instead of swaying.
-			//
-			// The second term is a correction toward the wave's *position*, `(targetZ - localZ) / SWAY_TRACK_SECONDS`, and
-			// it is here for a measured reason rather than for tidiness. Integrating the derivative alone returns the wave
-			// plus a constant, `A * sin(...) - A * sin(phase)`, added to wherever the ball already was; this game's spawn
-			// lanes sit at code-frame Z `+-1` and `+-3`, so a ball would sway `+-A` around *its lane* instead of around the
-			// belt's centre and reach `+-5` of the `+-5.5` the surface allows - a ball apparently about to fall off. With
-			// the correction the offset decays as `e' = -e / SWAY_TRACK_SECONDS`, and `SWAY_AMPLITUDE` means what its
-			// docblock says. It is a fixed time constant rather than a gain scaled by `omega`, so changing the frequency
-			// cannot change how hard the correction pulls.
-			const lateralState = this.lateral.get(ball);
-			if (lateralState !== undefined && beltFrame !== undefined) {
-				// This ball's own clock, in seconds since it spawned. Not a global time and not `os.clock()`: the latter
-				// is CPU time on this platform, shared by every ball, and a ball spawned late would then begin part-way
-				// into the wave at a velocity unrelated to its phase. Accumulating the same `dt` the engine integrates
-				// with keeps position and velocity in one time base.
-				lateralState.elapsed += dt;
-
-				const localZ = beltFrame.PointToObjectSpace(ball.Position).Z;
-				const omega = lateralState.omega;
-				const angle = omega * lateralState.elapsed + lateralState.phase;
-				const targetZ = math.sin(angle) * SWAY_AMPLITUDE;
-				const across = beltFrame.RightVector.Cross(beltFrame.UpVector).Unit;
-				const lateralRate = SWAY_AMPLITUDE * omega * math.cos(angle) + (targetZ - localZ) / SWAY_TRACK_SECONDS;
-				const lateral = across.mul(lateralRate);
-
-				// **The lateral component is removed before this tick's rate is added (item 151).**
-				//
-				// This line used to read `velocity.sub(right.mul(along)).add(right.mul(-relative)).add(lateral)`, which
-				// keeps whatever lateral velocity the ball already had and adds the new rate **on top of it**. That is not
-				// the same system, and the difference is measurable:
-				//
-				// - Setting the lateral velocity gives `e' = -e / T` for the position error, which decays in `T` seconds
-				//   and leaves the ball tracing `A * sin(omega * t + phase)` — the wave the docblock describes.
-				// - Adding to it gives `e'' = -e / T`, a **harmonic oscillator** with natural period `2 * pi * sqrt(T)` =
-				//   7.7 s at `SWAY_TRACK_SECONDS = 1.5`. The wave's own period is 10 s, so every ball was a driven
-				//   oscillator sitting near its resonance: overshooting `SWAY_AMPLITUDE` and — because the excess is excited
-				//   by collisions rather than by each ball's own phase — reading on screen as a field of balls swinging
-				//   further than the constant says and swinging *together*.
-				//
-				// Subtracting `across * velocity.Dot(across)` first is the whole fix, and it is the same statement the
-				// docblock above already made ("knocked sideways ... overwritten on the next tick rather than carried").
-				// `across` is horizontal, so the vertical component still belongs to gravity and a ball in the air still
-				// falls. The along-belt component is removed separately, as before.
-				const carriedLateral = velocity.Dot(across);
-
-				// **The contact shove, applied by the writer that owns both axes (item 203).** A collision handler cannot
-				// leave a *velocity* behind: the `sub(across ...)` above removes the lateral one a tick later, and the
-				// `sub(right ...)` below replaces the along-belt one on every tick. It can leave an *impulse*, and that is
-				// what this reads.
-				//
-				// **Both components are applied, not just the lateral one.** Until item 203 this read
-				// `across.mul(shoveImpulse.Dot(across))`, which silently discarded the normal's along-belt part: a body
-				// struck from directly behind has a normal that is almost entirely `right`, so it received almost no shove
-				// at all, and every contact that did register read as a sideways flick regardless of where it came from.
-				// `[Powers] shove: ... dir=(-0.946, 0, 0.324)` is exactly that case on the wire — 95% of the impulse was
-				// along the belt and this line threw it away, which is why the shove looked one-dimensional.
-				//
-				// `right` and `across` are orthogonal and both horizontal for a belt whose `RightVector` is horizontal, so
-				// the two dot products reconstruct the impulse and nothing is dropped; `Y` still belongs to gravity. The
-				// peak is still `BALL_COLLISION_SHOVE_SPEED`, because `clampShove` caps the **vector** — a dead-on contact
-				// is one full shove along the belt rather than half of one on each axis. That also means the effective
-				// strength of a rear-end hit went up by roughly the inverse of its lateral projection, which is the retune
-				// item 203 deliberately left alone.
-				const shoveImpulse = lateralShoveFor(ball, dt);
-				const lateralShove = across.mul(shoveImpulse.Dot(across));
-				const alongShove = right.mul(shoveImpulse.Dot(right));
-				ball.AssemblyLinearVelocity = velocity
-					.sub(right.mul(along))
-					.sub(across.mul(carriedLateral))
-					.add(right.mul(-relative))
-					.add(lateral)
-					.add(lateralShove)
-					.add(alongShove);
+			// **The axis is world `RightVector:Cross(UpVector)`, not `LookVector`.** A `CFrame`'s `LookVector` is its `-Z`, so
+			// using it as "right" gets the sign of the input backwards and steers a ball across the belt when the player aims
+			// along it. `Across` is horizontal, so `Y` still belongs to gravity.
+			const frame = beltFrame;
+			if (frame === undefined || across === undefined) {
+				// No belt frame yet (a scene with no bound surface): the along-belt component is all this model can write, and
+				// that is what it writes. Unchanged from the sway era - this branch never had lateral intent either.
+				ball.AssemblyLinearVelocity = velocity.sub(right.mul(along)).add(right.mul(-relative));
 				continue;
 			}
 
-			// Replace only the along-belt component: `velocity - right*along` is everything else (gravity and lateral
-			// drift), and adding `right*relative` back in swaps the one component this model owns.
+			// **One lateral source per body, decided by the owner (item 221).**
 			//
-			// **`-relative` because `RightVector` points toward the back.** `RightVector` is `+X`, and in this model `+X`
-			// is toward the back (code-frame `+28` at the edge, user-X `56`); `-X` is toward the front, where the ball
-			// spawns (code-frame `-23`, user-X `5`). A positive `RELATIVE_SPEED` means the ball is faster than the
-			// reference and must gain ground toward the **front**, which is `-RightVector` in world space. So the multiply
-			// is negated: the sign is the model's, not the world's. See this method's docblock for the full axis statement.
+			// - **A player body** (`OwnerUserId > 0`) takes `steerAxes`, the axis their client sent.
+			// - **A bot body** - `Debug#N` with a negative synthetic id, or a `decoy` twin with no attribute at all - has no
+			//   intent to consult, so it gets the sine wave the tree had before steering existed.
 			//
-			// Getting this wrong is visible and was: with `+relative`, a ball decaying below belt speed drifted to
-			// code-frame `X = -28` and left the belt toward the front after ~11 s, i.e. it exited at the edge it spawned
-			// beside. With the negation it drifts to code-frame `+28` and crosses the whole belt.
-			ball.AssemblyLinearVelocity = velocity.sub(right.mul(along)).add(right.mul(-relative));
+			// The split is one comparison on the same attribute the whole file already keys ownership off, and it is the only
+			// place either source is chosen: `steerAxes` is never written for a bot, and `botSway` is never seeded for a
+			// player. `ownerId`, `isPlayerBody` and `axes` were read at the top of the loop - the slow input needs the same
+			// two facts, so they are settled once.
+			//
+			// `localZ` is where the ball is across the belt - the quantity a swaying bot's correction pulls toward its wave. It is
+			// taken for every body rather than inside the bot branch because it is one transform on a frame the tick already
+			// holds, and a branch to save it would cost more than it saves.
+			const localZ = frame.PointToObjectSpace(ball.Position).Z;
+			// **Chosen by the body, not by whether the map has an entry** (item 223). Keying this off `axes === undefined` meant a
+			// player whose first axis message had not arrived - or whose messages were all being dropped, which is what item 222
+			// did - fell through to the *bot* branch. That branch returns `0` for a body with no sway state, so the symptom was
+			// "no steering" with nothing in the log naming the real cause. A player body steers or does nothing; only a body with
+			// no player behind it can sway.
+			const lateralRate = isPlayerBody
+				? axes === undefined
+					? 0
+					: axes.lateral * STEER_SPEED
+				: this.botSwayRate(ball, localZ, dt);
+			const steer = across.mul(lateralRate);
+
+			// **The lateral component is removed before this tick's terms are added (item 151).**
+			//
+			// This line used to read `velocity.sub(right.mul(along)).add(right.mul(-relative)).add(lateral)`, which keeps
+			// whatever lateral velocity the ball already had and adds the new rate **on top of it**. That is not the same
+			// system: setting the axis makes an error in position or velocity decay, while adding to it makes every
+			// contribution an oscillator that overshoots and rings. Item 151 fixed it for the sway; the same argument is why it
+			// stays now that the term is the player's - a steering write must *set* the axis, so physics cannot leave a ball
+			// compounding sideways motion on top of the input.
+			//
+			// Subtracting `across * velocity.Dot(across)` first is that whole statement, and it is identical to the one the
+			// docblock above already makes ("knocked sideways ... overwritten on the next tick rather than carried"). `across`
+			// is horizontal, so the vertical component still belongs to gravity and a ball in the air still falls.
+			const carriedLateral = velocity.Dot(across);
+
+			// **The contact shove, applied by the writer that owns both axes (item 203).** A collision handler cannot leave a
+			// *velocity* behind: the `sub(across ...)` above removes the lateral one a tick later, and the `sub(right ...)`
+			// below replaces the along-belt one on every tick. It can leave an *impulse*, and that is what this reads.
+			//
+			// **Both components are applied, not just the lateral one.** Until item 203 this read
+			// `across.mul(shoveImpulse.Dot(across))`, which silently discarded the normal's along-belt part: a body struck from
+			// directly behind has a normal that is almost entirely `right`, so it received almost no shove at all, and every
+			// contact that did register read as a sideways flick regardless of where it came from.
+			//
+			// `right` and `across` are orthogonal and both horizontal for a belt whose `RightVector` is horizontal, so the two
+			// dot products reconstruct the impulse and nothing is dropped; `Y` still belongs to gravity. The peak is still
+			// `BALL_COLLISION_SHOVE_SPEED`, because `clampShove` caps the **vector** - a dead-on contact is one full shove along
+			// the belt rather than half of one on each axis.
+			// **`-relative` because `RightVector` points toward the back.** `RightVector` is `+X`, and in this model `+X` is toward
+			// the back (code-frame `+28` at the edge); `-X` is toward the front, where the ball spawns. A positive
+			// `RELATIVE_SPEED` means the ball is faster than the reference and must gain ground toward the **front**, which is
+			// `-RightVector` in world space - so the multiply is negated. The sign is the model's, not the world's. With
+			// `+relative` a ball decays toward the front and leaves at the edge it spawned beside, which is how this was found.
+
+			const shoveImpulse = lateralShoveFor(ball, dt);
+			const lateralShove = across.mul(shoveImpulse.Dot(across));
+			const alongShove = right.mul(shoveImpulse.Dot(right));
+			ball.AssemblyLinearVelocity = velocity
+				.sub(right.mul(along))
+				.sub(across.mul(carriedLateral))
+				.add(right.mul(-relative))
+				.add(steer)
+				.add(lateralShove)
+				.add(alongShove);
+
+			// ## The jump (item 222)
+			//
+			// **The pop's mechanism, triggered by a press instead of a contact**: reconstruct from the current vector and replace
+			// only `Y`, so the model-owned along-belt component and the lateral component this tick just wrote both survive. The
+			// write is byte-identical to `writePopY` in `server/powers/index.ts`, and `JUMP_IMPULSE` is its own constant with the
+			// same value as `BALL_COLLISION_POP_UPWARD_SPEED` by design rather than by reference.
+			//
+			// **Applied here, after the velocity write, and it is the last write of the tick on purpose.** Before it, this tick's
+			// lateral and along-belt assignments would overwrite the impulse's X and Z - which are the same values anyway - but
+			// more importantly the *next* tick's `along` read has to see the ball's real velocity, and the Y component is the one
+			// nothing else writes. Applying it last means the jump cannot be undone by this function on the frame it fires, and
+			// the physics step that follows is the one that launches the ball.
+			//
+			// **Consumed, not queued.** The entry is deleted the moment it is applied, so one press is one impulse even if the
+			// player keeps the key down: the client fires on `Begin` only, and the server has already rate-limited the press.
+			if (isPlayerBody && typeIs(ownerId, "number") && this.jumpQueue.has(ownerId)) {
+				this.jumpQueue.delete(ownerId);
+				const jumping = ball.AssemblyLinearVelocity;
+				ball.AssemblyLinearVelocity = new Vector3(jumping.X, JUMP_IMPULSE, jumping.Z);
+			}
+
+			continue;
 		}
 	}
 
@@ -2305,8 +2500,8 @@ export class BallSpawnerService implements OnStart {
 		for (const ball of this.liveBalls) {
 			if (ball.Parent === undefined) {
 				this.ballKillY.delete(ball);
-				this.lateral.delete(ball);
 				this.startSpeeds.delete(ball);
+				this.botSway.delete(ball);
 				forgetLateralShove(ball);
 				forgetBallPower(ball);
 				this.forgetDecoy(ball);
@@ -2364,12 +2559,11 @@ export class BallSpawnerService implements OnStart {
 		}
 
 		this.ballKillY.delete(ball);
-		// `lateral` and `startSpeeds` were missing from this block until this round: `pruneDestroyedBalls` clears them for a
-		// body that left the world by itself, but a body removed *here* is taken out of `liveBalls` before `Destroy()`, so
-		// the prune never sees it and both maps grew by one entry per cap and kill-plane destruction for the session. Found
-		// while placing `forgetBall` in this block, which is the same bug for a third map.
-		this.lateral.delete(ball);
+		// `startSpeeds` and `botSway` were both missing from this block at some point: `pruneDestroyedBalls` clears them for a
+		// body that left the world by itself, but a body removed *here* is taken out of `liveBalls` before `Destroy()`, so the
+		// prune never sees it and each map grew by one entry per cap and kill-plane destruction for the session.
 		this.startSpeeds.delete(ball);
+		this.botSway.delete(ball);
 		forgetLateralShove(ball);
 		this.forgetDecoy(ball);
 		const index = this.liveBalls.indexOf(ball);
@@ -2496,7 +2690,7 @@ export class BallSpawnerService implements OnStart {
 		// same-tick pair reports 1 on the second ball. `laneRadius` is printed so the occupancy threshold
 		// (`2 * laneRadius + OCCUPANCY_MARGIN_STUDS`) can be reconstructed from the line itself.
 		print(
-			`[Ball:${id}] spawn shape=${entry.shape.Name} size=${formatVector(entry.size)} pos=${formatVector(ball.Position)} mass=${formatNumber(ball.AssemblyMass)} ${this.describeOwner(ball)} group=${ball.CollisionGroup} occupants=${occupancy.count} nearest=${occupancy.nearest} laneRadius=${formatNumber(laneRadius(entry.size))} belt=${belt === undefined ? "none" : `"${belt.GetFullName()}"`} spawner="${spawner.GetFullName()}"`,
+			`[Ball:${id}] spawn shape=${entry.shape.Name} size=${formatVector(entry.size)} pos=${formatVector(ball.Position)} mass=${formatNumber(ball.AssemblyMass)} ${this.describeOwner(ball)} group=${ball.CollisionGroup} occupants=${occupancy.count} nearest=${occupancy.nearest} laneRadius=${formatNumber(laneRadius(entry.size))} color=#${ball.Color.ToHex()} belt=${belt === undefined ? "none" : `"${belt.GetFullName()}"`} spawner="${spawner.GetFullName()}"`,
 		);
 	}
 
@@ -2646,23 +2840,27 @@ export class BallSpawnerService implements OnStart {
 		// non-cube entry it is the conservative reading rather than the smallest half-extent.
 		const radius = math.max(entry.size.X, entry.size.Y, entry.size.Z) / 2;
 		const poleSize = radius * MARKER_POLE_SIZE_FRACTION;
+		// **The ball's own colour, read off the body rather than re-derived from the id** (item 226). The id is not on this
+		// body (a decoy has no `ChosenBallId` by design), and the decoy already copies its parent's `Color` - so reading the
+		// body is the one source that is right for a real ball and for a twin without a branch.
+		const color = ball.Color;
 
 		// `ball.CFrame * CFrame.new(0, r, 0)` means "r studs along the *body's own* up axis". Computing
 		// this in world space instead would place the "pole" wherever world-up happened to point relative
 		// to the body, which — with random spawn rotation — is nowhere in particular.
 		this.createMarker(ball, ball.CFrame.mul(new CFrame(0, radius, 0)), "NorthPole", Enum.PartType.Ball, {
 			size: Vector3.one.mul(poleSize),
-			color: MARKER_POLE_COLOR,
+			color,
 		});
 		this.createMarker(ball, ball.CFrame.mul(new CFrame(0, -radius, 0)), "SouthPole", Enum.PartType.Ball, {
 			size: Vector3.one.mul(poleSize),
-			color: MARKER_POLE_COLOR,
+			color,
 		});
 
 		// Axis length first (`X` is the cylinder's axis), then the two diameters.
 		this.createMarker(ball, ball.CFrame.mul(CFrame.Angles(0, 0, math.pi / 2)), "Equator", Enum.PartType.Cylinder, {
 			size: new Vector3(MARKER_RING_THICKNESS, radius * MARKER_RING_OVERSIZE, radius * MARKER_RING_OVERSIZE),
-			color: MARKER_RING_COLOR,
+			color,
 		});
 	}
 
@@ -3099,14 +3297,25 @@ export class BallSpawnerService implements OnStart {
 		// `along=` is the measurement that can contradict it: the body's own velocity projected on the belt's axis.
 		const along = velocity.Dot(this.treadmill.getBeltRightVector());
 
-		// The sway, so the lateral motion is readable from the log rather than only from the screen: `localZ` is where
-		// the ball is across the belt, `swayPhase` where in its own wave it is. The two together tell a ball that is
-		// tracking its wave from one that has not found it yet.
+		// **`localZ` plus one lateral source, named (items 221, 222).** A swaying bot is explained by its wave phase; a steering
+		// player is explained by the two axes the server holds for them. Printing the phase beside an axis would leave a reader
+		// guessing which one is driving the ball, and a body whose owner has not replicated yet would show a stale axis beside
+		// a sway it is not getting - so the line prints `mode=` and exactly one of the two forms.
 		const localPoint = belt.CFrame.PointToObjectSpace(ball.Position);
-		const sway = this.lateral.get(ball);
-		const swayPhase = sway === undefined ? "none" : formatNumber(sway.phase);
+		const sampleOwnerId = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);
+		const sampleIsPlayer = typeIs(sampleOwnerId, "number") && sampleOwnerId > 0;
+		const sway = this.botSway.get(ball);
+		const sampleAxes =
+			sampleIsPlayer && typeIs(sampleOwnerId, "number") ? this.steerAxes.get(sampleOwnerId) : undefined;
+		// **`mode` is decided by the *body*, and the axes are a separate field** (item 223). Keying the mode off "do we have an
+		// axis for this player" made a player's ball with no axis reported yet print `mode=bot` - which is how a dropped steer
+		// message came to look like a correctly-swaying bot instead of like a client whose message never arrived. A missing
+		// entry is a real state (before the first message, and after `PlayerRemoving`), so it reads `0,0` rather than a mode.
+		const lateralSource = sampleIsPlayer
+			? `mode=player steerAxis=${formatNumber(sampleAxes === undefined ? 0 : sampleAxes.lateral)} slowAxis=${formatNumber(sampleAxes === undefined ? 0 : sampleAxes.slow)}`
+			: `mode=bot swayPhase=${sway === undefined ? "none" : formatNumber(sway.phase)}`;
 		print(
-			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(localPoint)} localZ=${formatNumber(localPoint.Z)} swayPhase=${swayPhase} velocity=${formatVector(velocity)} along=${formatNumber(along)} BALL_SPEED=${formatNumber(ballSpeed)} BELT_SPEED=${formatNumber(beltSpeed)} MODEL_RELATIVE=${formatNumber(ballSpeed - beltSpeed)} roundActive=${tostring(this.roundActive)} ${this.describeOwner(ball)}`,
+			`[Ball:${observation.id}] sample t=${formatNumber(os.clock() - observation.spawnedAt)}s pos=${formatVector(ball.Position)} local=${formatVector(localPoint)} localZ=${formatNumber(localPoint.Z)} ${lateralSource} velocity=${formatVector(velocity)} along=${formatNumber(along)} BALL_SPEED=${formatNumber(ballSpeed)} BELT_SPEED=${formatNumber(beltSpeed)} MODEL_RELATIVE=${formatNumber(ballSpeed - beltSpeed)} roundActive=${tostring(this.roundActive)} ${this.describeOwner(ball)}`,
 		);
 	}
 

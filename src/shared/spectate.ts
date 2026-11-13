@@ -59,3 +59,36 @@ export function cameraWantsArena(phase: string, competing: boolean, spectating: 
 
 	return spectating || competing;
 }
+
+/**
+ * Whether this player may open the store or the inventory: **exactly when the camera is not on the arena** (item 219).
+ *
+ * ## Why this is a negation of the camera rule and not a phase list
+ *
+ * The store's rule used to be `phase === "Intermission"`, written when "shopping is a between-rounds activity" was true. It
+ * stopped being true when item 209 capped a round at 120 seconds: a player eliminated at second 30 sits idle for **ninety
+ * seconds** with nothing to do, and a player who joins during `Playing` sits idle for the whole round. Both are looking at
+ * their own character and neither is driving a ball.
+ *
+ * **The question that decides whether a player may shop is the same one that decides where their camera is**: are they
+ * racing? A player whose camera is on the arena is in the round; a player whose camera is on their character is not. Two
+ * definitions of "not racing" would drift - the store would open for someone the camera had already put on the belt, or close
+ * for someone the camera had handed back to their character - so this is the negation of the one function that answers it,
+ * and the spec asserts the matrix rather than the caller trusting it.
+ *
+ * ## The rows it produces
+ *
+ * | phase | competing | spectating | camera | shop |
+ * | --- | --- | --- | --- | --- |
+ * | `Intermission` | either | either | lobby | open |
+ * | `Waiting` / `Playing` / `PostGame` | `true` | either | arena | closed |
+ * | `Waiting` / `Playing` / `PostGame` | `false` | `true` | arena | closed |
+ * | `Waiting` / `Playing` / `PostGame` | `false` | `false` | lobby | **open** |
+ *
+ * The `Waiting` row is the one worth naming: a competitor in `Waiting` has the picker on screen and does not get the store
+ * (the picker is the panel for that phase), while a late joiner who is not competing gets it. That falls out of the camera
+ * rule without the store knowing what a picker is.
+ */
+export function isShoppingAvailable(phase: string, competing: boolean, spectating: boolean): boolean {
+	return !cameraWantsArena(phase, competing, spectating);
+}

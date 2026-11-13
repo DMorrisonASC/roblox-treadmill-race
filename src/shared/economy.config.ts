@@ -305,17 +305,17 @@ export function decodeOwnedBalls(encoded: string): Map<string, number> {
 // #region Robux chest
 
 /**
- * **Placeholder.** The Developer Product id for the Robux chest.
+ * The Developer Product id for the Robux chest.
  *
- * **This is a fake number.** It must be replaced with the real id from the Creator Dashboard before the store can sell
- * anything; until it is, `ProcessReceipt` will never match a real purchase and the place charges nobody.
+ * **The live product**, from the Creator Dashboard. Item 234's audit found this file still carrying `1234567890`, a fake
+ * number that made `ProcessReceipt` match nothing and the place charge nobody; this is the real one.
  *
  * **Debt carried here on purpose:** there is no `PolicyService` gate and no client UI in this round. The moment a
  * button that calls `PromptProductPurchase` is added, it must check `PolicyService:IsPaidRandomItemsRestricted` for that
  * player and refuse the prompt when restricted ? a paid random item is not allowed for every account. Putting the note
  * next to the product id means the file itself carries the debt rather than a prompt somebody has to remember.
  */
-export const ROBUX_CHEST_PRODUCT_ID = 1234567890;
+export const ROBUX_CHEST_PRODUCT_ID = 3730790793;
 
 /**
  * **Placeholder.** The Robux price, for display only.
@@ -425,10 +425,11 @@ export const PURCHASE_HISTORY_CAP = 50;
 // #region Robux bundle
 
 /**
- * **Placeholder.** The Developer Product id for the ten-ball bundle.
+ * The Developer Product id for the ten-ball bundle.
  *
  * A **second** product on the Creator Dashboard, not a quantity on the first: Roblox charges per product, so "ten for the
- * price of eight" has to exist as its own product with its own price. Also fake ? replace both ids together.
+ * price of eight" has to exist as its own product with its own price. **The live id**, like the single above - item 234's
+ * audit found both still fake.
  *
  * ## The bundle floor, which is the reason to buy this instead of ten singles
  *
@@ -441,7 +442,7 @@ export const PURCHASE_HISTORY_CAP = 50;
  * constant that a caller proves it honoured (`floored` in the result) rather than a branch inside a roll loop that a
  * later refactor can drop. Nothing about it changes the odds table above: the other nine rolls are ordinary paid rolls.
  */
-export const ROBUX_CHEST_BUNDLE_PRODUCT_ID = 1234567891;
+export const ROBUX_CHEST_BUNDLE_PRODUCT_ID = 3730801824;
 
 /** **Placeholder.** Balls granted per bundle purchase. One charge, one receipt, `count` grants. */
 export const ROBUX_CHEST_BUNDLE_COUNT = 10;
@@ -464,6 +465,28 @@ export const ROBUX_CHEST_BUNDLE_GUARANTEE: Rarity = "legendary";
  * billing error.
  */
 export const ROBUX_CHEST_BUNDLE_PRICE_ROBUX = 250;
+
+// #endregion
+
+// #region chest art
+
+/**
+ * **The user's upload.** The coin chest's picture, as a bare asset id; `shared/ui/chest-icon.ts` prefixes it.
+ *
+ * **Not a `**Placeholder.**`** - it is the drawing the designer chose, in the same class as `COIN_ICON_ASSET_ID` and
+ * `PICKUP_SPRITE_ASSET_ID`, and proposing a different value here would be a guess presented as a decision.
+ *
+ * Bare rather than a full `rbxassetid://` string, following item 233's `BALL_ICONS`: the id lives in the table and the
+ * scheme lives in the one function that consumes it, so there is no second string to keep in step.
+ *
+ * **`""` is legal and means "no art".** The store's chest square is a well with the word `CHEST` in it (item 58), and that
+ * stays as the fallback: no id means no `ImageLabel` and the word shows, which is what the ten-ball bundle still uses
+ * because it has no drawing of its own.
+ */
+export const COIN_CHEST_IMAGE_ID = "99666339452242";
+
+/** **The user's upload.** The premium chest's picture. Same rules as `COIN_CHEST_IMAGE_ID`. */
+export const PREMIUM_CHEST_IMAGE_ID = "70588574179320";
 
 // #endregion
 

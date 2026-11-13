@@ -11,6 +11,9 @@ import {
 	PICKUP_SPRITE_ASSET_ID,
 	PICKUP_SPRITE_LIFT_STUDS,
 	PICKUP_SPRITE_STUDS,
+	PICKUP_MARKER_LIFT_STUDS,
+	PICKUP_MARKER_PIXELS,
+	PICKUP_MARKER_TRANSPARENCY,
 	PICKUP_RING_MAX_DISTANCE,
 	RING_COLOR,
 	RING_LIFT_STUDS,
@@ -113,6 +116,9 @@ export class PickupSpriteController implements OnStart {
 	 * did not.
 	 */
 	private reportedFirstRingSurface = false;
+
+	/** Whether the first marker has already reported its own numbers. Same one-line-per-session argument. */
+	private reportedFirstMarker = false;
 
 	public onStart(): void {
 		this.imageUri = this.resolveImage();
@@ -434,6 +440,9 @@ export class PickupSpriteController implements OnStart {
 		// showing nothing at all.
 		const footprint = this.buildFootprint(pickup);
 		const label = this.buildSprite(pickup);
+		// **The third visual, and the only one that survives distance (item 219).** The sprite is studs-sized and the ring is
+		// paint on the floor; both are `19`-ish pixels from the game camera, which is the number item 200 measured.
+		this.buildMarker(pickup);
 		this.sprites.set(pickup, { label, lastSpinAt: undefined });
 
 		// **A line per session saying the visuals were actually built, and how big they came out.** Item 145's report was
@@ -470,6 +479,82 @@ export class PickupSpriteController implements OnStart {
 					`[PickupSprite] first visuals on ${pickup.GetFullName()} spriteAuthored=${PICKUP_SPRITE_STUDS} studs spriteWidth=${formatStuds(spriteStuds)} studs spriteRadius=${formatStuds(spriteStuds / 2)} studs drawn=${drawn} lift=${PICKUP_SIZE.Y / 2 + PICKUP_SPRITE_LIFT_STUDS} studs pad=${footprint.padSize} ringDiameter=${formatStuds(footprint.diameter)} studs ringRadius=${formatStuds(footprint.diameter / 2)} studs`,
 				);
 			});
+		}
+	}
+
+	/**
+	 * Builds the pad's screen-size marker: a camera-facing circle at a fixed number of pixels, at every distance (item 219).
+	 *
+	 * ## Why this is the engine's own answer and not a per-frame recompute
+	 *
+	 * The ring cannot hold a screen size - a `SurfaceGui`'s resolution is `PixelsPerStud` over geometry, so its size is
+	 * whatever the disc's studs subtend - and the sprite uses `Size`'s **scale**, which is studs and shrinks with distance. A
+	 * `BillboardGui`'s **offset** components are screen pixels, so `Size = fromOffset(28, 28)` is a `28`-pixel circle at `10`
+	 * studs and at `390` studs alike, with no code running per frame. The alternative - recomputing `Size` from the camera
+	 * distance on `RenderStepped` - would be a per-frame write per pad to compute something the engine already defines.
+	 *
+	 * ## Why `DistanceStep`, `SizeOffset` and the two limits are NOT used
+	 *
+	 * They read as the answer and they are not, per the installed typings (`@rbxts/types`' `BillboardGui`):
+	 *
+	 * - `DistanceStep` - *"the size `CurrentDistance` increments and decrements in studs"* - quantises the distance reading; it
+	 *   scales nothing by itself, and it is `[NotReplicated]` (settable on the client, as this file is).
+	 * - `SizeOffset` - *"a 2D offset in size-relative units that acts like an anchor point"* - is a one-shot offset of the gui
+	 *   within its own canvas, not a per-step growth term.
+	 * - `DistanceLowerLimit` and `DistanceUpperLimit` are **both deprecated** in the current typings.
+	 *
+	 * So the whole mechanism above is one property: `Size` in offset. A round that reads "put the marker on `DistanceStep`" would
+	 * build a gui whose size never changes and whose position wobbles.
+	 *
+	 * ## What it does not solve, stated rather than hidden
+	 *
+	 * A `BillboardGui` faces the camera and describes a **point**, not a footprint: the ring is still the thing that says "this
+	 * close collects". Both are kept because they answer different questions at different ranges - the marker is what a player
+	 * watching their ball from `300` studs actually sees, and the ring is what they see as they arrive. `AlwaysOnTop` stays
+	 * `false` for the ring's reason: a marker drawn through every ball would read as an overlay rather than as something on the
+	 * belt.
+	 */
+	private buildMarker(pickup: BasePart): void {
+		const marker = new Instance("BillboardGui");
+		marker.Name = "PickupMarker";
+		// **Offset, not scale.** See the docblock: this single line is the whole distance mechanism.
+		marker.Size = UDim2.fromOffset(PICKUP_MARKER_PIXELS, PICKUP_MARKER_PIXELS);
+		// The ring's constant, because it is the same question ("do not cull a pickup") already answered for this map. The
+		// `BillboardGui`'s own default is infinity, but a documented default is not a decision - this is.
+		marker.MaxDistance = PICKUP_RING_MAX_DISTANCE;
+		marker.LightInfluence = 0;
+		marker.AlwaysOnTop = false;
+		marker.StudsOffsetWorldSpace = new Vector3(0, PICKUP_SIZE.Y / 2 + PICKUP_MARKER_LIFT_STUDS, 0);
+		marker.Parent = pickup;
+
+		const disc = new Instance("Frame");
+		disc.Name = "Disc";
+		// **Scale, here, and that is not a contradiction.** This frame fills a canvas whose size is already the pixel size, so
+		// `1, 1` is "all of the marker" however `PICKUP_MARKER_PIXELS` is retuned - the same shape the ring's frame uses.
+		disc.Size = UDim2.fromScale(1, 1);
+		disc.BackgroundColor3 = RING_COLOR;
+		disc.BackgroundTransparency = PICKUP_MARKER_TRANSPARENCY;
+		disc.BorderSizePixel = 0;
+		disc.Parent = marker;
+
+		const corner = new Instance("UICorner");
+		corner.CornerRadius = new UDim(1, 0);
+		corner.Parent = disc;
+
+		// A circle rather than an ellipse if the pixel size is ever made non-square: the marker is a locator, and a squashed one
+		// reads as a mistake. At a square size this is inert.
+		const aspect = new Instance("UIAspectRatioConstraint");
+		aspect.AspectRatio = 1;
+		aspect.Parent = disc;
+
+		if (!this.reportedFirstMarker) {
+			this.reportedFirstMarker = true;
+			// **One line per session**, per item 145's precedent: every pad shares these constants, so the second marker cannot
+			// say anything the first did not. `pixels` is the rendered size by construction, which is why this line needs no
+			// `AbsoluteSize` wait - unlike the sprite's, whose size the engine derives from studs and a scale.
+			print(
+				`[PickupSprite] marker pad=${pickup.GetFullName()} pixels=${PICKUP_MARKER_PIXELS} maxDistance=${formatStuds(marker.MaxDistance)} lift=${PICKUP_SIZE.Y / 2 + PICKUP_MARKER_LIFT_STUDS} transparency=${PICKUP_MARKER_TRANSPARENCY} asset=none`,
+			);
 		}
 	}
 

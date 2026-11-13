@@ -1,8 +1,11 @@
 import { Debris, Players, ReplicatedStorage, TweenService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
+import { iconForBall } from "shared/ball-icon";
 import { LeaderboardEntry } from "shared/leaderboard";
+import { rarityOfBall } from "shared/economy.config";
 import { LEADERBOARD_UPDATE_REMOTE_NAME, REMOTES_FOLDER_NAME, ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import { getOrdinal } from "shared/ordinal";
+import { attachBallIcon } from "shared/ui/ball-swatch";
 import { FONT, SPACING, typographyOneStepUp } from "shared/ui/scale";
 import { chunkyDarkTheme } from "shared/ui/theme";
 import { getScreenGui } from "shared/ui/layers";
@@ -55,6 +58,22 @@ const FADE_SECONDS = 0.2;
 /** **Placeholder.** The resting transparency of a row's fill. Low enough to read as a plate, high enough to show the panel. */
 const ROW_TRANSPARENCY = 0.5;
 
+/**
+ * **Placeholder.** The board's own fill transparency - **half, so the belt shows through it** (item 236).
+ *
+ * The panel ships opaque (a `CHUNKY_PANEL_FACE` at `0`), which is right for a sheet that covers the screen and wrong for a
+ * readout pinned to the corner of a live race: the thing a player is watching is behind this board, and the board was hiding
+ * it. `0.5` matches `ROW_TRANSPARENCY`, so the panel and its rows are the same depth of glass and a row reads as a shade on
+ * the board rather than as a solid card floating on a translucent one.
+ *
+ * **The text does not move.** `TextTransparency` is never written here - every label on this board is fully opaque, which is
+ * what keeps a translucent readout legible: the background is scenery, the glyphs are the information.
+ *
+ * **This is not `buildChunkyPanel`'s number.** The store, the inventory, the picker and the payout all want an opaque face, so
+ * the transparency is set on this one panel by its owner rather than added to the shared builder.
+ */
+const BOARD_TRANSPARENCY = 0.5;
+
 /** The panel face and the row fill, both from the chunky direction's charcoal ladder. */
 const ROW_BACKGROUND = Color3.fromRGB(62, 62, 71);
 
@@ -76,23 +95,28 @@ interface Row {
 	readonly face: Frame;
 	readonly rankLabel: TextLabel;
 	readonly nameLabel: TextLabel;
-	readonly distanceLabel: TextLabel;
+	/** The ball's drawing in the right-hand column, refreshed every broadcast because a player can change their pick mid-round. */
+	readonly ballIcon: ImageLabel;
+	/** The rarity ring around that swatch, recoloured to the error slot when the row is eliminated. */
+	readonly ballStroke?: UIStroke;
 	readonly ring: Frame;
 }
 
 /**
- * A distance as the column shows it: whole studs of belt between the body and the edge it spawned on.
+ * **Placeholder.** Diameter of the ball swatch in the row's right-hand column, in pixels.
  *
- * **No suffix.** This used to render `0st` / `15st` because it appended the ordinal unit to a distance - a number that is not a
- * rank, made to look like one. The rank now has its own column and its own formatter, and this one is a bare count read
- * against the column header implied by its neighbours.
+ * The column used to print the body's distance in studs. It now draws the ball the body is racing as (item 234), which is
+ * the fact a viewer cannot get from anywhere else on the board - a name and a place say who and where, not what.
  *
- * `math.floor` rather than a rounded tenth: the number moves at roughly `BALL_SPEED_DECAY_RATE` studs a second, so decimals
- * would change on every broadcast without telling the player anything the integer did not.
+ * **`distance` is still on the wire and still the sort key**; `LeaderboardService` sorts by it ascending and this client
+ * renders none of it. The order a player sees is therefore still "closest to the spawn edge first" - the column changed,
+ * the ranking did not.
+ *
+ * `20` against a `ROW_HEIGHT` of `30`, so the circle has five pixels of clearance above and below and the row does not grow.
+ * The alternative was `24`, which would have made the swatch as tall as the shop's, at the cost of reading as a plate
+ * filling the row rather than as a badge inside it.
  */
-function formatDistance(distance: number): string {
-	return tostring(math.floor(distance));
-}
+const LEADERBOARD_SWATCH = 20;
 
 /**
  * The campaign leaderboard: a chunky panel on the right of the screen, five ranks plus the local player, sliding on change.
@@ -145,7 +169,7 @@ export class LeaderboardController implements OnStart {
 		this.connectRemote();
 		this.watchPhase();
 
-		print(`[Leaderboard] mounted rows=${VISIBLE_ROWS} slide=${SLIDE_SECONDS}s`);
+		print(`[Leaderboard] mounted rows=${VISIBLE_ROWS} slide=${SLIDE_SECONDS}s swatch=${LEADERBOARD_SWATCH}px`);
 	}
 
 	// #region construction
@@ -162,6 +186,12 @@ export class LeaderboardController implements OnStart {
 		});
 
 		const frame = panel.frame;
+
+		// **The board is half glass (item 236).** The visible surface is `panel.surface` - the *ScrollingFrame* below is already
+		// `BackgroundTransparency = 1` and paints nothing - so this is the one write that makes the panel see-through. Set before
+		// the panel is parented-into-view, so it never appears opaque for a frame.
+		panel.surface.BackgroundTransparency = BOARD_TRANSPARENCY;
+
 		// Anchored to the right edge, under the topbar inset: a screen fraction would put a different gap under the bar on
 		// every aspect ratio.
 		frame.AnchorPoint = new Vector2(1, 0);
@@ -308,6 +338,7 @@ export class LeaderboardController implements OnStart {
 				name?: unknown;
 				distance?: unknown;
 				eliminated?: unknown;
+				ballId?: unknown;
 			};
 			if (
 				!typeIs(record.key, "string") ||
@@ -323,6 +354,10 @@ export class LeaderboardController implements OnStart {
 				userId: record.userId,
 				name: record.name,
 				distance: record.distance,
+				// **Absent is `""`, and the swatch draws nothing** (item 234). `ballId` is the one field here that a row can live
+				// without, so it is the one field whose absence is not a reason to drop the row: an older server, or a body with no
+				// pick, gives an empty circle in the column - which is what "this racer has no ball" looks like.
+				ballId: typeIs(record.ballId, "string") ? record.ballId : "",
 				// **Absent is `false`, and that is the right default** (item 208): a payload from a server that predates the
 				// field, or a row that simply did not carry it, describes a body still on the belt. A missing `eliminated` must
 				// never strike a live racer's row through.
@@ -600,29 +635,50 @@ export class LeaderboardController implements OnStart {
 		nameLabel.Parent = face;
 		outlineText(nameLabel);
 
-		const distanceLabel = new Instance("TextLabel");
-		distanceLabel.Name = "Distance";
-		distanceLabel.AnchorPoint = new Vector2(1, 0.5);
-		distanceLabel.Position = new UDim2(1, -SPACING.xs, 0.5, 0);
-		distanceLabel.Size = new UDim2(0, SPACING.xl + SPACING.sm, 1, 0);
-		distanceLabel.BackgroundTransparency = 1;
-		distanceLabel.Font = FONT;
-		distanceLabel.TextSize = this.type.caption.size;
-		distanceLabel.TextColor3 = this.theme.colors.textSecondary;
-		distanceLabel.TextXAlignment = Enum.TextXAlignment.Right;
-		// **Suffixed, because the number is "ground lost", not "ground gained".** An unlabelled `14` in a leaderboard column
-		// reads as a score, and a score that grows while a racer is losing is the exact confusion the ranking direction causes.
-		distanceLabel.Text = formatDistance(entry.distance);
-		distanceLabel.ZIndex = ROW_Z_INDEX + 1;
-		distanceLabel.Parent = face;
-		outlineText(distanceLabel);
+		// **The right-hand column is the ball, not the distance** (item 234). It used to print `formatDistance(entry.distance)` -
+		// a number whose unit nothing on the row named, in a column of numbers nobody had a use for. The ball a racer is drawn as
+		// is the one fact on this row a viewer cannot get from anywhere else, and item 233 gave every ball a drawing to spend.
+		//
+		// The swatch is the same object a card uses, one size down: a circle filled from the card paint, the icon at `(1, 1)`
+		// inside it (`attachBallIcon`), and the ball's rarity as a ring - so the two pieces of information the cards carry are
+		// both here. **The ring is a hairline rather than the chunky weight**: at 3 pixels a 20-pixel circle spends 30% of
+		// itself on its border and the drawing inside is 14 pixels wide.
+		const ballSwatch = new Instance("Frame");
+		ballSwatch.Name = "Ball";
+		ballSwatch.AnchorPoint = new Vector2(1, 0.5);
+		ballSwatch.Position = new UDim2(1, -SPACING.xs, 0.5, 0);
+		ballSwatch.Size = UDim2.fromOffset(LEADERBOARD_SWATCH, LEADERBOARD_SWATCH);
+		ballSwatch.BackgroundColor3 = this.theme.paint.card.color;
+		ballSwatch.BackgroundTransparency = this.theme.paint.card.transparency;
+		ballSwatch.BorderSizePixel = 0;
+		ballSwatch.ZIndex = ROW_Z_INDEX + 1;
+		ballSwatch.Parent = face;
+
+		const ballCorner = new Instance("UICorner");
+		ballCorner.CornerRadius = new UDim(1, 0);
+		ballCorner.Parent = ballSwatch;
+
+		// Icon before ring: both sit at `ROW_Z_INDEX + 2`, and a tie is resolved by creation order, so the ring is drawn last
+		// and therefore over the drawing's edge rather than under it.
+		const ballIcon = attachBallIcon(ballSwatch, entry.ballId);
+		const ballRing = addChunkyRing(ballSwatch, this.rarityColorOf(entry.ballId), 1);
+		const ballStroke = ballRing.FindFirstChildWhichIsA("UIStroke");
 
 		// Fade rather than pop: a row that appears fully formed is indistinguishable from one that was always there, which
 		// loses the information that somebody entered.
+		//
+		// **Fading the *background* while the text stays opaque is also the whole transparency story here** (item 236): the
+		// rows have been at `ROW_TRANSPARENCY = 0.5` since item 124, so only the board behind them needed changing. The
+		// tween's target is that resting value, so a new row arrives at exactly the depth the settled ones sit at.
 		const fade = new TweenInfo(FADE_SECONDS, Enum.EasingStyle.Quad, Enum.EasingDirection.Out);
 		TweenService.Create(face, fade, { BackgroundTransparency: ROW_TRANSPARENCY }).Play();
 
-		return { container, face, rankLabel, nameLabel, distanceLabel, ring };
+		return { container, face, rankLabel, nameLabel, ballIcon, ballStroke, ring };
+	}
+
+	/** The rarity colour a ball's id belongs to, or the common slot for a body with no ball (item 234). */
+	private rarityColorOf(ballId: string): Color3 {
+		return this.theme.colors.rarity[rarityOfBall(ballId) ?? "common"];
 	}
 
 	/** Text and highlight only - no order, no geometry. Safe at any point in a slide. */
@@ -642,8 +698,13 @@ export class LeaderboardController implements OnStart {
 			// eliminated, because toggling it also re-parses the text and a name containing `<` or `&` would change appearance
 			// at the moment the row died.
 			row.nameLabel.Text = entry.eliminated ? `<s>${escapeRichText(entry.name)}</s>` : escapeRichText(entry.name);
-			row.distanceLabel.Text = formatDistance(entry.distance);
 			row.ring.Visible = entry.userId > 0 && entry.userId === this.player.UserId;
+
+			// **The swatch, rewritten every broadcast rather than only at row creation** (item 234). `ChosenBallId` is live: a
+			// player who changes their pick mid-round gets the new ball on their body the same tick, and a row that drew its icon
+			// once would show the ball they had when the board first saw them. `entry.ballId` is `""` for a body with no pick,
+			// and an empty `Image` draws nothing - the circle stays, which is the honest picture.
+			row.ballIcon.Image = iconForBall(entry.ballId) ?? "";
 
 			// **Colour from the theme's error slot, never a literal red**, so a light theme brightens it instead of drawing
 			// text that disappears into the panel. The self ring stays gold on an eliminated row: it says "this is you", not
@@ -661,6 +722,16 @@ export class LeaderboardController implements OnStart {
 				: entry.userId > 0 && entry.userId === this.player.UserId
 					? SELF_COLOR
 					: this.theme.colors.textSecondary;
+
+			// **The swatch fades and rings itself in the error colour on an eliminated row** (item 234). The choice: a ball's
+			// drawing is not a name, so it does not get struck through - a `Frame` has no `RichText` and a line across a 20-pixel
+			// circle would erase the thing it is marking. Half transparency plus the error ring is the row-level equivalent, and it
+			// is what keeps a full-colour ball from being the brightest thing on a row that is out of the race.
+			row.ballIcon.ImageTransparency = entry.eliminated ? 0.5 : 0;
+			const swatchStroke = row.ballStroke;
+			if (swatchStroke !== undefined) {
+				swatchStroke.Color = entry.eliminated ? eliminatedColor : this.rarityColorOf(entry.ballId);
+			}
 		}
 	}
 

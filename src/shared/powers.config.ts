@@ -354,7 +354,22 @@ export interface PowerDefinition {
 	readonly ballId: string;
 	readonly powerId: PowerId;
 	readonly kind: PowerKind;
-	/** One line, for the report and for a future tooltip. Not rendered anywhere today. */
+	/**
+	 * **What this ball does, in player-facing prose - at most three sentences.**
+	 *
+	 * Rendered in the inventory's detail pane when a ball is selected (`shop-controller.ts`, item 230), through
+	 * `describeBallPower`. It spent its first several rounds declared and unread, which is why two of the strings drifted out of
+	 * date without anything failing: the `rocket` line still described a random trigger after item 203 made it a position, and the
+	 * `recycle` line read like a bigger boost rather than a surviving pad. **A string nothing renders is a string nothing
+	 * corrects** - so the pane is what keeps these honest, and `effect` is the only description table in the tree.
+	 *
+	 * The three rules the text follows, all from this module's own header:
+	 *
+	 * - **Player-facing.** No constant names, no study sizes, no timings a player cannot act on.
+	 * - **At most three sentences.** The pane has one column and a fixed height; the spec fails a longer string.
+	 * - **Non-comparative.** Rarity is not an ordering (see the module header), so no line may read as "better than" another
+	 *   ball's power. Describing what a ball does is not the same as ranking it.
+	 */
 	readonly effect: string;
 }
 
@@ -369,61 +384,61 @@ export const POWERS: ReadonlyArray<PowerDefinition> = [
 		ballId: "bully_ball",
 		powerId: "bully",
 		kind: "collision",
-		effect: "on touch, moves BALL_SPEED from the other ball to itself",
+		effect: "Takes speed from any ball it touches and keeps all of it. The harder the contact, the more it steals.",
 	},
 	{
 		ballId: "bouncy_ball",
 		powerId: "bouncy",
 		kind: "passive",
-		effect: "hops on the belt; the existing BELT_BOUNCE_* constants, for this ball only",
+		effect: "Hops along the belt instead of rolling flat. It is the only ball whose power changes nothing about how fast it travels.",
 	},
 	{
 		ballId: "ghost_ball",
 		powerId: "ghost",
 		kind: "world",
-		effect: "intangible for 10 s of every 25 s cycle; solid and colliding for the other 15; walls always collide",
+		effect: "Passes straight through other balls for part of every cycle, then turns solid again. Walls and the belt always stop it.",
 	},
 	{
 		ballId: "heavy_ball",
 		powerId: "heavy",
 		kind: "collision",
-		effect: "the same transfer, asymmetric: it keeps less than it drains and loses less than anyone else",
+		effect: "Keeps less of the speed it drains than a bully does, but loses less than anyone. Hard to slow down and hard to escape.",
 	},
 	{
 		ballId: "decoy_ball",
 		powerId: "decoy",
 		kind: "world",
-		effect: "spawns one ownerless twin beside itself at spawn, indistinguishable from it and unable to win",
+		effect: "Spawns an identical twin a few seconds after it launches. The twin looks and moves like the real ball but cannot win the round.",
 	},
 	{
 		ballId: "magnet_ball",
 		powerId: "magnet",
 		kind: "aura",
-		effect: "opponents within MAGNET_RADIUS decay faster",
+		effect: "Makes nearby balls lose speed faster. The pull only reaches balls close to it.",
 	},
 	{
 		ballId: "rocket_ball",
 		powerId: "rocket",
 		kind: "timed",
-		effect: "once per round, 80% of the way down the belt, BALL_SPEED snaps to ROCKET_TARGET_SPEED",
+		effect: "Near the exit its speed snaps to a large boost, once per round. A last-second save from elimination.",
 	},
 	{
 		ballId: "recycle_ball",
 		powerId: "recycle",
 		kind: "pickup",
-		effect: "takes the pickup's boost and leaves the pickup in play for the next taker",
+		effect: "Takes a pickup boost and leaves the pad where it is. Any ball that follows gets the same boost.",
 	},
 	{
 		ballId: "eclipse_ball",
 		powerId: "eclipse",
 		kind: "timed",
-		effect: "for a window, every opponent's decay is multiplied",
+		effect: "Partway through the round, every opponent loses speed faster for a few seconds. The effect reaches further when more balls are near.",
 	},
 	{
 		ballId: "sprinter_ball",
 		powerId: "sprinter",
 		kind: "event",
-		effect: "a pickup boosts it further than the standard value, and it wears an afterimage while boosted",
+		effect: "A pickup gives it a bigger boost than any other ball. Every pad is worth more to it.",
 	},
 ];
 
@@ -456,7 +471,29 @@ export function definitionForPower(powerId: string): PowerDefinition | undefined
 }
 
 /**
- * The word the badge shows for a power: **uppercase, derived from the id.**
+/**
+ * **What this ball does, as one string for a player to read.**
+ *
+ * The accessor the inventory's detail pane calls: ball id in, prose out. Built from `powerForBallId` and `definitionForPower`
+ * rather than walking `POWERS` a third time, so there is one lookup path and the two exported walks stay the only ones.
+ *
+ * **`""` for a ball id the table does not have**, and that is the answer rather than an error: a body with no
+ * `ChosenBallId`, a profile id written by an older build, and a ball added to `BALL_POOL` before its `POWERS` row all land
+ * here. The caller renders an empty label - which `AutomaticSize.Y` collapses to zero height - because a missing description
+ * must not become a broken row or a crash. `undefined` would push that decision onto every caller; an empty string is the
+ * same fact already expressed in the type the caller needs.
+ */
+export function describeBallPower(ballId: string): string {
+	const powerId = powerForBallId(ballId);
+	if (powerId === undefined) {
+		return "";
+	}
+
+	const definition = definitionForPower(powerId);
+	return definition === undefined ? "" : definition.effect;
+}
+
+/** The word the badge shows for a power: **uppercase, derived from the id.**
  *
  * ## Why uppercase, and why there is no second form
  *

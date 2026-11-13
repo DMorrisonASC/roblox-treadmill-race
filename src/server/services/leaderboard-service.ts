@@ -1,5 +1,6 @@
 import { CollectionService, ReplicatedStorage } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
+import { chosenBallIdOf } from "shared/attributes";
 import { LEADERBOARD_INTERVAL_SECONDS, LeaderboardEntry } from "shared/leaderboard";
 import { distanceFromSpawnEdge } from "shared/position";
 import { LEADERBOARD_UPDATE_REMOTE_NAME, REMOTES_FOLDER_NAME } from "shared/remotes";
@@ -231,6 +232,10 @@ export class LeaderboardService implements OnStart {
 				// key in its name, because there can be fifty of them and they are all called `Ball` or `Decoy`.
 				name: identity === undefined ? `${ball.Name} ${key.sub(2)}` : identity.name,
 				distance: distanceFromSpawnEdge(belt.frame, belt.halfLength * 2, ball.Position),
+				// **The ball's id, for the HUD's swatch column** (item 234). Read off the body rather than off the owner: a
+				// `decoy` twin carries the parent's `ChosenBallId` at spawn, so a twin and its parent draw the same ball - which is
+				// the point of the power. A body with no pick at all (a debug ball) reports `""` and draws an empty circle.
+				ballId: chosenBallIdOf(ball),
 				// A body still on the belt is still racing. The eliminated rows below are the other half of the board.
 				eliminated: false,
 			});

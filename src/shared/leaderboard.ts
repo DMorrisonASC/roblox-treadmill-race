@@ -46,6 +46,16 @@ export interface LeaderboardEntry {
 	 */
 	readonly distance: number;
 	/**
+	 * The ball this body is drawn as - the id the HUD fills its swatch from - or **`""` for a body with no pick**.
+	 *
+	 * The leaderboard's right-hand column is a ball swatch (item 234), so a row has to carry *which* ball it represents.
+	 * `""` rather than `undefined` for the same reason `userId` is `0`: the field survives a remote hop with no nil hole, and
+	 * a client that draws an empty swatch and a server that never wrote the attribute agree on what that looks like.
+	 *
+	 * **Not a sort key and not a rank.** `distance` still decides the order; this only decides the picture.
+	 */
+	readonly ballId: string;
+	/**
 	 * Whether this row's body has left the round, and the row is a **record** rather than a position.
 	 *
 	 * A thrown, eliminated competitor's row stays on the board with its `distance` frozen at the moment it died. The client

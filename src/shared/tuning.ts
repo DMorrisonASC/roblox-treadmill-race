@@ -751,14 +751,20 @@ export const PICKUP_SIZE = new Vector3(20, 20, 20);
  * the pads at whatever the scene contains, which is the same class of bug item 45 was fixing from the other side — a count
  * that comes from the place cannot say what it meant.
  *
- * ## Why 12 is sparse enough to place by rejection rather than by a grid
+ * ## Why the count is still low enough to place by rejection rather than by a grid
  *
  * A 20-stud pad on a `336 x 173` belt has centres ranging over `316 x 153`; a grid packing of the surface holds
- * `floor(336 / 20) x floor(173 / 20) = 16 x 8 = 128` pads, so twelve pads occupy about a tenth of the packable cells. Almost
- * every draw lands free, which is what makes `PICKUP_PLACEMENT_ATTEMPTS` a guard against a broken scene rather than a
- * load-bearing part of the algorithm.
+ * `floor(336 / 20) x floor(173 / 20) = 16 x 8 = 128` pads, so twenty pads occupy about a sixth of the packable cells - and
+ * every pad's *drawn* radius, plus `PICKUP_EDGE_MARGIN`, is what has to clear its neighbours, not its centre. That is still
+ * sparse enough that almost every draw lands free, which is what makes `PICKUP_PLACEMENT_ATTEMPTS` a guard against a broken
+ * scene rather than a load-bearing part of the algorithm.
+ *
+ * **Raised from 12 to 20 in item 220, and the reason is steering.** With the decorative sway gone, the only lateral motion a
+ * player's ball has is what that player chooses, so what makes steering *matter* is how often a reason to cross the belt
+ * arrives. Twelve pads over `333 x 173` is one per `4,800` square studs; twenty is one per `2,880` - a target roughly every
+ * 1.5 seconds of belt travel rather than every 2.5. The shortfall line reports it if the placement cannot keep up.
  */
-export const PICKUP_MAX_COUNT = 12;
+export const PICKUP_MAX_COUNT = 20;
 
 /**
  * **Placeholder.** How far the drawn disc's edge is kept from the belt's edge, in studs — a margin *beyond* the arithmetic
@@ -800,7 +806,7 @@ export const PICKUP_PLACEMENT_ATTEMPTS = 20;
  * **Placeholder.** Seconds between top-up attempts while `Playing`.
  *
  * A top-up never exceeds `PICKUP_MAX_COUNT`, so this is a *replacement* cadence, not a spawn rate: a
- * round that runs forever holds at most twelve pads, and a pad taken at `t = 3 s` is replaced at the
+ * round that runs forever holds at most `PICKUP_MAX_COUNT` pads, and a pad taken at `t = 3 s` is replaced at the
  * next multiple of 15. Longer than a ball takes to cross the belt, so a replacement never appears in front of
  * the ball that just took the last one.
  */
@@ -951,6 +957,40 @@ export const RING_THICKNESS_STUDS = 2;
  * never coplanar — and `.12` is still above the depth buffer's resolution at belt distances.
  */
 export const RING_LIFT_STUDS = 0.12;
+
+/**
+ * **Placeholder.** The pickup marker's diameter on screen, in pixels (item 219).
+ *
+ * ## Why pixels, and why this is a different mechanism from the ring
+ *
+ * A `BillboardGui`'s `Size` is not a `GuiObject`'s: its **scale** components are studs in 3D space and shrink with distance,
+ * while its **offset** components are screen pixels pinned to a fixed on-screen size. The sprite above the pad uses scale
+ * (`PICKUP_SPRITE_STUDS`), which is why it is a `19`-pixel speck from the game camera's `260-390` studs - the number item 200
+ * measured and could not explain.
+ *
+ * The marker therefore uses **offset only**: `28` pixels at any distance, which is what "a marker that reads from the camera"
+ * means. No `DistanceStep`/`SizeOffset` machinery is needed, and none is used - see `buildMarker` in
+ * `client/controllers/pickup-sprite-controller.ts` for why those two properties do not do what their names suggest.
+ */
+export const PICKUP_MARKER_PIXELS = 28;
+
+/**
+ * **Placeholder.** How far above the pad's top face the marker floats, in studs (item 219).
+ *
+ * **One stud, not the sprite's three.** The sprite is a sign held above the pad so a ball cannot hide it; the marker is a
+ * locator read from far away, and the higher it floats the more it reads as a separate object rather than as a dot on the pad.
+ * A ball standing on a pad does cover it - that pad is about to be collected, which is item 147's argument for the ring's
+ * fill applied to the same geometry.
+ */
+export const PICKUP_MARKER_LIFT_STUDS = 1;
+
+/**
+ * **Placeholder.** The marker's fill transparency (item 219).
+ *
+ * Denser than `RING_TRANSPARENCY` (`0.6`) on purpose: the ring is read from a few studs away and is paint on the floor, while a
+ * `28`-pixel dot on a dark moving belt at `300` studs needs more than `40%` of its colour to read as a dot at all.
+ */
+export const PICKUP_MARKER_TRANSPARENCY = 0.3;
 
 /**
  * **Placeholder.** How long one collection spin takes, in seconds.
@@ -1177,9 +1217,11 @@ export const DECOY_SPAWN_DELAY_SECONDS = 5;
  * diameters* there, and a tenth of one on a 20-stud ball, which is why it was retuned with the size change. The pair is one
  * displacement (`s * T`), so raising either without the other moves twice.
  *
- * The sway's own position correction (`SWAY_TRACK_SECONDS = 1.5`) then walks the ball back toward its wave, so a lateral
- * shove settles instead of permanently changing lane. It does nothing about the along-belt component: that axis has no lane
- * to return to, so an along-belt shove is a real change of position on the belt, bounded only by the belt's ends.
+ * **What settles a lateral shove now (item 220).** The sway's position correction used to walk a shoved ball back toward its
+ * wave. The sway is gone, and the lateral axis belongs to the player's steering (`STEER_SPEED`); what keeps a shove from
+ * compounding with it is the tick's `sub(across * carriedLateral)`, which rewrites the axis every tick so only the decaying
+ * impulse (its own time constant, below) survives. It does nothing about the along-belt component: that axis has no lane to
+ * return to, so an along-belt shove is a real change of position on the belt, bounded only by the belt's ends.
  */
 export const BALL_COLLISION_SHOVE_SPEED = 100;
 
@@ -1213,118 +1255,295 @@ export const BALL_COLLISION_SHOVE_DECAY_SECONDS = 1;
 export const BOOST_TARGET_BALL_SPEED = 80;
 
 /**
- * **Placeholder.** How often a ball sways across the belt: **full left-right cycles per second**.
+ * **Placeholder.** How often a bot's ball sways across the belt: **full left-right cycles per second**.
  *
- * ## What the lateral motion is now (item 107)
+ * ## What this governs now (item 221, restoring items 107/151/153 for bots only)
  *
- * Each ball's lateral offset is a sine wave in code-frame Z:
+ * A **player's** ball is steered - `SteerController` sends an axis and `stepBallSpeeds` writes `axis * STEER_SPEED` into the
+ * lateral component. A **bot's** ball has no player behind it, so `OwnerUserId` is negative (a `Debug#N` body) or absent (a
+ * `decoy` twin), and it gets this wave instead:
  *
  * `z(t) = SWAY_AMPLITUDE * sin(2 * pi * SWAY_FREQUENCY_HZ * t + phase)`
  *
  * where `t` is that ball's own time since it spawned and `phase` is its random start - see `SWAY_PHASE_JITTER`. The tick
  * loop writes the **derivative** of that position, `SWAY_AMPLITUDE * omega * cos(omega * t + phase)` with
- * `omega = 2 * pi * SWAY_FREQUENCY_HZ`, because physics integrates velocity and the derivative is the only thing that
- * makes the position follow the wave. Plus a correction toward the wave's position, explained on `SWAY_TRACK_SECONDS`.
+ * `omega = 2 * pi * SWAY_FREQUENCY_HZ`, because physics integrates velocity and the derivative is the only thing that makes
+ * the position follow the wave. Plus a correction toward the wave's position, explained on `SWAY_TRACK_SECONDS`.
+ *
+ * **Why the wave survives at all after item 220 removed it.** Removing it was right for player bodies: a sine wave over a
+ * player's input is two writers to one axis, and the player loses. A bot has **no input to fight** - it has no intent at all -
+ * so for a bot the wave is not interference, it is the only lateral motion the body will ever have. A field of bots sitting
+ * perfectly in their lanes is what "the arena looks empty" describes.
  *
  * **Frequency and amplitude are independent, which is the point of the rewrite.** `0.1` here is one full cycle every
  * `1 / 0.1 = 10` seconds; change it alone and a ball sways more or less often and nothing else moves. Change
  * `SWAY_AMPLITUDE` alone and it covers more or less ground per sway at the same rhythm.
  *
- * **This is the base rate, not every ball's rate (item 153).** Each ball draws its own multiplier from
+ * **This is the base rate, not every ball's rate (item 153).** Each bot draws its own multiplier from
  * `SWAY_FREQUENCY_JITTER`, because a field sharing one period can only ever be a fixed arrangement of offsets — see that
  * constant for why the phase jitter alone was not enough.
- *
- * The model this replaced was a **bounce**: a ball drifted at `Z_DRIFT_SPEED` (0.05 studs/s) and reversed when it reached
- * a random bound between `LATERAL_BOUND_MIN` and `LATERAL_BOUND` (1..2 studs from the centreline), so one full cycle took
- * `4 * bound / speed` - **40 to 80 seconds** - and the only way to sway more often was to speed up the drift or shrink the
- * bound, which changed how far it travelled. All three of those constants are gone; this pair replaces them.
  *
  * ## The numbers
  *
  * At `0.1` Hz with `SWAY_AMPLITUDE = 2`, peak lateral speed is `A * omega = 1.26` studs/s against an along-belt speed of
- * up to 10 - a slow drift with a rhythm rather than a strafe. A ride of about 18 seconds shows **1.8 full cycles**, which
- * is roughly the most that still reads as swaying rather than vibrating; much past `0.5` Hz the decoration starts to cost
- * the player the ability to track their own ball.
+ * up to 10 - a slow drift with a rhythm, well under `STEER_SPEED`'s 25, so a swaying bot is a *target* a steering player can
+ * cross to rather than an opponent that dodges.
  *
- * **The axis.** Lateral is world Z - the belt's local `+Z`, which is `RightVector:Cross(UpVector)`. Positive Z is the
- * viewer's right from the front looking toward the back (quad 1); negative is their left (quad 4).
+ * **The axis.** Lateral is world Z - the belt's local `+Z`, which is `RightVector:Cross(UpVector)`.
  */
 export const SWAY_FREQUENCY_HZ = 0.1;
 
 /**
- * **Placeholder.** How much each ball's sway frequency may differ from `SWAY_FREQUENCY_HZ`, as a fraction of it.
- *
- * ## Why a per-ball frequency, when there is already a per-ball phase (item 153)
+ * **Placeholder.** How much each bot's sway frequency may differ from `SWAY_FREQUENCY_HZ`, as a fraction of it.
  *
  * A phase offset alone gives a field of **identical periods**, and identical periods never drift apart: two balls stay
- * exactly the offset they were drawn with for the whole round. That is why a field drawn from `0 .. pi` still reads as
- * synchronised — a 10-second cycle means a `pi` spread is only five seconds of the cycle, so at any instant roughly half
- * the belt is moving the same way and the whole pattern repeats on a 10-second loop. The user reported exactly that, twice,
- * with the phases on the log to prove the draw was working.
+ * exactly the offset they were drawn with for the whole round, so a field drawn from `0 .. pi` still reads as synchronised. A
+ * **frequency** difference is the only thing that makes two balls drift in and out of step. `0.3` gives each ball a period
+ * between `10 / 1.3 = 7.7 s` and `10 / 0.7 = 14.3 s`, so the arrangement never repeats within a ride.
  *
- * A **frequency** difference is the only thing that makes two balls drift in and out of step, so the field stops having a
- * period at all. `0.3` gives each ball a period between `10 / 1.3 = 7.7 s` and `10 / 0.7 = 14.3 s`; two balls at opposite
- * ends of that range pass through every relative phase inside half a minute, so the arrangement never repeats within a
- * ride.
- *
- * `0` restores item 107's behaviour exactly — one period for the field, phase offsets only.
- *
- * **The base is still `SWAY_FREQUENCY_HZ`.** This number never sets an absolute rate; it multiplies, so a designer retuning
- * the rhythm moves every ball together and the spread stays proportional.
+ * `0` restores one period for the field, phase offsets only.
  */
 export const SWAY_FREQUENCY_JITTER = 0.3;
 
 /**
- * **Placeholder.** How far from the belt's centreline a swaying ball reaches, in studs of **code-frame Z**.
+ * **Placeholder.** How far from the belt's centreline a swaying bot reaches, in studs of **code-frame Z**.
  *
- * Code-frame Z is belt-local `Z` from `PointToObjectSpace`, centred on the belt: the belt is 12 wide, so it runs `-6 .. +6`
- * and a ball of radius 0.5 sits fully on the surface within `+-5.5`. `2` keeps a ball between `-2` and `+2` - user-frame
- * Z `4` to `8` - leaving **3.5 studs of margin on each side**. That margin is the point of the number: the sway is
- * decorative, so it must never look as though a ball is being pushed off the belt.
+ * Code-frame Z runs `-6 .. +6` across this belt and a 20-stud ball sits fully on the surface within `+-5.5`, so `2` keeps a
+ * ball between `-2` and `+2` - leaving **3.5 studs of margin on each side**. That margin is the point of the number: a bot's
+ * wave must never look as though the belt is pushing it off.
  *
- * **This is a distance, not a speed**, and separating the two is the rewrite. The old model's travel was
- * `Z_DRIFT_SPEED * time`, so how far a ball went depended on how long it had been drifting; here it reaches exactly
- * `+-SWAY_AMPLITUDE` regardless of how fast or slow the wave runs.
- *
- * Changing this does **not** change the rhythm, and changing `SWAY_FREQUENCY_HZ` does **not** change this distance.
+ * **This is a distance, not a speed.** A ball reaches exactly `+-SWAY_AMPLITUDE` regardless of how fast or slow the wave
+ * runs; changing this does not change the rhythm, and changing `SWAY_FREQUENCY_HZ` does not change this distance.
  */
 export const SWAY_AMPLITUDE = 2;
 
 /**
- * **Placeholder.** The largest random offset applied to a ball's starting phase, in radians.
+ * **Placeholder.** The largest random offset applied to a bot's starting phase, in radians.
  *
- * Every ball draws its own phase from `0 .. SWAY_PHASE_JITTER`, which is the knob that decides whether a field of balls
- * sways as one body or as a crowd. `math.pi` (180 degrees) is **fully out of phase**: no two balls stay pinned to the same
- * point of the wave, which is what a belt full of balls needs. `0` makes them start together and sway in lockstep - a whole
- * belt breathing side to side in unison, worth knowing before setting it.
+ * Every bot draws its own phase from `0 .. SWAY_PHASE_JITTER`, which is the knob that decides whether a field of bots sways
+ * as one body or as a crowd. `math.pi` (180 degrees) is **fully out of phase**; `0` makes them sway in lockstep, a whole belt
+ * breathing side to side in unison.
  *
- * **`math.pi` is enough, even though a full circle is `2 * math.pi`.** `sin(x + pi) = -sin(x)`, so the half circle
- * `0 .. pi` already produces both branches of the wave once; drawing from the other half would only re-create phases that
- * are exact negatives of ones already possible. A designer who wants the full circle wants a random **sign**, not a wider
- * range.
+ * **`math.pi` is enough, even though a full circle is `2 * math.pi`.** `sin(x + pi) = -sin(x)`, so the half circle already
+ * produces both branches of the wave once; drawing from the other half would only re-create phases that are exact negatives
+ * of ones already possible.
  */
 export const SWAY_PHASE_JITTER = math.pi;
 
 /**
- * **Placeholder.** Time constant, in seconds, of the correction that holds a swaying ball on the wave's position.
+ * **Placeholder.** Time constant, in seconds, of the correction that holds a swaying bot on the wave's position.
  *
  * ## Why the derivative alone is not enough
  *
  * The tick loop writes velocity and physics integrates it. Integrating `A * omega * cos(omega * t + phase)` returns the wave
- * **plus a constant**: `A * sin(...) - A * sin(phase)` added to wherever the ball already was. So a ball spawned in a `+-3`
+ * **plus a constant**: `A * sin(...) - A * sin(phase)` added to wherever the ball already was. So a bot spawned in a `+-3`
  * lane would sway `+-2` around *its lane*, reaching `+-5` of the `+-5.5` the surface allows, and `SWAY_AMPLITUDE` would stop
  * meaning "from the centreline". The correction is `(target - localZ) / this`, so the offset decays with this time constant
  * and nothing else: `e' = -e / SWAY_TRACK_SECONDS`.
  *
  * **It is a separate constant from the wave on purpose.** A gain scaled by the wave's own angular rate would correct faster
- * as the frequency rose, which re-couples the two numbers this rewrite exists to separate. A fixed time constant means a
- * frequency change alters only the rhythm and an amplitude change alters only the distance.
+ * as the frequency rose, which re-couples the two numbers. A fixed time constant means a frequency change alters only the
+ * rhythm and an amplitude change alters only the distance.
  *
- * Small values converge faster and push harder: at `1.5` the worst spawn error (`SWAY_AMPLITUDE` plus a `+-3` lane, five
- * studs) leaves at about 3.3 studs/s and is gone in roughly four time constants - about 6 seconds of an 18-second ride.
- * Large values are gentler but let a ball spend most of its life finding the wave. `0` is invalid: division by zero.
+ * `0` is invalid: division by zero.
  */
 export const SWAY_TRACK_SECONDS = 4;
+
+/**
+ * **Placeholder.** How fast a player's steering moves their ball across the belt, in studs per second.
+ *
+ * ## What replaced the sway, and why (item 220)
+ *
+ * Items 107, 151 and 153 gave every ball a sine-wave lateral offset, then a per-ball frequency so the field did not read as
+ * synchronised. The reasoning was sound for the game it was written in: **a field of identical spheres in identical lanes
+ * needs lateral motion from somewhere**, or it reads as a conveyor rather than as a race.
+ *
+ * **That premise is gone for player bodies.** A player now drives their own ball's lateral position, so the field is varied
+ * because eight people are steering, not because a wave moved them. Two writers to one axis is the failure the playtest
+ * reported - "the game plays itself" - and the decorative one is the one to remove from a *player's* ball: a sine wave
+ * fights the player holding a lane toward a pickup.
+ *
+ * **It is not gone for bots (item 221).** A bot has no intent to fight, so the wave is the only lateral motion it will ever
+ * have; removing it from bot bodies left the belt reading as empty. The five sway constants above are back and apply to
+ * bodies with no positive `OwnerUserId`; this number applies to bodies with one. One axis, two sources, and the source is
+ * decided by whether anybody is holding a key. The history is kept here because the reasoning will be re-invented by the next reader who sees a
+ * uniform field: **the answer to that is bot AI or denser pickups, not a sine wave over the player's input.**
+ *
+ * ## The number
+ *
+ * At the current `45` studs/s a ball crosses the belt's `173` studs in **3.8 s** edge to edge, and reaches either edge from the
+ * centre in **1.9 s**. A lane change of 25 studs - one ball width plus clearance - takes **0.56 s**, against a ball closing
+ * along the belt at `BELT_SPEED = 10`: a player can dodge a single contact with a fraction of a second's notice, and cannot
+ * outrun two. That is the intended reading: steering is a choice with a cost, not a strafe.
+ *
+ * **The arithmetic above is stated for the value that ships.** It has been `25` and is `45`; retuning this constant means
+ * redoing these three numbers, and a docblock that still says `25` is how a designer ends up tuning against a value the game
+ * does not use.
+ *
+ * **The along-belt axis is not steerable.** Forward motion is `BALL_SPEED`, decayed every tick, and this number never touches
+ * it - see `stepBallSpeeds` for the two-component write.
+ */
+export const STEER_SPEED = 45;
+
+/**
+ * **Placeholder.** How much `BALL_SPEED` a held slow input removes, in studs per second per unit of `slowAxis`.
+ *
+ * ## The arithmetic
+ *
+ * The tick's natural decay is `BALL_SPEED_DECAY_RATE` (`0.1`/s). At `SLOW_DRAIN_RATE = 5` a fully held slow input drains
+ * **fifty times** as fast, so a ball at `BALL_SPEED = 10` reaches `BALL_SPEED_MIN = 0` in **2 s**, and a ball at the
+ * `BALL_SPEED_START` ceiling of `12` takes **2.4 s**.
+ *
+ * **What that does to the ball is the mechanic, not a bug.** `relative = BALL_SPEED - BELT_SPEED` and the along-belt velocity
+ * is `-relative`, so dropping `BALL_SPEED` below the reference moves the ball **toward the exit edge** - away from where it
+ * spawned, not back toward it. With `BALL_SPEED` at `0` it travels that way at the full `BELT_SPEED = 10`. See
+ * `BALL_SPEED_DECAY_RATE` for the axis statement: **low speed is the losing direction**, and a pickup is what buys a ball
+ * back toward the spawn end.
+ *
+ * So this control is a **brake that costs ground**, and the ball's own spin reports it honestly: the roll is driven by
+ * `BALL_SPEED`, so the ball looks like it is turning more slowly while the belt keeps moving under it.
+ *
+ * Two seconds is the whole budget, so this reads as a **brake you hold for a moment**, not a lever you toggle and leave on.
+ * Held for the full two seconds the ball has spent all of its speed and is travelling toward the exit at belt speed; a
+ * designer who wants a gentler brake halves this, and one who wants a trap doubles it.
+ *
+ * It is a term in the same `tickDelta` sum the powers use, not a second clamp: one writer per tick (item 74), so a power's
+ * delta and this drain land in the same arithmetic and the single `math.clamp` applies to the total.
+ */
+export const SLOW_DRAIN_RATE = 5;
+
+/**
+ * **Placeholder.** The upward velocity a player's jump gives their ball, in studs per second.
+ *
+ * ## The same number as `BALL_COLLISION_POP_UPWARD_SPEED`, deliberately as a separate value
+ *
+ * `BALL_COLLISION_POP_UPWARD_SPEED` is `80` - the vertical impulse a qualifying ball-to-ball contact gives both bodies
+ * (item 173). This constant is **`80` as its own literal**, and the two are kept apart on purpose: a designer retuning the
+ * pop's strength must not silently retune the jump, and vice versa. The jump is a player's input and the pop is a collision
+ * outcome, so they are different decisions that happen to agree today.
+ *
+ * **Do not write this as `const JUMP_IMPULSE = BALL_COLLISION_POP_UPWARD_SPEED`.** The tree's rule for two values that share
+ * a number by coincidence is two constants, each with a docblock naming the other - the same argument `TINTS` makes about
+ * two colours that happen to be equal.
+ *
+ * ## The arc
+ *
+ * At `Workspace.Gravity = 196.2` (the engine default) an upward velocity of `80` gives airtime
+ * `2 * 80 / 196.2 = 0.816 s` and an apex of `80^2 / (2 * 196.2) = 16.3` studs - about four-fifths of a 20-stud ball's
+ * diameter above where it started, which clears a contact and is visible from the camera without reading as a launch.
+ */
+export const JUMP_IMPULSE = 80;
+
+/**
+ * **Placeholder.** The minimum interval between two accepted player jumps, in seconds.
+ *
+ * ## Why it is longer than the airtime
+ *
+ * Airtime at `JUMP_IMPULSE = 80` is `0.816 s`, so `0.9` guarantees the ball has landed before another jump is accepted: **no
+ * double jump**, without a grounded check and without asking the physics engine whether the ball is touching anything.
+ *
+ * **It is a lever, not a derivation.** If `JUMP_IMPULSE` is retuned the airtime moves and this number does not, which is the
+ * intended shape: a designer who makes the jump a 40-stud hop gets an over-long cooldown and lowers this, one who makes it a
+ * 160-stud launch raises it. Deriving the cooldown from the impulse would be one number pretending to be two.
+ *
+ * The gate lives on the **server** - the client sends on every press and is refused silently. A client-side cooldown would put
+ * the only rate limit on the side of the wire a hack can delete.
+ */
+export const JUMP_COOLDOWN_SECONDS = 0.9;
+
+/**
+ * **Placeholder.** The colour a ball is painted when its id has no entry in `BALL_COLORS` (item 226).
+ *
+ * **Near-white, and deliberately not one of the ten.** A body with no `ChosenBallId` - a `Debug#N` spawned before the debug
+ * path drew an id, or any body built without one - has no ball to be, so the honest colour is "unpainted" rather than a
+ * plausible-looking member of the palette. Near-white also cannot be mistaken for a *rarity* colour, which is what every card
+ * border still uses.
+ *
+ * `ball-color.spec.ts` asserts every `BALL_POOL` id has a colour, so this is only reachable for an id the pool does not have.
+ */
+export const BALL_COLOR_FALLBACK = Color3.fromRGB(240, 240, 240);
+
+/**
+ * **Placeholder.** The upward velocity a trampoline gives a player character, in studs per second.
+ *
+ * ## The arithmetic
+ *
+ * At `Workspace.Gravity = 196.2` (the engine default) a launch of `130` peaks at `130^2 / (2 x 196.2) = 43.1` studs and hangs
+ * for `2 x 130 / 196.2 = 1.33 s`. A default R15 character is about 5 studs tall, so that is roughly eight body heights - a
+ * launch rather than a step up, and short enough that a player is back on the pad before the joke wears out.
+ *
+ * **The value is a launch speed, not a height.** A designer who wants a specific apex computes
+ * `sqrt(2 x GRAVITY x height)`; halving this quarters the height, because height goes as the square. `130` is about twice the
+ * height the `100` of items 227-229 actually produced (`31.5` studs including that build's own launch window), which is the
+ * step the playtest asked for after `170` overshot the lobby.
+ *
+ * **The real apex is higher than the ballistic number**, because the servo holds this velocity for
+ * `TRAMPOLINE_LAUNCH_SECONDS` before letting go: `130 x 0.06 + 43.1 = 50.9` studs. The launch window is part of the height,
+ * not an implementation detail.
+ *
+ * **`TRAMPOLINE_COOLDOWN_SECONDS` is deliberately far below the airtime** - see there for why the longer value it used to hold
+ * refused exactly the touch that should always bounce.
+ */
+export const TRAMPOLINE_BOUNCE_VELOCITY = 130;
+
+/**
+ * **Placeholder.** How long the launch servo holds its target velocity, in seconds.
+ *
+ * ## Why the launch has a duration at all
+ *
+ * The launch is a `LinearVelocity` constraint rather than a velocity write, because a write loses a race with the humanoid
+ * controller: the controller rewrites the root assembly's velocity every step, so whether this handler's write is the last word
+ * depends on where in the step it landed. That is item 231 - the "short bounce, then a higher one" a playtest reported, from a
+ * handler that was demonstrably running. A constraint is solved *after* the controller has written, so it always wins, but
+ * only for as long as it is enabled.
+ *
+ * `0.06` is four physics steps at 60 Hz: the shortest window that survives one dropped step on a busy server, and short enough
+ * that the character is back under pure ballistics well before the apex.
+ *
+ * ## What it adds
+ *
+ * `130 x 0.06 = 7.8` studs of rise at a held velocity, on top of the ballistic arc. See `TRAMPOLINE_BOUNCE_VELOCITY`.
+ */
+export const TRAMPOLINE_LAUNCH_SECONDS = 0.06;
+
+/**
+ * **Placeholder.** The maximum upward force the launch servo may apply, in newtons.
+ *
+ * ## Why it is a number at all
+ *
+ * A `LinearVelocity` with its force limit switched off applies an unlimited force on *every* axis it targets, which is how a
+ * velocity constraint ends up cancelling a character's horizontal walk. The alternative is a per-axis limit with force on `Y`
+ * only, and that needs a magnitude.
+ *
+ * ## The arithmetic
+ *
+ * An R15 rig masses roughly `15`. Holding a launch against gravity needs `m x g = 15 x 196.2 = 2943` N, and *restoring* a
+ * velocity the controller has just zeroed within a single step needs `m x v / dt = 15 x 130 / 0.0167 = 116,766` N. `5 x 10^5`
+ * is about four times the second figure, which is the one that matters - the servo targets a velocity, so surplus force is
+ * never a bigger launch on its own.
+ */
+export const TRAMPOLINE_LAUNCH_FORCE = 5e5;
+
+/**
+ * **Placeholder.** The minimum interval between two launches for one player, in seconds.
+ *
+ * ## It is a contact guard, and it is shorter than the airtime on purpose
+ *
+ * `Touched` fires repeatedly while a character stands on a part, and it fires again the moment they land, so the guard has one
+ * job: collapse one landing's burst of contacts into one launch. `0.3` is about a fifth of the `1.33 s` airtime, and by the
+ * time it expires the character is about thirty studs up, where no contact with the pad is possible.
+ *
+ * **The value this replaces was `1.2`, which was longer than the airtime it guarded, and that was a bug wearing a safety
+ * rule's clothes** (item 231). A character launched at `t = 0` under the old `1.02 s` airtime landed at `t = 1.02`, so the
+ * landing `Touched` arrived `0.18 s` *inside* the `1.2` cooldown and was refused; a character standing still on a part
+ * produces no further contact, so the next launch came whenever something finally re-touched the pad. In a round where the
+ * launch itself failed, nothing ever left the pad and *every* touch was a refused one - which is the "it sometimes does
+ * nothing, then bounces at a random later moment" half of the report.
+ *
+ * **So the rule is the other way round from the one written here before: cooldown far below airtime**, and
+ * `trampoline.spec.ts` asserts it against the engine's gravity rather than leaving it to a playtest.
+ */
+export const TRAMPOLINE_COOLDOWN_SECONDS = 0.3;
 
 /** **Placeholder.** The folder `PickupService` parents its pads into, created on demand. */
 export const PICKUPS_FOLDER_NAME = "SpawnedPickups";

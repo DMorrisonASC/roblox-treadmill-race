@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@rbxts/jest-globals";
-import { ARENA_CAMERA_PHASES, cameraWantsArena, spectateAvailable } from "./spectate";
+import { ARENA_CAMERA_PHASES, cameraWantsArena, isShoppingAvailable, spectateAvailable } from "./spectate";
 
 /**
  * The spectate matrix: **who may ask, when they may ask, and what the camera does when they have.**
@@ -77,5 +77,43 @@ describe("cameraWantsArena", () => {
 		}
 
 		expect(ARENA_CAMERA_PHASES.has("Intermission")).toBe(false);
+	});
+});
+
+describe("isShoppingAvailable", () => {
+	it("is the exact negation of the camera rule", () => {
+		const phases = ["Intermission", "Waiting", "Playing", "PostGame", "unknown"];
+
+		for (const phase of phases) {
+			for (const competing of [true, false]) {
+				for (const spectating of [true, false]) {
+					expect(isShoppingAvailable(phase, competing, spectating)).toBe(
+						!cameraWantsArena(phase, competing, spectating),
+					);
+				}
+			}
+		}
+	});
+
+	it("is open in the lobby, where there is nothing to race", () => {
+		expect(isShoppingAvailable("Intermission", false, false)).toBe(true);
+		expect(isShoppingAvailable("Intermission", true, false)).toBe(true);
+		expect(isShoppingAvailable("Intermission", false, true)).toBe(true);
+	});
+
+	it("is open for an eliminated player who has stopped watching", () => {
+		expect(isShoppingAvailable("Playing", false, false)).toBe(true);
+	});
+
+	it("is closed for anyone the camera has put on the arena", () => {
+		// A competitor in `Waiting` has the picker on screen; the picker is that phase's panel, not the store's.
+		expect(isShoppingAvailable("Waiting", true, false)).toBe(false);
+		expect(isShoppingAvailable("Playing", true, false)).toBe(false);
+		// An eliminated player who pressed `Watch Race` is watching, not shopping.
+		expect(isShoppingAvailable("Playing", false, true)).toBe(false);
+	});
+
+	it("is closed for an unknown phase, because the camera never takes the arena there either", () => {
+		expect(isShoppingAvailable("unknown", false, false)).toBe(true);
 	});
 });

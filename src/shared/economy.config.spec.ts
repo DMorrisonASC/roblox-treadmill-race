@@ -7,6 +7,8 @@ import {
 	RARITIES,
 	rarityOfBall,
 	RARITY_WEIGHTS,
+	ROBUX_CHEST_BUNDLE_PRICE_ROBUX,
+	ROBUX_CHEST_BUNDLE_PRODUCT_ID,
 	ROBUX_CHEST_PRICE_ROBUX,
 	ROBUX_CHEST_PRODUCT_ID,
 	ROBUX_CHEST_RARITIES,
@@ -224,10 +226,21 @@ describe("Robux chest pool", () => {
 		expect(surviving).toBe(1000);
 	});
 
-	it("carries a product id and a display price that are both obvious placeholders", () => {
-		// Cheap guards, but they are the two numbers a reader must replace before this can sell anything. The price is
-		// display metadata only ? Roblox charges what the Developer Product says, not this constant.
+	it("carries two live product ids, distinct from each other, and a display price for each", () => {
+		// These were placeholder guards while the ids were fake - "replace these before the store can sell anything". Both are
+		// real now (item 235), so the guard changes shape: what a reader must not do is give the two products **one id**, because
+		// `ProcessReceipt` dispatches on `ProductId` and a shared id would deliver the single for a bundle purchase (or the
+		// other way round) with no error anywhere.
 		expect(ROBUX_CHEST_PRODUCT_ID > 0).toBe(true);
+		expect(ROBUX_CHEST_BUNDLE_PRODUCT_ID > 0).toBe(true);
+
+		// Widened through an array rather than compared directly: both ids are literal types, and TypeScript rejects
+		// `3730790793 !== 3730801824` as an "unintentional" comparison because the two literals have no overlap.
+		const ids: Array<number> = [ROBUX_CHEST_PRODUCT_ID, ROBUX_CHEST_BUNDLE_PRODUCT_ID];
+		expect(ids[0] !== ids[1]).toBe(true);
+
+		// The prices are display metadata only - Roblox charges what the Developer Product says, not these constants.
 		expect(ROBUX_CHEST_PRICE_ROBUX > 0).toBe(true);
+		expect(ROBUX_CHEST_BUNDLE_PRICE_ROBUX > 0).toBe(true);
 	});
 });

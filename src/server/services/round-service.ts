@@ -2,6 +2,7 @@ import { CollectionService, Players, ReplicatedStorage, RunService, Workspace } 
 import { OnStart, Service } from "@flamework/core";
 import {
 	CHOSEN_BALL_ID_ATTRIBUTE,
+	chosenBallIdOf,
 	hasOwnerIdentity,
 	OWNER_DISPLAY_NAME_ATTRIBUTE,
 	OWNER_USER_ID_ATTRIBUTE,
@@ -2613,6 +2614,10 @@ export class RoundService implements OnStart {
 			userId: owner.userId,
 			name: owner.displayName,
 			distance: distanceFromSpawnEdge(frame, length, ball.Position),
+			// **The id is read before the body is destroyed, because it is the last moment it exists** (item 234). The HUD's
+			// swatch column draws this, and an eliminated row that lost its ball would be the one row on the board the player
+			// cannot identify. A twin never reaches here - `eliminationRowFor` returns early for it.
+			ballId: chosenBallIdOf(ball),
 			eliminated: true,
 		};
 	}

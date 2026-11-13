@@ -304,6 +304,22 @@ export function hasOwnerIdentity(userId: unknown, displayName: unknown): boolean
 	return typeIs(userId, "number") && typeIs(displayName, "string");
 }
 
+/**
+ * The ball id a body carries, or **`""`** when it carries none.
+ *
+ * Two readers need the same three lines - `LeaderboardService.collect`'s live pass and `RoundService.eliminationRowFor`'s
+ * record of a body about to be destroyed - and they are the two halves of one row shape (item 234). A second hand-written
+ * copy of the `typeIs` guard is the kind of thing that drifts: one of them would eventually treat a non-string attribute as
+ * an id and the HUD would try to draw an icon for it.
+ *
+ * **`""` rather than `undefined`**, so the field in `LeaderboardEntry` needs no nil hole and a client and a server agree on
+ * what "no ball" looks like: an empty swatch, drawn from the colour the row already had.
+ */
+export function chosenBallIdOf(body: Instance): string {
+	const value = body.GetAttribute(CHOSEN_BALL_ID_ATTRIBUTE);
+	return typeIs(value, "string") ? value : "";
+}
+
 /** Attribute on a `BallSpawner` part: hard cap on live balls. */
 export const SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE = "MaxLiveBalls";
 /**

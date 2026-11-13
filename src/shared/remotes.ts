@@ -126,6 +126,43 @@ export const ELIMINATION_SOUND_REMOTE_NAME = "EliminationSound";
  * every player. The same argument moved the elimination sound to the client in item 82, and it is stronger here because a
  * burst is a whole hierarchy (a part, an attachment and one or more emitters) rather than one `Sound`.
  */
+/**
+ * The client's two continuous axes, **`(lateral, slow)` as two number arguments**, each `-1 .. 1`, sent when either changes
+ * (items 220, 222).
+ *
+ * **Two arguments rather than one `Vector2`, and the difference is not cosmetic.** A `RemoteEvent`'s arguments are positional
+ * and carry no types across the wire, so the only contract is how many there are and what order they come in - and item 222
+ * shipped a `Vector2` payload against a handler reading two numbers, which dropped **every** steer silently (item 223). The two
+ * ends are one edit apart and nothing in the language checks them, so the shape is stated here rather than inferred from
+ * whichever side a reader opens first.
+ *
+ * **Two axes on one message because they are one thing: this player's continuous ball input.** They are read together, they
+ * are sent from the same `Heartbeat` compare, and splitting them would be a second remote firing in the same frame as the
+ * first to carry a number that arrives with it anyway.
+ *
+ * **`jump` is not here.** It is an event - one press, one impulse - and a value channel would have to model "pressed and
+ * released since the last tick" to carry it. `JUMP_REMOTE_NAME` is that message.
+ *
+ * **Client to server only, and owned by `BallSpawnerService`** - the service that reads it at tick time, which is the same
+ * rule that puts the picker's three remotes on `RoundService` and the pickup sound on `PickupService`. There is no return
+ * trip: the axes are the client's own input, and the only server-side facts they produce are the velocity and the speed of
+ * that player's ball.
+ */
+export const STEER_AXIS_REMOTE_NAME = "SteerAxis";
+
+/**
+ * One player's jump press, no arguments, edge-triggered (item 222).
+ *
+ * **No arguments on purpose.** The server knows who fired it (`OnServerEvent`'s first parameter is the sender) and everything
+ * else it needs - the cooldown, the queue, the body - is on the server. A payload here would be a client telling the authority
+ * what to do rather than asking it.
+ *
+ * **Separate from `SteerAxis` because it is an event, not a value.** The axes are state that is true until it changes; a jump
+ * is an instant. Sending it on the value channel would mean the server had to notice a transition in a number that means
+ * nothing most of the time.
+ */
+export const JUMP_REMOTE_NAME = "Jump";
+
 export const HIT_EFFECT_REMOTE_NAME = "HitEffect";
 
 /**

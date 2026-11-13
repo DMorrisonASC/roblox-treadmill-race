@@ -2,6 +2,8 @@ import { Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/servic
 import { Controller, OnStart } from "@flamework/core";
 import { PLAYER_COINS_ATTRIBUTE } from "shared/attributes";
 import { ballName, rarityLabel } from "shared/ball-name";
+import { colorForBall } from "shared/ball-color";
+import { attachBallIcon } from "shared/ui/ball-swatch";
 import { Rarity, rarityOfBall } from "shared/economy.config";
 import { PickerOfferMessage, PickerResult, PICKER_OPTION_COUNT, REROLL_COST_COINS } from "shared/picker";
 import { pickerVisible } from "shared/picker";
@@ -53,8 +55,21 @@ const HEADER_HEIGHT = 44;
 /** **Placeholder.** Card width, in pixels. Equal for every card, so a longer offer reflows the row rather than the cards. */
 const CARD_WIDTH = 200;
 
-/** **Placeholder.** Card height, in pixels: a name, an 84-pixel ball, a rarity line and their gaps. */
-const CARD_HEIGHT = 190;
+/**
+ * **Placeholder.** Card height, in pixels: a name, a 126-pixel ball, a rarity line, the gaps between them, and the room around
+ * that block.
+ *
+ * The block is `20 + 4 + 126 + 4 + 18 = 172` - each label is its type size plus `SPACING.xs`, see `label` - and the card pads
+ * `12` at the top and the bottom, so `222` leaves the **26 px of residual** the card had at `180`. The card's list is
+ * vertically centred, so that is 13 above the name and 13 below the rarity.
+ *
+ * **History, because this number has moved three times for three different reasons.** `190` with 8-pixel padding gave a
+ * residual of 44 and the name read as pressed against the card's top edge, so item 217 raised it to `220`. Item 218's
+ * screenshot pass then cut it to `180` - the card is the button now, so the plate that needed the extra room is gone. **This
+ * round adds the 42 pixels the ball grew** (`CARD_BALL` 84 -> 126) and nothing else, which is why the residual is held at
+ * 26 rather than restored to item 217's 66: the proportion that matters is the space around the ball, and it is unchanged.
+ */
+const CARD_HEIGHT = 222;
 
 /**
  * **Placeholder.** Extra height the card band needs beyond one card, in pixels.
@@ -65,14 +80,49 @@ const CARD_HEIGHT = 190;
  */
 const CHOICES_SCROLLBAR_ROOM = SPACING.sm;
 
-/** **Placeholder.** Diameter of the tinted ball placeholder inside a card. */
-const CARD_BALL = 84;
+/**
+ * **Placeholder.** Diameter of the ball inside a card, in pixels.
+ *
+ * **50% larger than the 84 items 226-233 shipped** (item 234). At `84` the drawing read as a badge on the card rather than as
+ * the ball the card is offering - the icon is the only part of the card a player is actually choosing between, and it was the
+ * smallest thing on it.
+ *
+ * The icon is not sized here: `attachBallIcon` draws it at `UDim2.fromScale(1, 1)` inside this frame, so the drawing grows
+ * with the circle and there is no second number to keep in step.
+ */
+const CARD_BALL = 126;
 
-/** **Placeholder.** Height of one footer button. Tall enough for two stacked lines and a caption. */
-const FOOTER_HEIGHT = 64;
+/**
+ * **Placeholder.** Height of one footer button: the taller of its two stacks of lines, plus the room around it.
+ *
+ * The taller stack is `Reroll`'s - a `20`-pixel cost row, a `20`-pixel name and an `18`-pixel reason, **58** in all - and the
+ * button's face is `FOOTER_HEIGHT` less `CHUNKY_CONTROL_DEPTH` (6). At `64` that left the face exactly 58 tall and therefore
+ * **zero residual**: the reason caption sat on the face's bottom edge, which is what the screenshot shows as `random per round`
+ * touching the sheet. `72` gives the face 66 and the stack 8 (item 217).
+ */
+const FOOTER_HEIGHT = 72;
 
-/** **Placeholder.** Padding inside the sheet, in pixels. */
+/** **Placeholder.** Padding above and below the sheet's contents, in pixels. */
 const SHEET_PADDING = SPACING.md;
+
+/**
+ * **Placeholder.** Padding to the left and right of the sheet's contents, in pixels.
+ *
+ * **Larger than the vertical padding, and the sheet's width is derived from it** (item 218). The card row is
+ * `CARD_WIDTH * PICKER_OPTION_COUNT + BAND_GAP * 2 = 616` wide, and the sheet used to be exactly `row + SHEET_PADDING * 2` -
+ * so the row filled its band edge to edge and the outermost cards sat 12 px from the sheet's face, behind a 6-pixel border.
+ * The measured screenshot gap was 13 device pixels, which reads as the panel's frame touching the cards.
+ */
+const SHEET_PADDING_X = SPACING.lg;
+
+/**
+ * **Placeholder.** Gap between each band's own contents and the band's edge, in pixels.
+ *
+ * **This is what stops the card row clipping its own outline.** A `ScrollingFrame` clips its descendants, so a card laid out
+ * at the band's `x = 0` has the outer half of its centred `UIStroke` cut away - the outer cards would read as thinner-edged
+ * than the middle one. Eight pixels of band padding puts every stroke inside the clip.
+ */
+const BAND_GUTTER = SPACING.sm;
 
 /** **Placeholder.** Gap between the three bands, in pixels. */
 const BAND_GAP = SPACING.sm;
@@ -105,7 +155,8 @@ const REPLY_TIMEOUT_SECONDS = 10;
  * Declared after the parts it measures, because it is a derivation rather than a knob — changing a card width or a gap must
  * move the sheet with it, and a second literal would be the thing that silently stopped matching.
  */
-const SHEET_WIDTH = CARD_WIDTH * PICKER_OPTION_COUNT + BAND_GAP * (PICKER_OPTION_COUNT - 1) + SHEET_PADDING * 2;
+const SHEET_WIDTH =
+	CARD_WIDTH * PICKER_OPTION_COUNT + BAND_GAP * (PICKER_OPTION_COUNT - 1) + BAND_GUTTER * 2 + SHEET_PADDING_X * 2;
 
 /** **Placeholder.** How far the small diamond is rotated, in degrees. A square at 45 degrees is the shape without an asset. */
 const DIAMOND_ROTATION = 45;
@@ -389,6 +440,12 @@ export class PickerController implements OnStart {
 	 *
 	 * The selection state is a **border and a fill**, never a size: a card that grew on selection would reflow every sibling
 	 * in the row, which for a nine-card premium offer is a visible jump under the pointer that just clicked it.
+	 *
+	 * ## The vertical room (items 217, 234)
+	 *
+	 * `CARD_HEIGHT` (222) and 12-pixel top and bottom padding leave **26 pixels of residual** around the 172-pixel block, and the
+	 * vertically centred list splits them evenly: 13 above the name, 13 below the rarity. The residual is what this card had at
+	 * `180` with an 84-pixel ball; the ball grew and the frame around it grew with it, so the *proportion* is unchanged.
 	 */
 	private buildCard(parent: Instance, ballId: string, order: number): BallCard {
 		const rarity: Rarity = rarityOfBall(ballId) ?? "common";
@@ -427,9 +484,13 @@ export class PickerController implements OnStart {
 		// built in a loop: one call covers every card in every offer, including the nine-card premium set.
 		attachClickSound(button);
 
+		// **Twelve top and bottom, eight at the sides** (item 217). The block inside is `130` pixels of fixed-height children, so
+		// the padding and the centring share whatever the card height leaves: `220 - 12 - 12 - 130 = 66`, split 33/33 by
+		// `VerticalAlignment = Center` below. The sides stay at `sm` because the card's width is the row's width - a wider gutter
+		// would only squeeze the ball.
 		const cardPadding = new Instance("UIPadding");
-		cardPadding.PaddingTop = new UDim(0, SPACING.sm);
-		cardPadding.PaddingBottom = new UDim(0, SPACING.sm);
+		cardPadding.PaddingTop = new UDim(0, SPACING.md);
+		cardPadding.PaddingBottom = new UDim(0, SPACING.md);
 		cardPadding.PaddingLeft = new UDim(0, SPACING.sm);
 		cardPadding.PaddingRight = new UDim(0, SPACING.sm);
 		cardPadding.Parent = button;
@@ -451,15 +512,39 @@ export class PickerController implements OnStart {
 		const ball = new Instance("Frame");
 		ball.Name = "Ball";
 		ball.Size = UDim2.fromOffset(CARD_BALL, CARD_BALL);
-		ball.BackgroundColor3 = tint;
+		// **The ball's own colour, or its rarity tint when the id has none** (item 226). The stroke below stays the rarity, so a
+		// card still says which tier it is while the circle says which ball it is - the same split the store's cards use.
+		ball.BackgroundColor3 = colorForBall(ballId) ?? tint;
 		ball.BackgroundTransparency = 0.1;
 		ball.BorderSizePixel = 0;
+		// **Above the card, not at the default 1** (item 218). The ball was occupying its 84-pixel slot and painting nothing:
+		// the two labels around it are at `LABEL_Z_INDEX` and showed, while this frame at the default behaved as if it were
+		// behind the card's own fill - the signature of `ZIndexBehavior.Global`, where a child at a lower `ZIndex` than its
+		// parent is drawn behind the parent's background. `CARD_Z_INDEX + 1` is correct under either behaviour and is one
+		// number rather than a guess at the gui's setting.
+		ball.ZIndex = CARD_Z_INDEX + 1;
 		ball.LayoutOrder = 2;
 		ball.Parent = button;
 
 		const ballCorner = new Instance("UICorner");
 		ballCorner.CornerRadius = new UDim(1, 0);
 		ballCorner.Parent = ball;
+
+		// **The ball's own drawing, inside the circle the colour fills** (item 233). The colour stays as the fill behind it, so a
+		// card whose icon has not resolved is still the card item 226 shipped rather than a hole. `shared/ui/ball-swatch.ts`
+		// explains why the icon is a child rather than a replacement, and why the `UICorner` above does not clip it.
+		attachBallIcon(ball, ballId);
+
+		// **One line, on the first card of every offer** (item 218). The slot is reserved and nothing paints, so the only
+		// facts that distinguish "not drawing" from "drawing somewhere else" are the resolved box and the paint properties.
+		// `AbsoluteSize` is read on the next resumption because a layout pass has to run first.
+		if (order === 1) {
+			task.defer(() => {
+				print(
+					`[Picker] card ball bg=${tostring(ball.BackgroundColor3)} transparency=${ball.BackgroundTransparency} z=${ball.ZIndex} visible=${tostring(ball.Visible)} size=${tostring(ball.AbsoluteSize)} at=${tostring(ball.AbsolutePosition)}`,
+				);
+			});
+		}
 
 		// 3. The description slot: the rarity, because no ball has a power, an effect or any other text to put here. Kept
 		// alongside the stroke rather than replaced by it - a colour alone is not a rarity for a reader who cannot separate
@@ -710,7 +795,8 @@ export class PickerController implements OnStart {
 		// **An offset, not a share of the screen.** A 60%-wide sheet with three cards left a third of the panel empty on the
 		// right, which reads as a card that failed to load; the reference's panel is only as wide as its content. The row of
 		// `PICKER_OPTION_COUNT` cards *is* the content, and a premium offer wider than that scrolls inside this width.
-		// `capToViewport` supplies the ceiling on a narrow window, where an offset would otherwise overflow.
+		// `applyPanelScale` supplies the ceiling on a narrow window, where an offset would otherwise overflow - it draws the whole
+		// composition smaller rather than clamping the box, which would squeeze every band inside it (item 160).
 		//
 		// **Clipping, deliberately, and this is the one panel that does.** The bands are fixed-height and their contents are
 		// laid out rather than positioned, so a child taller than its band escapes the sheet entirely - the first build had a
@@ -731,11 +817,13 @@ export class PickerController implements OnStart {
 		const frame = panel.frame;
 		frame.Visible = false;
 
+		// **Vertical and horizontal are separate numbers here** (item 218). `SHEET_PADDING_X` is what the sheet's width is
+		// derived from, and it is the only thing standing between the card row and the panel's own border.
 		const padding = new Instance("UIPadding");
 		padding.PaddingTop = new UDim(0, SHEET_PADDING);
 		padding.PaddingBottom = new UDim(0, SHEET_PADDING);
-		padding.PaddingLeft = new UDim(0, SHEET_PADDING);
-		padding.PaddingRight = new UDim(0, SHEET_PADDING);
+		padding.PaddingLeft = new UDim(0, SHEET_PADDING_X);
+		padding.PaddingRight = new UDim(0, SHEET_PADDING_X);
 		padding.Parent = panel.surface;
 
 		const layout = new Instance("UIListLayout");
@@ -760,6 +848,12 @@ export class PickerController implements OnStart {
 		header.BackgroundTransparency = 1;
 		header.LayoutOrder = 1;
 		header.Parent = parent;
+
+		// The same gutter the cards get, so the title's left edge and the first card's left edge are one line (item 218).
+		const gutter = new Instance("UIPadding");
+		gutter.PaddingLeft = new UDim(0, BAND_GUTTER);
+		gutter.PaddingRight = new UDim(0, BAND_GUTTER);
+		gutter.Parent = header;
 
 		const layout = new Instance("UIListLayout");
 		layout.FillDirection = Enum.FillDirection.Horizontal;
@@ -803,6 +897,13 @@ export class PickerController implements OnStart {
 		choices.LayoutOrder = 2;
 		choices.Parent = parent;
 
+		// **The gutter that keeps the cards off the clip** (item 218). A `ScrollingFrame` clips its descendants, and the row is
+		// exactly as wide as the band's content: without this every outer card's centred `UIStroke` loses its outer half.
+		const gutter = new Instance("UIPadding");
+		gutter.PaddingLeft = new UDim(0, BAND_GUTTER);
+		gutter.PaddingRight = new UDim(0, BAND_GUTTER);
+		gutter.Parent = choices;
+
 		const layout = new Instance("UIListLayout");
 		layout.FillDirection = Enum.FillDirection.Horizontal;
 		// Centred, not left-aligned: three cards in a wide sheet left a large dead area on the right, which reads as a
@@ -833,6 +934,12 @@ export class PickerController implements OnStart {
 		footer.BackgroundTransparency = 1;
 		footer.LayoutOrder = 3;
 		footer.Parent = parent;
+
+		// The same gutter as the header and the cards: one left edge for the whole sheet (item 218).
+		const gutter = new Instance("UIPadding");
+		gutter.PaddingLeft = new UDim(0, BAND_GUTTER);
+		gutter.PaddingRight = new UDim(0, BAND_GUTTER);
+		gutter.Parent = footer;
 
 		const layout = new Instance("UIListLayout");
 		layout.FillDirection = Enum.FillDirection.Horizontal;

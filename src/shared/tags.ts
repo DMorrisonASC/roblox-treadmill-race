@@ -71,4 +71,18 @@ export const TAGS = {
 	 * Optional: without it every client keeps its own camera, which is what shipped before item 186.
 	 */
 	treadmillCamera: "TreadmillCamera",
+	/**
+	 * A lobby part that bounces a player character which lands on it.
+	 *
+	 * **Hand-placed and hand-tagged, like the belt, the spawner and the camera.** The part *is* the visual: `TrampolineService`
+	 * writes nothing on it - not `Size`, `Anchored`, `CanCollide`, `Material`, `Color` or `Transparency` - so a designer who
+	 * wants a spring, a mushroom or a painted crate gets exactly what they placed.
+	 *
+	 * **It cannot be reached by a racing character.** `CharacterFreezeController` holds a competitor at `WalkSpeed = 0` with the
+	 * controls locked while `cameraWantsArena(phase, competing, spectating)` is true, so only the lobby view can walk onto it.
+	 * That is the gate; this tag does not add a second one.
+	 *
+	 * A ball cannot bounce: it is a `Part` inside a `Folder`, so its parent has no `Humanoid`.
+	 */
+	trampoline: "Trampoline",
 } as const;

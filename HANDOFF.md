@@ -6979,3 +6979,1453 @@ A player who joins *after* the top-of-iteration guard has already run cannot cha
 For the banner's `clock` field to be empty on a refused frame, the client's `activeDeadline("Intermission")` must read `0` (or the label must be `Visible = false`) **before any publish has run for that iteration**. Code path, end to end: `enterIntermission` clears the deadline to `0` at lobby entry (round-service.ts:1531), then the loop's first iteration opens the window and refuses **without ever calling `publishIntermissionDeadline(now + span)`** - the only call that sets a non-zero `Intermission` deadline is on the approved path (line 1784). `refreshClock` therefore sees `0`, sets `Visible = false` and `Text = ""`. There is no ordering in which a number reaches the label for a refused iteration, because the publisher for that number is unreachable until both asks have passed.
 
 **Validation:** `npm run build` exit 0; **`npm test` = 540 passed in 41 files** (unchanged - no new pure function, `round-status.spec.ts` and `phase-banner.spec.ts` untouched); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on the touched file; `grep "\u[0-9a-fA-F]{4}" src` = 0; `flamework.build` unchanged; only `round-service.ts` changed this round.
+## 217 - The picker's cards get vertical room, and the footer stops being exactly full
+
+The report was "the name is pressed against the card's top edge" and "`random per round` touches the sheet's bottom edge". The first is a proportion complaint; the second turned out to be arithmetic with **zero** margin.
+
+### The card's arithmetic, walked from source
+
+| Piece | Value | Where |
+| --- | --- | --- |
+| `SPACING.xs` / `sm` / `md` | 4 / 8 / 12 | `shared/ui/scale.ts:80` |
+| `this.type.body2.size` | 16 (`TYPOGRAPHY.body2` 14, one step up) | `scale.ts:96`, `NEXT_TEXT_VARIANT` |
+| `this.type.caption.size` | 14 (`TYPOGRAPHY.caption` 12, one step up) | same |
+| name label height | `16 + SPACING.xs` = **20** | `label()` sets `Size.Y.Offset = this.type[variant].size + SPACING.xs` |
+| `CARD_BALL` | **84** | `picker-controller.ts:68` |
+| rarity label height | `14 + SPACING.xs` = **18** | `label()` |
+| list gaps | `SPACING.xs` twice = **8** | `UIListLayout.Padding` |
+| block total | **130** | 20 + 4 + 84 + 4 + 18 |
+| `CARD_HEIGHT` (before) | **190** | `picker-controller.ts:57` |
+| padding (before) | `8 + 8` | `UIPadding`, all four sides `SPACING.sm` |
+| residual (before) | `190 - 16 - 130` = **44** | |
+| half-residual, above the name | **22** | `VerticalAlignment = Center` |
+| **visual top gap (before)** | `8 + 22` = **30 px**, plus ~2 px of glyph inset inside the 20-px label | |
+
+So the source says the name's glyphs start **~32 px** below the card's top edge, not the 4-8 px the report described. **The screenshot was not attached to the prompt this round**, so that reading could not be re-measured; what can be said from source is that no combination of these constants produces a 30-px gap *and* a tight one, and no layout in this file can produce less than `padding` alone (8 px) except by overflowing the card.
+
+**What is left unexplained, stated rather than papered over:** a card whose content exceeded its box would sit flush against the top - and the only child that can do that is the name, which is `TextWrapped = true` inside a fixed 20-pixel box. A two-line name overflows its box by roughly 9 px and is vertically centred on it, so it would rise ~9 px above the block, making the visual gap ~23 px. That is the one in-source path to a tighter gap, and it does not reach 8 either. A screenshot taken on a build **before item 215** is the other candidate: that card had `applyChunkyChrome`'s 6-px face inset and a 3-px face stroke, so its own visual arithmetic was different.
+
+**The decision is Option A anyway, and the reason is not the arithmetic.** The user asked for more internal room; the constants say the room is 30 px inside a 190-px card that also holds an 84-px ball and two lines, which is *tight as a proportion* even when it is not tight in pixels. Padding and `CARD_HEIGHT` are the levers for that and nothing else in the file competes with them.
+
+### The change
+
+| | before | after |
+| --- | --- | --- |
+| `CARD_HEIGHT` | 190 | **220** |
+| `PaddingTop` / `PaddingBottom` | `SPACING.sm` (8) | `SPACING.md` (12) |
+| padding, sides | `SPACING.sm` | `SPACING.sm` (unchanged) |
+| residual | 44 | `220 - 24 - 130` = **66** |
+| half-residual | 22 | **33** |
+| visual top gap | 30 | **45 px** (+ ~2 glyph) |
+| visual bottom gap | 30 | **45 px** |
+
+The block did not change: same `CARD_BALL` (84), same two label heights, same 4-pixel gaps. Growing the card alone gives the space *around* the ball, which is what "the card feels cramped" asks for; growing the ball with it would only have kept the ratio.
+
+`CARD_WIDTH` is untouched, so `SHEET_WIDTH` (`200 * 3 + 8 * 2 + 12 * 2 = 640`) is unchanged.
+
+### The footer: exactly full, not 2 px short
+
+The footer's button face is `FOOTER_HEIGHT` less `CHUNKY_CONTROL_DEPTH` (6), because `applyChunkyChrome` insets the face by the depth:
+
+| Stack | Lines | Total | Face at 64 | Residual |
+| --- | --- | --- | --- | --- |
+| `All Balls` | `FREE` 18 + `All Balls` 20 + `random per round` 18 | **56** | 58 | 2 |
+| `Reroll` | cost row 20 + `REROLL` 20 + reason 18 | **58** | 58 | **0** |
+
+`FOOTER_HEIGHT` is now **72**, giving the face 66 and the `Reroll` stack 8 - the reason caption no longer sits on the face's bottom edge, and a single extra pixel of line height anywhere in the stack would have clipped it at 64. `All Balls` gets 10.
+
+### The sheet
+
+`HEADER_HEIGHT + CARD_HEIGHT + CHOICES_SCROLLBAR_ROOM + FOOTER_HEIGHT + BAND_GAP * 2 + SHEET_PADDING * 2`
+= `44 + 220 + 8 + 72 + 16 + 24` = **384** (was `44 + 190 + 8 + 64 + 16 + 24` = **346**).
+
+`BallChoices` grows with it, to `CARD_HEIGHT + CHOICES_SCROLLBAR_ROOM` = **228** (was 198) - the band reads the same constant, so the card cannot outgrow it. The sheet's starting `size` is the same expression, and `autoHeight` resolves to the same number from the content: padding 24 + header 44 + gap 8 + choices 228 + gap 8 + footer 72 = 384.
+
+**Fitting:** the picker does not use `capToViewport` at all - a stale comment said it did, and that comment is fixed - it uses `applyPanelScale` (item 160). At 1280x720: `panelScaleFor(Vector2(1280, 720), Vector2(640, 384))` = `min(1.84, 1.69)` = **1.69**, clamped to **1** by the "never enlarge" rule. So the sheet draws at design size, **640 x 384 of 1280 x 720** (50% x 53%), with no clamping and no scale below 1 at any realistic landscape viewport (one would have to drop under roughly 700 x 430 for the scale to bind at all).
+
+### Where this prompt was wrong
+
+1. **"The residual goes from 44 to `44 + 30 = 74` (37 above, 37 below with `PaddingTop = 12`)."** That double-counts the padding change: 220 - 24 - 130 = **66**, half-residual **33**, top gap **45**. The prompt's own "visual top gap grows to ~49" used the wrong residual.
+2. **"`capToViewport` / `applyPanelScale`" and "the sheet is capped by `capToViewport`".** The picker has never called `capToViewport`; that was a stale comment left from before item 160 replaced the clamp with a scale. Fixed here, because it is two lines from the size expression this round edits.
+3. **"The footer is 2 px short ... `FREE` 20, `All Balls` 22, `random per round` 20 = 62."** The label heights are `size + SPACING.xs`, so 18/20/18 = **56**; and the box being filled is the *face* (58), not the 64-pixel button, because the chrome insets it by the 6-pixel depth. The tighter stack is `Reroll` at 58, which is exactly full - so the screenshot's tight caption is the `Reroll` reason line as much as `random per round`.
+4. **"The arithmetic predicts 30 px and the screenshot shows ~8, so find what is eating the 22 px."** Nothing is eating it, and the two numbers cannot both be readings of this file. The report treated that as a fork between padding and a layout bug; it is neither - it is a description that does not match any build of this source, and the honest fix is still to give the card room.
+
+### Studio-only
+
+Whether 220 x 200 with 45 px of clear space above the name reads as *comfortable* rather than *loose* (the ball is unchanged at 84, so the ratio between ball and card fell from 44% to 38% of the height); whether a 384-pixel sheet at 640 wide still reads as a compact panel on a landscape phone, where `applyPanelScale` draws it at 0.9-1.0; whether the footer's two lines now look centred rather than floating; and whether any ball name long enough to wrap now looks better or worse for the extra room. Each is a screenshot.
+
+**The one thing a new screenshot settles:** whether the name reads as sitting on its own line inside the card rather than pressed against the top edge - the arithmetic says 45 px, and the eye is what confirms the number is the right one.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 540 passed in 41 files** (unchanged - no logic touched); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean; `grep "\u[0-9a-fA-F]{4}" src` = 0; `flamework.build` unchanged; the emitted Luau carries `CARD_HEIGHT = 220`, `FOOTER_HEIGHT = 72` and `SPACING.md` on the card's vertical padding. Only `picker-controller.ts` changed.
+## 218 - A gutter between the card row and the panel, and the ball gets a draw order above its card
+
+Measured from the screenshot, not estimated. The PNG was decoded and scanned: the card row spans the sheet's inner width **exactly**, and the outermost cards' outlines are **not drawn at all** on their outer edge.
+
+### What the pixels say
+
+Scale is `250 / 200 = 1.25` (a card fill measures 250 image pixels for a 200-pixel `CARD_WIDTH`), so image pixels divided by 1.25 are design pixels.
+
+| Scan | Finding |
+| --- | --- |
+| `y = 250`, `x = 63..69` | `(10,10,12)` for 7 px - `CHUNKY_PANEL_STROKE` (6 design px) |
+| `x = 70..84` | `(52,52,58)` for 15 px - `paint.panel`, i.e. **12 design px**, which is `SHEET_PADDING` exactly |
+| `x = 85..334` | `(62,62,71)` for 250 px - `paint.card` |
+| `x = 335..337`, `342..344` | `(154,160,166)` for 3 px each - the rarity stroke `#9AA0A6`, between two cards |
+| `x = 855..869` | `(52,52,58)` for 15 px - the same 12 design px on the right |
+
+**The stroke is present between cards and absent on the outside edges.** The leftmost card's left edge and the rightmost card's right edge have no `(154,160,166)` run at all: `x = 84` is panel face and `x = 85` is already card fill. That is a `ScrollingFrame` clipping a `UIStroke` drawn centred on the card's edge - the row was exactly as wide as the band's content, so both outer strokes were cut away. The panel's border, 12 design px away, then had nothing between it and the cards.
+
+### The fix
+
+| Constant | Value | Why |
+| --- | --- | --- |
+| `SHEET_PADDING` | `SPACING.md` (12) | vertical, unchanged |
+| `SHEET_PADDING_X` | `SPACING.lg` (**16**) | new; the sheet's width is derived from it |
+| `BAND_GUTTER` | `SPACING.sm` (**8**) | new; horizontal padding inside the header, the choices and the footer |
+
+`SHEET_WIDTH` = `200*3 + 8*2 + 8*2 + 16*2` = **664** (was 640). Sheet inner width 632; each band is 632 wide with an 8-pixel gutter, so its content is 632 - 16 = **616**, which is the row exactly - no scrollbar, and every stroke is now 8 px inside the clip instead of on it.
+
+**The gap the user was looking at, before and after:**
+
+| | before | after |
+| --- | --- | --- |
+| stroke centre to panel face edge | 12 design px, **with the stroke clipped off** | 16 + 8 = **24 design px**, stroke intact |
+| visible clear face | ~13 image px, and no outline at all | ~30 image px |
+| card stroke vs. card stroke between cards | 3 image px | 3 image px, unchanged |
+
+The header and the footer take the same 8-pixel gutter, so the title's left edge, the first card's left edge and the first footer button's left edge are one line. Height is unchanged at 384.
+
+At 1280x720 the sheet is now 664 x 384: `panelScaleFor` gives `min(1.77, 1.69)`, clamped to **1** by the never-enlarge rule, so it draws at design size - 52% of the width, 53% of the height.
+
+### The ball: it occupies its slot and paints nothing
+
+The same scan settles a second question. At `x = 203` (inside card 1's ball's horizontal span) from `y = 196` to `308` (inside its 84-pixel slot) **every pixel is `(62,62,71)`** - the card's own fill. And the space *is* reserved: the name's glyph row and the rarity's glyph row are 114 image px apart, which is `20 + 4 + 84 + 4 + 18` design px, so the `Ball` frame is being laid out at its full 84 pixels.
+
+A child that reserves layout space and paints nothing is either `BackgroundTransparency = 1` or drawn behind its parent's fill. The source sets `0.1` and nothing else in the controller touches the frame, so it is a draw-order problem. The two labels beside it are at `LABEL_Z_INDEX` (6) and are visible; the ball was at the default `1`, below its own card's `CARD_Z_INDEX` (3). Under `ZIndexBehavior.Global` that draws a child **behind** its parent's background, which is the exact signature. `getScreenGui` never sets `ZIndexBehavior` (`layers.ts:278`, `:310`), so a `ScreenGui` that already exists in the place file and was saved with `Global` would keep it - the reuse branch re-applies only `ScreenInsets` and `DisplayOrder`.
+
+`ball.ZIndex = CARD_Z_INDEX + 1` is correct under either behaviour and is one line rather than a guess at the gui's setting.
+
+**A diagnostic line came with it**, on the first card of each offer only:
+
+```
+[Picker] card ball bg=0.60,0.63,0.65 transparency=0.1 z=4 visible=true size=84,84 at=<v2>
+```
+
+If the ball still does not draw, that line is what distinguishes "the frame is somewhere else" (`at=` wrong) from "the frame is behind something" (`at=` and `size=` right, nothing painted). Delete the line once the cause is known.
+
+### Where this prompt was wrong
+
+- The previous two rounds treated the tightness as a *padding* number. It was a **derivation**: `SHEET_WIDTH` was `row + SHEET_PADDING * 2`, so the sheet could never be wider than its contents and no padding value inside the bands could open a gutter without making the row scroll. The two constants that had to change are the sheet's horizontal padding and the sheet's width formula, and `CARD_HEIGHT`/`PaddingTop` were never going to fix it.
+- The card's outer stroke was not "touching" the container - it was **cut off by it**, which is why it read as flush. Nothing in the layout numbers says "clipped"; only the pixels do.
+- The ball was named "a separate bug, unnamed in this round's prompt" in item 217. It is the largest empty space on the panel, so it is fixed here rather than deferred again.
+
+### Studio-only
+
+Whether 24 design px of clear face reads as a gutter rather than as a gap (the panel's 6-pixel border is heavy, and a heavier frame wants a wider gutter); whether the sheet at 664 wide still reads as a compact panel; and whether the ball now draws - the diagnostic line answers that on the next run.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 540 passed in 41 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean after a `--write`; `grep "\u[0-9a-fA-F]{4}" src` = 0; `flamework.build` unchanged; the emitted Luau carries `SHEET_WIDTH` with both new terms, `BAND_GUTTER` eight times, `ball.ZIndex = CARD_Z_INDEX + 1` and the diagnostic. Only `picker-controller.ts` changed.
+## 219 - The store opens whenever the camera is not on the arena, and every pickup pad gets a screen-size marker
+
+Two changes for one playtest. The store's rule was a phase (`Intermission`); the marker's mechanism was a guess about `BillboardGui`.
+
+### The store: `phase === "Intermission"` becomes `!cameraWantsArena(...)`
+
+`shared/spectate.ts` gained one function, next to the camera rule it negates:
+
+```ts
+export function isShoppingAvailable(phase: string, competing: boolean, spectating: boolean): boolean {
+	return !cameraWantsArena(phase, competing, spectating);
+}
+```
+
+`shop-controller.ts` gained `available`, computed in one function and read by three sites:
+
+```ts
+private applyAvailability(): void {
+	const competing = this.player.GetAttribute(PLAYER_COMPETING_ATTRIBUTE) === true;
+	const spectating = isSpectating();
+	const available = this.phase !== "unknown" && isShoppingAvailable(this.phase, competing, spectating);
+	if (available !== this.available) { this.available = available; print(`[Shop] avail=...`); }
+	this.rail.Visible = available;
+	this.applyModal();
+}
+```
+
+- **`applyPhase`** calls it where it used to set `rail.Visible = inIntermission` and then call `applyModal` - one function, three inputs, still before the early return so a panel left open across a phase change still gives its input back.
+- **`applyModal`** is now `open !== "none" && this.available`.
+- **`toggle`** refuses a press when `!this.available`, so a touch queued on the frame the phase changes cannot open a panel the camera has already taken the player away from.
+- **`onStart`** subscribes `GetAttributeChangedSignal(PLAYER_COMPETING_ATTRIBUTE)` and `onSpectatingChanged`.
+
+The table it produces:
+
+| phase | competing | spectating | camera | store |
+| --- | --- | --- | --- | --- |
+| `Intermission` | any | any | lobby | open |
+| `Waiting` | true | any | arena | closed - the picker is that phase's panel |
+| `Playing` | true | any | arena | closed |
+| `Playing` | false | false | lobby | **open** - eliminated, or joined mid-round |
+| `Playing` | false | true | lobby→arena | closed - `Watch Race` pressed |
+| `PostGame` | false | any | lobby | open |
+| `PostGame` | true | any | arena | closed for the 5-second hold |
+
+**The `PostGame` competitor row is the one the prompt got wrong.** `clearAllBodies` - the only place `Competing` is cleared wholesale - runs on `Intermission` entry, `forceWaiting` and the `Playing` restart; `endPlaying` does not clear it. So the *winner* keeps `competing = true` through `PostGame` and their camera stays on the arena, which under the rule means no store for five seconds. Eliminated players are already `false` and can shop immediately. That is the camera rule applied honestly rather than a phase special case, and five seconds is not worth a second rule.
+
+**`unknown` fails closed.** `RoundState` is the one input that must exist before the question can be asked: `cameraWantsArena` answers `false` for any string it does not know, so a session with no phase value would open the store and print `avail=true phase=unknown`, which reads like a shop bug rather than a missing value. `readPhase`'s existing warning says the tabs stay hidden, and they still do.
+
+**Item 161 is untouched in the half that matters:** a panel already open stays open. Availability governs *opening* and the movement lock, never `setOpen`. Pressing `Watch Race` with a panel open hides the rail and releases the lock, and the panel stays on screen - which is the documented cost ("a panel covering the belt is something the player can still drive under") arriving from the new direction.
+
+**Layer order, for the record:** the store is on `sheet` (`SHEET_DISPLAY_ORDER = 37`), the picker on `hudCore` (`HUD_CORE_DISPLAY_ORDER = 20`), so a store panel draws *over* the picker if both are ever open. The rules now prevent that naturally (a competitor in `Waiting` gets the picker and not the store), and no layer changed.
+
+### The marker: one property, not five
+
+The prompt asked for `SizeOffset` + `DistanceStep` + `DistanceUpperLimit`. The installed typings (`@rbxts/types`, `BillboardGui`) say what those actually do:
+
+- `DistanceStep` - *"Determines the size `CurrentDistance` increments and decrements in studs"* - quantises a **reading**; it scales nothing. It is `[NotReplicated]`, so a client may set it.
+- `SizeOffset` - *"A 2D offset in size-relative units that acts like an anchor point"* - is a one-shot offset of the gui within its own canvas, not a per-step growth term.
+- `DistanceLowerLimit` and `DistanceUpperLimit` are **both marked deprecated** in the current typings.
+
+The real mechanism is the one this tree already documents: a `BillboardGui`'s **offset** components are screen pixels and its **scale** components are studs. The sprite uses scale (`fromScale(2.6 x 4)`) and is therefore a `19`-pixel speck at `300` studs; the marker uses `UDim2.fromOffset(28, 28)` and is `28` pixels at every distance with no code running per frame.
+
+```ts
+marker.Size = UDim2.fromOffset(PICKUP_MARKER_PIXELS, PICKUP_MARKER_PIXELS);
+marker.MaxDistance = PICKUP_RING_MAX_DISTANCE;   // item 202's proven "no cull" value
+marker.LightInfluence = 0;
+marker.AlwaysOnTop = false;
+marker.StudsOffsetWorldSpace = new Vector3(0, PICKUP_SIZE.Y / 2 + PICKUP_MARKER_LIFT_STUDS, 0);
+	Disc (Frame, fromScale(1,1), RING_COLOR, UICorner UDim(1,0), UIAspectRatioConstraint 1)
+```
+
+| Constant | Value | Note |
+| --- | --- | --- |
+| `PICKUP_MARKER_PIXELS` | **28** | placeholder |
+| `PICKUP_MARKER_LIFT_STUDS` | **1** | above the pad's top face |
+| `PICKUP_MARKER_TRANSPARENCY` | **0.3** | placeholder; denser than the ring's 0.6 |
+
+`MaxDistance` is set explicitly to `1e6` rather than `0`: the ring's docblock already argued that `0` is one careless edit away from "cull at zero distance", and a `BillboardGui`'s default is infinity, so writing the number makes the decision visible.
+
+The marker adds no asset - it is the same `RING_COLOR` disc the ring draws, at a fixed pixel size. **Both visuals stay**: the marker answers "where is a pad" from `260-390` studs, the ring answers "this close collects" as the ball arrives. Neither can do the other's job.
+
+Boot line, once per session (item 145's precedent - every pad shares these constants):
+
+```
+[PickupSprite] marker pad=<path> pixels=28 maxDistance=1e6 lift=11 transparency=0.3 asset=none
+```
+
+### Where this prompt was wrong
+
+1. **"`SizeOffset = 0.05` per `DistanceStep = 10` gives `30 x 0.05 = 1.5` of extra size."** `SizeOffset` does not accumulate; it is an anchor-point-like offset. `DistanceStep` only quantises `CurrentDistance`. Neither grows a gui, and `DistanceUpperLimit`/`DistanceLowerLimit` are deprecated. The mechanism the prompt built its arithmetic on does not exist in the current engine.
+2. **"`MaxDistance = 0` is no cull."** That is `SurfaceGui`'s documented meaning. A `BillboardGui`'s `MaxDistance` defaults to infinity, and `0` is not documented as "no limit" for it - which is why the explicit `1e6` is used.
+3. **"Each pickup pad carries a `BillboardGui` marker with `SizeOffset`, `DistanceStep`, `DistanceUpperLimit`"** (criterion 14) - it carries one with none of them, and that is the fix.
+4. **"`PostGame` ... store open"** - true only for a player who is not competing. The winner is still `competing = true` until the next `Intermission`.
+5. **"`cameraWantsArena` ... already extracted to `shared/`"** - it is, in `shared/spectate.ts:55`, and `isShoppingAvailable` is now its sibling rather than a second phase table.
+6. The prompt's store context says "tabs visible in `Intermission`, panels openable in `Intermission`" as if they were one condition; they were two (`rail.Visible` and `applyModal`'s phase test), and both now read the one `available` field.
+
+### Studio-only
+
+- Whether an eliminated player's rail appears on the same frame as their `Competing = false` write, or the next (a one-frame stutter, not a wrong state).
+- Whether pressing `Watch Race` with a panel open reads as "the panel stayed, my movement came back" rather than as a bug.
+- Whether a `28`-pixel dot at `390` studs reads on a phone, and whether `28` is too big on a 4K desktop where it is proportionally tiny in studs but fixed in pixels - the constant is the one number to retune.
+- Whether the marker at `1` stud above the pad reads as "a dot on the pad" or as "a floating dot", given the camera's shallow angle.
+- Whether `Alpha 0.7` (transparency `0.3`) survives the belt's motion behind it.
+
+### The two things that had to be true
+
+**Store:** every row of the table above is a direct read of `!cameraWantsArena(phase, competing, spectating)` with the three inputs as they are published today - `phase` from `RoundState`, `competing` from `PLAYER_COMPETING_ATTRIBUTE` written by `RoundService` at spawn/elimination/teardown, `spectating` from `client/spectating`. `spectate.spec.ts` now asserts the negation and five rows of the table, including "a competitor in `Waiting` cannot shop".
+
+**Marker:** `28` screen pixels at any distance, by construction - `Size` in offset is the size on screen, and there is no other term in the expression. The `[PickupSprite] marker` line prints the number the gui was built with.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 545 passed in 41 files** (540 + 5 new `isShoppingAvailable` cases); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all five touched files (`viewport.ts` is the known pre-existing failure); `grep "\u[0-9a-fA-F]{4}" src` = 0; `flamework.build` unchanged - no controller added or removed.
+## 220 - The player steers the ball laterally, and the decorative sway is gone
+
+The playtest verdict was "the game plays itself". The sway was the answer to a real problem - a field of identical spheres in identical lanes reads as a conveyor - and steering makes that problem disappear by a better route: the field is varied because eight people are choosing. Two writers to one axis is the failure, and the decorative one goes.
+
+### Deleted, with the round that added it
+
+| Thing | Where | Introduced |
+| --- | --- | --- |
+| `SWAY_FREQUENCY_HZ` | `tuning.ts` | 107 |
+| `SWAY_FREQUENCY_JITTER` | `tuning.ts` | 153 |
+| `SWAY_AMPLITUDE` | `tuning.ts` | 107 |
+| `SWAY_PHASE_JITTER` | `tuning.ts` | 107 |
+| `SWAY_TRACK_SECONDS` | `tuning.ts` | 107 |
+| `lateral: Map<BasePart, {phase, elapsed, omega}>` | `ball-spawner-service.ts` | 107/151/153 |
+| `newSway()` and the `swaySpawns` stride counter | `ball-spawner-service.ts` | 107/153 |
+| `sway=<phase>@<period>,...` on `[Spawner] round start` | `ball-spawner-service.ts` | 153 |
+| `swayPhase=` on `[Ball:N] sample` (`localZ=` stays) | `ball-spawner-service.ts` | 107 |
+
+The reasoning is kept in `tuning.ts` where `STEER_SPEED` now lives: **the next reader who notices a uniform field must reach for bot AI or denser pickups, not a sine wave over the player's input.** The old identifiers are described in prose rather than spelled, so `grep -rn "SWAY_|newSway|lateralRate|swayPhase" src/` returns **0** while the history is still on the page.
+
+### The lateral write
+
+Before (item 204's shape, inside a per-ball branch that only ran for bodies with sway state):
+
+```ts
+const lateralRate = SWAY_AMPLITUDE * omega * Math.cos(angle) + (targetZ - localZ) / SWAY_TRACK_SECONDS;
+const lateral = across.mul(lateralRate);
+const carriedLateral = velocity.Dot(across);
+ball.AssemblyLinearVelocity = velocity
+    .sub(right.mul(along)).sub(across.mul(carriedLateral))
+    .add(right.mul(-relative)).add(lateral).add(lateralShove).add(alongShove);
+```
+
+After (`stepBallSpeeds`, every ball, no branch):
+
+```ts
+const across = beltFrame === undefined ? undefined : beltFrame.RightVector.Cross(beltFrame.UpVector).Unit;
+...
+const ownerId = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);
+const axis = typeIs(ownerId, "number") ? (this.steerAxes.get(ownerId) ?? 0) : 0;
+const steer = across.mul(axis * STEER_SPEED);
+const carriedLateral = velocity.Dot(across);
+ball.AssemblyLinearVelocity = velocity
+    .sub(right.mul(along)).sub(across.mul(carriedLateral))
+    .add(right.mul(-relative)).add(steer).add(lateralShove).add(alongShove);
+```
+
+**`carriedLateral` stays, and it is the load-bearing part of "steering holds a line".** With it, the tick *sets* the lateral axis: the player's input is the whole lateral velocity, a contact can only contribute its decaying impulse, and a ball cannot ride a physics push on top of steering. Without it every contribution would compound and a shove would ring.
+
+`across` is hoisted out of the loop (one `CFrame` read per tick, not one per ball) because every body needs it now, not just swaying ones. The `beltFrame === undefined` fallback stays inside the loop and is byte-for-byte the old along-only write.
+
+### The server side of the wire
+
+`steerAxes: Map<number, number>` keyed by `UserId` - the axis is a fact about a player, not about a body, so a decoy, a respawn and all four death paths need no bookkeeping. `storeSteerAxis` validates (`typeIs(..., "number")`, `value ~= value` for `NaN`, then `math.clamp(-1, 1)`), stores, and logs **once per player per round** (`steerLogged` is cleared in `setRoundActive(true)`). `PlayerRemoving` deletes both entries.
+
+`[Spawner] steer player=<name> axis=<n>` - transition-only. Two causes look identical from outside ("the ball does not steer"): the client never sent, or the server never applied. One line answers which.
+
+### The client: `steer-controller.ts`
+
+Three `ContextActionService` bindings, one `Heartbeat` compare-and-send, one `Playing` reassert:
+
+- `SteerLeft`: `A`, `Left`, `DPadLeft`; `SteerRight`: `D`, `Right`, `DPadRight` - both with `createTouchButton = true`.
+- `SteerThumbstick`: `Enum.KeyCode.Thumbstick1`, `createTouchButton = false`; `input.Position.X` with an `End` reset.
+- `currentAxis()` = the stick when it is past `THUMBSTICK_DEADBAND` (`0.2`), else `right - left`. A key is binary by nature, so keyboard steering is full speed or nothing.
+- `pushAxis()` sends only when the axis moved by more than `AXIS_SEND_THRESHOLD` (`0.1`): ten messages for a full sweep, typically 0-1/s.
+- The reassert fires the *current* axis once per `Playing` entry and prints `[Steer] reassert axis=<n>`. This is the only fix needed for the one stale-value path: the server map persists across rounds (a player holding `A` into the next round expects `A`), and the client only sends on change, so without the reassert a held key would send nothing at all and the server would keep last round's value.
+- Bindings are **always active**, not phase-gated: a player who releases `A` during a phase change still has to tell the server the axis is `0`, and the server discarding an axis for a body it does not have is one map lookup.
+- Teardown on `game.Destroying` - Flamework v5.9.3 has no `onStop` (item 31), so that is the tree's hook. Three `UnbindAction` calls and one disconnect.
+
+Boot line: `[Steer] mounted speed=25 studs/s actions=SteerLeft,SteerRight,SteerThumbstick`.
+
+### `STEER_SPEED = 25` and the pickups
+
+At 25 studs/s the belt's 173 studs take **6.9 s** edge to edge, and centre to edge is **3.5 s**; clearing 25 studs of lane (one ball width plus a margin) takes **1 s**, against a closing ball at `BELT_SPEED = 10`. So a player who sees a contact a second out can dodge one ball, not two - a choice with a cost rather than a strafe. `50` halves every time and turns the belt into a slalom; `10` cannot clear a lane in the time a collision gives.
+
+`PICKUP_MAX_COUNT` **12 -> 20**: with the sway gone, what makes steering matter is how often a reason to cross arrives. One pad per `4,800` square studs becomes one per `2,880` - a target roughly every 1.5 s of belt travel rather than 2.5. The `[Pickup] spawned ... placed=<n> requested=<n>` line reports the count, and `placement shortfall` reports it if 20 cannot be placed clear.
+
+### Two trades, stated
+
+1. **Bots and `Debug#N` bodies sit still laterally.** They have no `UserId` in the map, so their axis is 0 and they hold their lane while their speed decays. Before this round they swayed. **A still field can read as an empty one**, and the lever for that is bot AI (a periodic small steer), not a sine wave. Named here so the next round has the list.
+2. **The touch buttons are the engine's own.** `createTouchButton = true` gives one Roblox-default square per action, placed by `SetPosition(UDim2(0, 40, 1, -140))` and `(0, 160, 1, -140)`. They are not chunky, and that is the next round's work if they read as foreign.
+
+### Where this prompt was wrong
+
+1. **`BindAction` returns `void` in the installed typings**, not a boolean, so "`BindAction` returns whether it is bound" has no reader here.
+2. **"Delete the `carriedLateral` zeroing line - verify whether it still applies"** - it does, and it is the mechanism that makes steering be a *set* rather than an *add*. Kept, and the docblock now says why for the steering case rather than for the sway's.
+3. **"`stepBallSpeeds`'s docblock is rewritten in place"** - `stepBallSpeeds` had no docblock; the text above `holdBodies` belongs to `holdBodies`. A new docblock was not invented for the method; the section that mattered (the lateral axis) is inline at the write, where it is read.
+4. **"a `[Spawner] steer` line when an axis is stored for the first time in a round"** - "first time" is only meaningful once the map is cleared per round, which the map deliberately is not. Implemented as "first non-zero axis reported per player per round", with `steerLogged` cleared in `setRoundActive(true)`.
+5. **"`SWAY_*` grep is 0"** conflicts with "the old reasoning is not deleted". Resolved by keeping the reasoning and naming the constants in prose only.
+
+### Studio-only
+
+Whether 25 studs/s reads as a dodge or as a slide; whether the 0.2 deadband suits the testers' controllers; whether the auto-created touch buttons land where `SetPosition` asked and whether one of them is the thumbstick's (it should not be - `false`); whether a field with no sway reads as "the players are in charge" or as "bots sit still"; and whether 20 pads can be placed, which the shortfall line answers.
+
+**The one thing a playtest settles:** whether "got boring" is answered by control alone. If it is not, the two levers are **bot AI** first (bots steer like players) and **denser pickups** second (`PICKUP_MAX_COUNT` up again, or a smaller play area). Both are out of scope here and named so the next prompt has them.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 545 passed in 41 files** (unchanged - the model has no pure surface and the new controller is not collected); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all four touched files (`viewport.ts` is the known pre-existing failure); `grep "\u[0-9a-fA-F]{4}" src` = 0; `flamework.build` regenerated and now lists `steer-controller@SteerController` (the file is ignored by git, so it does not appear in `git status`).
+## 221 - The sway comes back, for bots only
+
+Item 220 removed the sway from every ball. That was right for players - a sine wave over a player's input is two writers to one axis - and wrong for bots, which have no input to fight and then had no lateral motion at all. This round splits the one axis by owner.
+
+### The five constants, quoted from `git show HEAD:src/shared/tuning.ts`
+
+```
+export const SWAY_FREQUENCY_HZ = 0.1;
+export const SWAY_FREQUENCY_JITTER = 0.3;
+export const SWAY_AMPLITUDE = 2;
+export const SWAY_PHASE_JITTER = math.pi;
+export const SWAY_TRACK_SECONDS = 4;
+```
+
+`HEAD` is `490d4e5`, the commit before item 220's working-tree removal, so these are the values the game shipped with through items 107/151/153. Their docblocks are restored in place, rewritten to say what they govern **now**: a bot's ball, not every ball.
+
+### The state, and the seed
+
+```ts
+private readonly botSway = new Map<BasePart, { phase: number; elapsed: number; omega: number }>();
+private botSwaySpawns = 0;
+
+private seedBotSway(ball: BasePart): void {
+    const multiplier = 1 + (math.random() * 2 - 1) * SWAY_FREQUENCY_JITTER;
+    const stride = this.botSwaySpawns * ((math.sqrt(5) - 1) / 2);
+    this.botSwaySpawns++;
+
+    this.botSway.set(ball, {
+        phase: ((math.random() + stride) % 1) * SWAY_PHASE_JITTER,
+        elapsed: 0,
+        omega: 2 * math.pi * SWAY_FREQUENCY_HZ * multiplier,
+    });
+}
+```
+
+Renamed from `lateral` to `botSway` because the name now states the membership rule: **only bodies with no positive `OwnerUserId` are in it.** Seeded at `spawnBall` under `if (owner.userId <= 0)` - a negative id is a `Debug#N` bot - and unconditionally for a decoy twin, which carries no owner attribute at all (item 77). Deleted in `destroyBall` and `pruneDestroyedBalls`, the same two sites as before.
+
+The phase draw is the stride, not a plain uniform draw, and that is item 153's fix kept intact: a uniform sample put seven balls inside a `3 s` window of a `10 s` cycle once, which the eye reads as a synchronised field. The golden-ratio stride spreads `n` phases as far apart as possible, and the per-spawn rotation keeps the pattern from repeating every boot.
+
+### The lateral write
+
+Before (item 220, every body steered):
+
+```ts
+const ownerId = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);
+const axis = typeIs(ownerId, "number") ? (this.steerAxes.get(ownerId) ?? 0) : 0;
+const steer = across.mul(axis * STEER_SPEED);
+```
+
+After (one source per body, chosen by the owner):
+
+```ts
+const ownerId = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);
+const isPlayerBody = typeIs(ownerId, "number") && ownerId > 0;
+const localZ = frame.PointToObjectSpace(ball.Position).Z;
+const lateralRate = isPlayerBody
+    ? (typeIs(ownerId, "number") ? (this.steerAxes.get(ownerId) ?? 0) : 0) * STEER_SPEED
+    : this.botSwayRate(ball, localZ, dt);
+const steer = across.mul(lateralRate);
+```
+
+`botSwayRate` is the item-107 expression verbatim, per body per tick:
+
+```ts
+state.elapsed += dt;
+const angle = state.omega * state.elapsed + state.phase;
+const targetZ = math.sin(angle) * SWAY_AMPLITUDE;
+return SWAY_AMPLITUDE * state.omega * math.cos(angle) + (targetZ - localZ) / SWAY_TRACK_SECONDS;
+```
+
+Everything after it in the write is untouched: `sub(across * carriedLateral)`, then `+ steer`, `+ lateralShove`, `+ alongShove`. `carriedLateral` matters twice as much now - it is what makes *either* source a **set** rather than an **add**, so a swaying bot is not an accumulating oscillator and a steering player is not riding a physics push.
+
+### The sample line
+
+```
+[Ball:N] sample ... localZ=<n> mode=bot swayPhase=<n> velocity=...      (bot, decoy)
+[Ball:N] sample ... localZ=<n> mode=player steerAxis=<n> velocity=...   (player)
+```
+
+**One or the other, never both**, and `mode=` says which. Printing both would leave a reader guessing which number is driving the ball, and a body whose owner had not replicated yet would show a stale axis beside a sway it is not getting.
+
+### What could not be restored cleanly
+
+Nothing was lost. The deleted code was in the working tree's diff, not only in memory: the constants and the `newSway` body came back from `HEAD` verbatim, and the sway branch's structure was still legible from item 220's replacement block. Two things were rewritten rather than reverted:
+
+- The **lateral write** is now one expression for both sources instead of a `if (lateralState !== undefined && beltFrame !== undefined)` guard. The old guard meant "this body has sway state", which is now the same question as "this body is a bot" but derived from the owner instead of from the map - so a player body that somehow had an entry would still steer, and a bot whose attribute arrives late would sway rather than fall through to the along-only write.
+- The **`localZ`** read moved out of the sway branch to the body of the loop. It is one `CFrame` transform on a frame the tick already holds, and a branch to save it costs more than it saves.
+
+### Where item 220's prompt was wrong
+
+It was not. Item 220 asked for the sway to be removed, this round asks for it back for bots, and both are the same argument applied to a different population: **a wave over a player's input is interference; a wave over a body with no input is the only motion it has.** The reversal is recorded in `STEER_SPEED`'s docblock, which previously read "the sway is gone" and now reads "gone for player bodies, restored for bots".
+
+### Studio-only
+
+- Whether swaying bots beside steering players read as a live field or as two unrelated behaviours on one belt. This is the whole point of the round and the one thing a screenshot answers.
+- Whether `0.1` Hz still reads right now that `PICKUP_MAX_COUNT = 20`: a denser pad field means a swaying bot wanders across pickups it cannot want, which is fine visually but may make bots look like they are collecting by accident.
+- Whether a `decoy` twin's sway gives it away as a fake. It should - a twin that sways beside a steering parent is visibly not the same object - and that is a *feature* of this change as much as a cost.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 545 passed in 41 files** (unchanged - no pure surface touched); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on both touched files; `grep "\u[0-9a-fA-F]{4}" src` = 0; `grep -rn "SWAY_" src` = 30 matches, all of them the five restored constants, their import and their three read sites; `flamework.build` untouched - no controller added or removed.
+## 222 - A slow brake and a jump, on the two wires the steering already had
+
+Two controls, both landing in the tick loop that already owns the ball's velocity: `slow` drains `BALL_SPEED` as a term in the same sum the powers use, `jump` writes a Y impulse by the pop's own mechanism. The user's constraint that decided the shape is that `JUMP_IMPULSE` is **its own literal**.
+
+### The two numbers that must not be one
+
+`BALL_COLLISION_POP_UPWARD_SPEED = 80` (`tuning.ts`, the constant `onBallCollision`'s pop reads, `server/powers/index.ts:1069`). `JUMP_IMPULSE = 80` is a **separate literal** and its docblock names the twin and says why:
+
+> a designer retuning the pop's strength must not silently retune the jump, and vice versa. The jump is a player's input and the pop is a collision outcome, so they are different decisions that happen to agree today.
+
+The jump's write is the pop's write, byte for byte - reconstruct from the current vector, replace `Y`, leave `X` and `Z`:
+
+```ts
+const jumping = ball.AssemblyLinearVelocity;
+ball.AssemblyLinearVelocity = new Vector3(jumping.X, JUMP_IMPULSE, jumping.Z);
+```
+
+same as `writePopY(ball, currentVelocity, y)` in `server/powers/index.ts`.
+
+### The wire
+
+| Message | Payload | When |
+| --- | --- | --- |
+| `SteerAxis` | `Vector2(lateral, slow)` | on change of either axis by > `AXIS_SEND_THRESHOLD` |
+| `Jump` | none | on `Begin`, edge-triggered |
+
+**Two axes on one message** because they are one thing - this player's continuous ball input - read together and sent from the same compare. **`Jump` is separate because it is an event**, not a state: a value channel would have to model "pressed since the last tick".
+
+`steerAxes` widened from `Map<number, number>` to **`Map<number, { lateral: number; slow: number }>`** - one entry, one delete, one place that answers "is anything held".
+
+### The server
+
+```ts
+const ownerId = ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE);     // read once, used twice
+const isPlayerBody = typeIs(ownerId, "number") && ownerId > 0;
+const axes = isPlayerBody && typeIs(ownerId, "number") ? this.steerAxes.get(ownerId) : undefined;
+const slowAxis = axes === undefined ? 0 : axes.slow;
+...
+const slowDrain = -slowAxis * SLOW_DRAIN_RATE * dt;
+const advanced = math.clamp(decayed + delta + slowDrain, BALL_SPEED_MIN, BALL_SPEED_MAX);
+```
+
+**The slow term is in the same sum as `tickDelta`, not a second clamp**, so the powers' delta and the player's brake land in one expression and one `math.clamp` applies to the total - one writer per tick.
+
+The jump is queued by the handler and applied in the tick, **after** the velocity write, so this function cannot undo the impulse on the frame it fires:
+
+- `queueJump` refuses when `!roundActive` and when `now - last < JUMP_COOLDOWN_SECONDS`, **silently** both times - a refused press is the normal outcome of mashing. An accepted press prints `[Spawner] jump player=<name>`.
+- `jumpQueue` is cleared in `setRoundActive(true)`; `lastJumpAt` is **not** - a jump from the end of one round can refuse the first press of the next for up to `0.9 s`, which is the honest reading of "one jump per 0.9 s per player", and clearing it would allow two jumps inside a second across a boundary.
+- Both maps are cleared on `PlayerRemoving`.
+
+`[Spawner] steer` now reads `lateral=<n> slow=<n>`.
+
+### The client
+
+Five `ContextActionService` bindings: `SteerLeft` (`A`/`Left`/`DPadLeft`), `SteerRight` (`D`/`Right`/`DPadRight`), `SteerThumbstick` (`Thumbstick1`, both axes), `SlowDown` (`S`/`Down`/`DPadDown`), `Jump` (`Space`/`ButtonA`).
+
+- `currentSlow()` negates the stick's `Y` and clamps at `0`: pulling the stick toward the player is "back off", and there is nothing to speed up beyond what the game already does.
+- `pushAxis()` sends when **either** axis moved by more than `AXIS_SEND_THRESHOLD`.
+- The `Playing` reassert sends both and prints `[Steer] reassert axis=<x>,<y>`.
+- **No client-side cooldown.** The server owns the rate; a guard here would put the only limit on the side of the wire a hack can delete.
+- Boot line: `[Steer] mounted speed=<n> slowDrain=5 jumpImpulse=80 jumpCooldown=0.9s actions=SteerLeft,SteerRight,SteerThumbstick,SlowDown,Jump`.
+- Touch buttons: `▼` (slow) at `(1,-160,1,-140)`, `▲` (jump) at `(1,-160,1,-240)`.
+
+### The arithmetic
+
+**Slow.** `BALL_SPEED = 10`, `SLOW_DRAIN_RATE = 5`/s: the tick removes `0.1*dt + 5*dt` while held, so `BALL_SPEED` reaches `BALL_SPEED_MIN` in `10 / 5.1 = 1.96 s`. From the `BALL_SPEED_START` ceiling of `12`: `12 / 5.1 = 2.35 s`. `relative = BALL_SPEED - BELT_SPEED` goes from `0` to `-10`, so the world along-belt velocity goes from `0` to `+10` toward the exit **at the same time the spin slows**, which is exactly the "rolling slower while the belt moves under it" reading. Distance lost over the full 2 s is the integral of `10 - BALL_SPEED(t)` - `int_0^1.96 (5.1 t) dt = 9.8` studs, roughly half a ball width, and then `10`/s for as long as it is held.
+
+**Jump.** `2 * 80 / 196.2 = 0.816 s` airtime, apex `80^2 / (2 * 196.2) = 16.3` studs. `JUMP_COOLDOWN_SECONDS = 0.9 > 0.816`, so no double jump at the shipped impulse.
+
+### The `STEER_SPEED` docblock was stale, and is fixed
+
+The constant is `45`; its docblock still said `25 studs/s`, `6.9 s` and `3.5 s` from the round that introduced it. Corrected to `3.8 s` edge to edge, `1.9 s` centre to edge, `0.56 s` for a lane change, plus a line saying the arithmetic is stated for the value that ships. This is the style guide's own pitfall (§5.7) and it sat two lines from where the new constants were added.
+
+### Trades, stated
+
+1. **Bots and decoys do neither.** No positive `OwnerUserId`, so no `steerAxes` entry: a decoy never slows and never jumps. A controllable decoy would look identical to a real ball under player input, which would make the `decoy` power stronger *and* more confusing - out of scope, named.
+2. **Touch buttons are the engine's own**, now four of them. `SetPosition` "sets the position of the button **within the `ContextButtonFrame`**" per the typings, and the docs do not say whether the `UDim2` is the button's top-left or its centre - so the four numbers are chosen to be on screen under **either** reading, and the pair is separated by `100` px against a `70` px default button. A screenshot is what confirms it.
+3. **No client-side jump cooldown.** Named above.
+
+### Where this prompt was wrong
+
+1. **"`stepBallSpeeds` ... item 220"** - the lateral write had already moved on in item 221: player bodies steer, bot bodies sway. The slow axis had to be threaded through the same owner read, so the prompt's sketch of a single `steerAxes` lookup would have dropped the sway branch.
+2. **"`jumpQueue` cleared at `setRoundActive(false)`"** (Part 3) contradicts its own acceptance criterion 7 (`setRoundActive(true)`). Clearing on `true` is the one that matters - the queue can only be filled while `roundActive` is true - and that is what ships.
+3. **"`steerAxes` ... `storeSteerAxis(player, lateral, slow)`"** - the handler signature is `(player, lateral, slow)` because a `RemoteEvent`'s arguments arrive as separate values; the prompt's "one map, one entry" is what shipped, on a `Vector2` payload rather than a `Vector2`-typed handler.
+4. **"`SetPosition` ... top-left vs centre"** - the typings say only "within the `ContextButtonFrame`"; the docblock says that and states that the positions are safe under both readings rather than asserting one.
+
+### Studio-only
+
+Whether `SLOW_DRAIN_RATE = 5` reads as a brake you hold for a second or as a lever that kills the ride (2 s to zero is a full stop, so it is a commitment); whether an 80-stud impulse reads as a hop or a launch; whether `0.9 s` suits the testers' thumbs; whether four auto-created buttons fit a phone without overlapping the engine's own jump button (which exists while a character has a `Humanoid`); whether `▼`/`▲` render at a readable size on the button; and whether the thumbstick's `Y` for slow fights anything else reading that stick - item 161 disabled the `PlayerModule` controls, so nothing else should be.
+
+**The one thing a playtest settles:** whether four inputs (left, right, slow, jump) change the feel the way the playtester wanted. The log lines for that are the boot line's two new numbers, `[Spawner] steer ... slow=<n>` and `[Spawner] jump player=<name>` - all three readable, none a guess.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 545 passed in 41 files** (unchanged); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all four touched files; `grep "\u[0-9a-fA-F]{4}" src` = 0; `flamework.build` unchanged - no controller added, and the file keeps its name (the class docblock records why).
+## 223 - The steer payload was a `Vector2` against a two-number handler, and `W` was never bound
+
+Two defects from item 222, both reported by the user in one session: **left/right did nothing at all**, and **`W` did nothing**. The session log is the proof for the first and the shape of the proof for the second.
+
+### Left/right: a remote whose two ends disagreed about the shape of the call
+
+| | item 222 shipped |
+| --- | --- |
+| client | `remote.FireServer(new Vector2(lateral, slow))` - **one** argument |
+| server | `OnServerEvent.Connect((player, lateral: unknown, slow: unknown) => ...)` - **two** |
+
+A `Vector2` arrives as the *first* argument, so `slow` was `nil`, `typeIs(lateral, "number")` was false for a `Vector2`, and `storeSteerAxis` returned on its first line. **Every steer message was dropped, silently** - no warning, no log line, nothing to grep.
+
+The log's signature is exact:
+
+- **no `[Spawner] steer` line anywhere in the session** - the handler never got past validation;
+- **`[Spawner] jump player=prospeed1` twice** - the jump remote carries no payload, so it worked, which proves the input, the bindings and the round were all fine;
+- **`[Steer] reassert axis=0,0`** once - the client was sending; only the server was discarding.
+
+**The fix is `FireServer(lateral, slow)`.** `remotes.ts`'s docblock said `Vector2` and is corrected: a remote's arguments carry no types across the wire, so the only contract is how many there are and what order they come in - and nothing in the language checks it. The docblock now states the shape in the place both ends read.
+
+### `W`: the binding was `S`
+
+Item 222's brief said `W`/`Up`/`DPadUp` for the slow axis; the implementation bound `S`/`Down`/`DPadDown`. `W` was bound to nothing, so "hold W to drift back toward the origin" did nothing at all - and the *other* half of the user's report is that same defect named from the mechanic's side.
+
+Now bound to **`W`/`Up`/`DPadUp` with `S`/`Down`/`DPadDown` kept as alternates**: two physical keys per direction on one action refuses nobody, and a player who learned either during the last hour keeps it.
+
+### Two things the log mislabelled, both fixed
+
+The sample line chose `mode=` from *"is there an axis entry for this player"* rather than *"is this a player body"*. A player's ball with no axis reported - which is every player's ball when the messages are being dropped - printed `mode=bot swayPhase=none`. **That is what made a dropped remote look like a correctly-behaving bot**, and it is the reason the defect read as "the game ignores my keys" rather than "the wire is broken".
+
+```
+before: localZ=63.5 mode=bot swayPhase=none velocity=(0,-49.05,-0.244)      ← the player's own ball
+after:  localZ=63.5 mode=player steerAxis=0 slowAxis=0 velocity=...          ← honest: no axis received
+```
+
+The tick had the same mistake: `axes === undefined ? botSwayRate(...) : axes.lateral * STEER_SPEED` made a *player* body fall through to the **bot** branch when its axis was missing. That branch returns `0` for a body with no sway state, so the symptom was "no steering" rather than anything naming the cause. Chosen by the body now:
+
+```ts
+const lateralRate = isPlayerBody
+    ? (axes === undefined ? 0 : axes.lateral * STEER_SPEED)
+    : this.botSwayRate(ball, localZ, dt);
+```
+
+One discriminant for both readers, and the same rule item 221 established: a player body steers or does nothing; only a body with no player behind it can sway.
+
+### What this round did not change
+
+`JUMP_IMPULSE`, `SLOW_DRAIN_RATE`, `JUMP_COOLDOWN_SECONDS`, `STEER_SPEED`, the cooldown, the queue, `lastJumpAt`, the four touch buttons, the sway, the powers, the pickups, the shove, and every other controller. The jump worked and still works, which is the evidence that none of the surrounding machinery was at fault.
+
+### The lesson worth keeping
+
+**A remote is an untyped boundary in both directions, and this tree has now lost a whole control to a mismatch on it.** The two ends are one edit apart, nothing checks them, and a rejection inside a validating handler is silent by design (it must be - a `RemoteEvent` is spammable). The one place that could have caught it is the log: `[Spawner] steer` fires on the first non-zero axis *because* "the ball does not steer" has two causes that look identical. **It printed nothing, and that absence was the signal** - the handler's own docblock says so, and this round is the first time the signal was read that way.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 545 passed in 41 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all three touched files; `grep "\u[0-9a-fA-F]{4}" src` = 0; emitted Luau carries `FireServer(lateral, slow)`, `Enum.KeyCode.W`, and no `Vector2.new(lateral, slow)`; `flamework.build` unchanged.
+## 224 - Every steer binding Sinks the input, so the character could not walk
+
+The report was "I'm frozen in place" - **in the lobby, as the player character, not the ball.** A one-line cause, and it was introduced by item 220/222 with nothing in the log to show for it.
+
+### The mechanism
+
+`ContextActionService:BindAction` handlers are on a priority stack, and **a handler that returns nothing Sinks the input** - no other bound action under it is processed. The installed typings say it directly:
+
+> `Enum.ContextActionResult.Sink` - *"If `functionToBind` from `ContextActionService:BindAction()` returns `ContextActionResult.Sink`, the input event will stop at that function and no other bound actions under it will be processed. **This is the default behavior if `functionToBind` does not return anything** or yields in any way."*
+
+The default character controller is a set of bound actions on that same stack, at a lower priority. The steer controller bound `A`/`Left`/`DPadLeft`, `D`/`Right`/`DPadRight`, `W`/`Up`/`DPadUp`/`S`/`Down`/`DPadDown`, `Thumbstick1` and `Space`/`ButtonA`, and **every one of its handlers returned nothing** - so all five sank, and the character controller never saw a movement key again for the whole session.
+
+Nothing errored. Nothing logged. `[CharacterFreeze] mounted phase=Intermission competing=false frozen=false` said, correctly, that the freeze controller was not the cause - which is why the symptom read as "the game is frozen" rather than "a script is eating my keys".
+
+**Before item 220 nothing in this tree bound `WASD`**, so this class of bug had never been possible here. It is not a regression in anything that worked; it is a new failure mode introduced by the first input controller.
+
+### The fix
+
+Every handler returns `Enum.ContextActionResult.Pass`:
+
+```ts
+(_name, state) => {
+    this.leftDown = state === Enum.UserInputState.Begin || state === Enum.UserInputState.Change;
+    return Enum.ContextActionResult.Pass;
+},
+```
+
+The controller still reads the key; the input continues through to everything below. Six `return` statements across the five handlers (the thumbstick has two paths), verified in the emitted Luau.
+
+**No conflict of intent.** The only phase where both the ball controls and the character controller would react is `Playing`, and there the character is already held still: `CharacterFreezeController` zeroes `WalkSpeed` and `lockControls` disables the module. So the lobby walks and the race steers, which is the intended split.
+
+### Why this was not caught by any check
+
+- **The build cannot see it.** `functionToBind` is typed `=> void` in the installed typings, so returning nothing type-checks perfectly - and so does returning a value, because TypeScript allows a value-returning function where a `void`-returning one is expected.
+- **The tests cannot see it.** It needs a live `ContextActionService`.
+- **The log could not see it.** A sunk key is not an event.
+- **The steer line proved the input *was* arriving at this controller** (`[Spawner] steer player=prospeed1 lateral=1 slow=0`), which is exactly the reading that makes the bug invisible: everything this file does works. What was broken was what it *prevented*.
+
+The one artefact that survives: `bindActions`' docblock now states the rule and quotes the typings, and the class docblock's "what this is not" gains **"not an owner of the keys"**. A sixth binding added later inherits the note rather than rediscovering the symptom.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 545 passed in 41 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean; `grep "\u[0-9a-fA-F]{4}" src` = 0; emitted Luau carries six `Enum.ContextActionResult.Pass` returns across the five handlers; `flamework.build` unchanged.
+## 225 - The slow control was described as moving the ball toward the origin. It moves it away, and always did.
+
+A correction to prose, not to behaviour. Item 222's docblocks and that round's report described the brake as carrying the ball "backwards", and one line in `steer-controller.ts` said it made the ball "drift back toward the origin". The user caught it: braking moves the ball **further from where it spawned**.
+
+### The axis, quoted from the tree rather than re-derived
+
+`BALL_SPEED_DECAY_RATE`'s docblock has stated this since the model was written:
+
+> `BALL_SPEED < BELT_SPEED` -> negative -> the ball is dragged **backward, toward the exit edge**.
+> `BALL_SPEED > BELT_SPEED` -> positive -> the ball drifts **forward, toward the spawn edge**, i.e. away from the exit.
+
+So **low speed is the losing direction** and a pickup is what buys ground back. Holding `W` drains `BALL_SPEED`, so the ball travels toward the exit at up to `BELT_SPEED` - away from the spawn, not toward it. Item 222 mentioned both readings in different sentences ("carried toward the exit" in one place, "travelling backwards" in another) and only the first was right; the second is where the inversion came from, because "backwards" in this tree's own vocabulary means *toward the exit* while in ordinary speech it means *back where you came from*.
+
+Confirmed against the user's own log from the first playtest: `BALL_SPEED` fell `9.756 -> 0` while the body's belt-local `X` ran `-109 -> -65`, with the spawn at about `-130` - monotonically away from the spawn.
+
+### The two lines changed
+
+| file | before | after |
+| --- | --- | --- |
+| `steer-controller.ts` | "the one control that makes the ball drift back toward the origin" | "the one control that **costs ground**: dropping `BALL_SPEED` below `BELT_SPEED` carries the ball toward the exit edge, further from where it spawned" |
+| `tuning.ts` (`SLOW_DRAIN_RATE`) | "the ball is driven backwards at the full `BELT_SPEED`" / "travelling backwards at belt speed" | "moves the ball **toward the exit edge** - away from where it spawned, not back toward it" / "travelling toward the exit at belt speed", with a pointer to `BALL_SPEED_DECAY_RATE` for the axis statement |
+
+**No code changed.** `slowDrain` is still `-slowAxis * SLOW_DRAIN_RATE * dt` in the same sum as `tickDelta`, and the along-belt write is still `right.mul(-relative)`.
+
+### The rule this leaves behind
+
+**"Backward" is banned from this file's prose about the along-belt axis.** The tree uses it to mean *toward the exit* (the ball is knocked "backward" off the back of the belt), while a reader's first reading is *back toward the spawn* - and the two are exact opposites on the one axis where the sign decides whether the player is winning. Every description now says **toward the exit edge** or **toward the spawn edge** and nothing else.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 545 passed in 41 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on both files; `grep "\u[0-9a-fA-F]{4}" src` = 0; `flamework.build` unchanged.
+## 226 - Every ball has a colour of its own
+
+The ball had a **name** and a **rarity** and no colour. At the camera's 260-390 studs the name is unreadable and four rarity colours cannot separate ten balls, so the belt read as ten identical spheres. This round gives each ball id a colour and puts it on the body, the markers, and every swatch in the UI.
+
+### The mask question, answered from the tree rather than from the asset
+
+**The six `Texture` instances have never rendered on a curved primitive.** `attachBallMarkers`' own docblock says so, and it is why the markers exist:
+
+> *"A sphere has no features, so a sphere rolling at belt speed is pixel-identical to a sphere sitting still. The texture route has already cost two rounds and still does not render on a curved primitive. Ordinary parts cannot fail to render."*
+
+So `Part.Color` is **not** masked today: what a player sees is the part's own fill. That is outcome (1) of the prompt's three - neutral/invisible texture - so **the textures were left alone**. Deleting them would change no pixel, and would touch the decoy path and the phantom's `copyTextures` for nothing.
+
+**The residual risk is named in `ball-color.ts`:** if that asset ever starts drawing it covers `Color`, and the fix then is to delete the textures, not to add colours somewhere else. `color=#RRGGBB` on `[Ball:N] spawn` is what makes that diagnosable on the next run instead of by eye.
+
+Verified against source: `spawnBall` set **no** `Color` at all, so every body was a fresh `Part`'s default `Color3.fromRGB(194, 194, 194)` - one grey for ten ball ids.
+
+### The table
+
+`shared/ball-color.ts` - the sibling of `models.config.ts`, same key space, same cross-check. Ten entries, all `**Placeholder.**`:
+
+| ball | RGB | luma |
+| --- | --- | --- |
+| `bully_ball` | 214, 64, 64 (red) | 96 |
+| `bouncy_ball` | 86, 200, 96 (green) | 168 |
+| `ghost_ball` | 200, 228, 255 (pale blue) | 219 |
+| `sprinter_ball` | 104, 224, 104 (lime) | 190 |
+| `heavy_ball` | 124, 110, 140 (muted violet) | 115 |
+| `decoy_ball` | 240, 140, 48 (orange) | 155 |
+| `magnet_ball` | 228, 100, 186 (pink) | 133 |
+| `rocket_ball` | 250, 214, 56 (yellow) | 210 |
+| `recycle_ball` | 56, 208, 216 (cyan) | 176 |
+| `eclipse_ball` | 88, 72, 200 (indigo) | 85 |
+
+`BALL_COLOR_FALLBACK = Color3.fromRGB(240, 240, 240)` in `tuning.ts` - near-white, deliberately not a palette member, and unreachable for any `BALL_POOL` id because the spec asserts a colour for all ten.
+
+**The closest luminance pair is `bouncy_ball` (168) against `recycle_ball` (176) - a gap of about `0.032` of full scale, i.e. 8 of 255.** Green against cyan, roughly 60 degrees of hue apart, so they separate on hue at any distance a phone can resolve; but it is the thin margin in the set and the spec holds a `>= 0.03` floor there. A retune of either should move them apart.
+
+### The write, in three places
+
+```ts
+// spawnBall, where the pick is known
+ball.Color = colorForBall(chosenBallId ?? "") ?? BALL_COLOR_FALLBACK;
+
+// spawnDecoy - and it was NOT copied before
+decoy.Color = parent.Color;
+
+// attachBallMarkers - read off the body, not re-derived from an id
+const color = ball.Color;
+```
+
+**The decoy is the one real bug found:** it copied `Shape`, `Size` and `Material` by hand and never copied `Color`, which did not matter while every body was the default grey and would now make the twin the only ball on the belt in the wrong colour. The marker change reads `ball.Color` rather than an id for the same reason - a decoy has no `ChosenBallId` by design, so the body is the one source that is right for a real ball and a twin without a branch.
+
+**`MARKER_POLE_COLOR` and `MARKER_RING_COLOR` are gone.** The markers take the ball's colour, so the two constants had no readers.
+
+**The cost, stated because it is a real trade:** the old pair was deliberately two hues so the band could be told from the poles. That distinction is now carried by **shape** and by **Neon-against-lit-Plastic brightness**, not by hue. Identity at distance over internal contrast - and a screenshot is what decides whether it was the right way round.
+
+Item 98's phantom copies `phantom.Color = ball.Color` at `ball-render-controller.ts:180` and needed no change.
+
+### The five UI sites
+
+Every one keeps **rarity on the ring and the art wash** and takes **the ball's colour on the swatch** - the same split the store's cards already used, so a card still says "epic" at a glance and "rocket" by its colour.
+
+| file | site | before | after |
+| --- | --- | --- | --- |
+| `picker-controller.ts` | card ball | `ball.BackgroundColor3 = tint` | `colorForBall(ballId) ?? tint` |
+| `reveal-controller.ts` | face swatch | `ball.BackgroundColor3 = tint` | `colorForBall(ballId) ?? tint` |
+| `shop-controller.ts` | `buildPrizeCard` | `ball.BackgroundColor3 = tint` | `colorForBall(ballId) ?? tint` |
+| `shop-controller.ts` | `buildPrizeCatalogCard` | `ball.BackgroundColor3 = tint` | `colorForBall(ballId) ?? tint` |
+| `shop-controller.ts` | `buildBallCard` (inventory) | `pip.BackgroundColor3 = tint` | `colorForBall(ball.id) ?? tint` |
+| `shop-controller.ts` | `buildFusionRow` | `pip.BackgroundColor3 = tint` | `colorForBall(ball.id) ?? tint` |
+| `shop-controller.ts` | detail preview | `this.detailBall.BackgroundColor3 = tint` | `colorForBall(ball.id) ?? tint` |
+
+**Five became seven.** The prompt listed four fill sites plus the leaderboard; the inventory also has a **fusion material row** and a **detail preview**, both of which draw a ball. Leaving them rarity-tinted while the card beside them showed the ball's colour would have been two answers to one question, so they changed too.
+
+`addChunkyRing(..., tint, ...)`, the art washes (`art.BackgroundColor3 = tint`) and `[Spawner] steer`-style tier text (`value.TextColor3`, `fusionMaterialLabel.TextColor3`) all stay rarity. **`theme.colors.rarity` is byte-identical - never touched.**
+
+**The leaderboard did not change.** Its ball reference is text (`ballName`), tinted `textPrimary`, with no rarity colour to convert.
+
+### The spec
+
+`shared/ball-color.spec.ts`, five cases following `ball-tables.spec.ts`:
+
+1. every `BALL_POOL` id resolves a colour (with the non-vacuous tripwire);
+2. no two balls share a colour - compared by `ToHex()`, because `toBe` on a `Color3` userdata can compare identity and let two equal colours pass as distinct;
+3. no entry names a ball outside `BALL_POOL`;
+4. the ten separate by luminance with a `>= 0.03` floor (Rec. 709 luma);
+5. `colorForBall("unknown_id")` is `undefined`.
+
+**Tests: 545 -> 550 in 41 -> 42 files.**
+
+### Where this prompt was wrong
+
+1. **"The three markers ... they are the strongest visual distinguishing feature a ball has at distance, and they should carry the per-ball colour too."** They now do, but the reasoning is shaky: at 300 studs a 20-stud ball subtends roughly 58 px in a 1061-px viewport, so the **body fill** is the strongest feature and the markers are a texture on it. Tinting them the same colour trades their internal contrast away for identity that the fill was already carrying. Kept because it was asked for and because Neon-versus-Plastic keeps a brightness edge - but it is the first thing to revert if the balls read as blobs.
+2. **"`Part` default is `Color3.fromRGB(194, 194, 194)`"** - correct, and the code confirmed it was never overwritten.
+3. **"`BallRenderController` ... if it does not [copy Color], that is a phantom-side fix"** - it does, at line 180.
+4. **"`spawnDecoy` ... it likely does [copy Color]"** - it did not. That was the one genuine bug in the brief's assumptions.
+5. **Part 5's five sites** undercounted by two; see above.
+6. **"no change to ... `attachBallTexture`"** - honoured, and the prompt's own three-outcome framing expected a texture decision that turned out not to be needed.
+
+### Studio-only
+
+Whether ten colours read as ten balls at 260-390 studs, and in particular whether **`heavy_ball` (muted violet, luma 115) survives** against the charcoal panel/belt rather than sinking into it; whether a Neon band and two Neon dots in the **same colour as their own ball** still read as markers rather than merging into it; whether the swatch colour against a rarity-coloured art wash reads as deliberate rather than as a mistake; and whether the green/cyan pair collides on a phone.
+
+**The one thing a screenshot settles:** whether a viewer can name the ball from its colour alone. If two of the ten still collide on a phone, the pair is `bouncy_ball`/`recycle_ball` and the retune is to push `recycle_ball` toward a bluer cyan (`56, 208, 216` -> `40, 190, 240`) or `bouncy_ball` toward a deeper green.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 550 passed in 42 files** (545 + 5); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all seven touched files (`viewport.ts` is the known pre-existing failure); `grep "\u[0-9a-fA-F]{4}" src` = 0; emitted Luau carries `ball.Color`, `decoy.Color = parent.Color`, `color=#` and `colorForBall` in all three UI controllers; `flamework.build` unchanged.
+## 227 - A `Trampoline`-tagged part bounces a player character
+
+The lobby is where a player stands for 30 s of `Intermission`, 5 s of `PostGame`, and — for a late joiner or an eliminated competitor — up to 120 s of `Playing`. A trampoline is the smallest interaction that turns standing into doing something, and the tree already had every part of it except the bind.
+
+### The tag, and why the part can be a `MeshPart`
+
+`TAGS.trampoline = "Trampoline"` — one constant in `tags.ts`, and the literal appears **only there**. **Every collection point tests `IsA("BasePart")`**, and the installed typings put `MeshPart -> TriangleMeshPart -> BasePart` (`None.d.ts:35858`, `:35807`), so a `Part`, a `MeshPart`, a `WedgePart` or a `UnionOperation` all bind identically. The two properties that decide whether it fires are the designer's: `CanTouch` on (default) and `CanCollide` deciding whether you stand on it or fall through — a non-collidable `MeshPart` with `CanTouch` on is a trigger-shaped trampoline rather than a bug.
+
+**The service writes no part property.** Not `Size`, `Anchored`, `CanCollide`, `Material`, `Color` or `Transparency`. The part *is* the visual.
+
+### The two constants
+
+| constant | value | arithmetic |
+| --- | --- | --- |
+| `TRAMPOLINE_BOUNCE_VELOCITY` | 100 | airtime `2 x 100 / 196.2 = 1.02 s`, apex `100^2 / (2 x 196.2) = 25.5` studs — about five body heights |
+| `TRAMPOLINE_COOLDOWN_SECONDS` | 1.2 | longer than 1.02 s, so no double bounce |
+
+**The rule between them is one line: `cooldown >= 2 * velocity / Workspace.Gravity`.** Both docblocks say the pair must be retuned together, because a launch of `150` flies for `1.53 s` and a cooldown left at `1.2` would swallow the *next* pad touch after landing rather than allowing a mid-air bounce (a mid-air character is not touching the pad).
+
+### The gate, and the one line that makes it work
+
+`humanoid.ChangeState(Enum.HumanoidStateType.Freefall)` — **`Freefall`, not `Jumping`, and the typings are the reason**:
+
+- `Jumping` — *"lasts only briefly. This state normally transitions into either `Landed`, if on the ground, or `Freefall`, if still in the air."* A character standing on the trampoline **is on the ground**, so `Jumping` resolves straight back to `Landed` and the grounded controller resumes zeroing `Y` before the physics step.
+- `Freefall` — *"the Humanoid is currently freefalling"* — nothing holds the rig to the floor. Landing transitions back to `Landed` on its own.
+
+The velocity write is item 173's pop shape and item 222's jump: `new Vector3(current.X, LAUNCH, current.Z)`, Y only.
+
+**No phase gate, and that is not an omission.** `CharacterFreezeController` already holds a competitor at `WalkSpeed = 0` with `lockControls` while `cameraWantsArena(phase, competing, spectating)` is true, so only the lobby view can walk onto the part. A second gate here would be a copy of a rule the freeze owns.
+
+**No grounded check.** The cooldown is longer than the airtime, which is what a grounded check would have bought, without asking `Humanoid.FloorMaterial` a question that can disagree with the cooldown after a retune.
+
+### The rule and its spec
+
+`src/server/trampoline.ts` — `canBounce(lastBouncedAt, now, cooldown)`, a module rather than a method because a `@Service` cannot be constructed in Jest. `src/server/test/trampoline.spec.ts` pins four cases: never bounced, just inside the cooldown, exactly at the boundary (`>=`, so the boundary is allowed), and past it. **554 tests in 43 files** (550/42 before).
+
+### The trade stated plainly
+
+The trampoline is a **physical toy, not a UI affordance**: it works in lobby view because the character is unfrozen there, and it does not work while the camera is on the arena. That is the existing freeze gate rather than this round's rule — a racing player cannot bounce, a spectator on "Watch Race" cannot bounce, and a player who pressed "Stop Watching" can.
+
+### Where this prompt was wrong
+
+1. **"`Enum.HumanoidStateType.Jumping` … the load-bearing line"** — it is the wrong state for a rig standing on the pad, and the typings' own docstring says why. `Freefall` ships instead. The prompt's fallback (a `LinearVelocity` constraint for one frame) stays named in the docblock as the next thing to try if the launch is still damped on the testers' rigs.
+2. **"`humanoid.ChangeState` … verify `Jumping`, `Freefall`, or both in sequence"** — both is not needed once the right one is chosen; `Freefall` alone.
+3. **"`other.Parent?.FindFirstChildWhichIsA(\"Humanoid\")`"** — kept, and it is what makes a hand or a foot touching the pad bounce too. The alternative (a name check on `HumanoidRootPart`) would miss R6 roots named differently.
+4. **The spec was described as "four cases"** and is exactly four; no change.
+5. **`default.project.json` untouched** — the part is hand-placed, and the project file stays childless under `Workspace`.
+
+### Studio-only
+
+Whether `ChangeState(Freefall)` actually un-grounds the humanoid on the testers' rigs — **the one thing a playtest settles**, and the reason `[Trampoline] bounced <player> at Y=<n> → 100` prints the *before* value: a bounce that fires but does not launch shows `at Y=0` and then no upward motion, which distinguishes "the write did nothing" from "the write never fired". Whether 100 studs/s reads as a trampoline or as a launch; whether 1.2 s suppresses double bounces in practice; and whether `Touched` fires reliably for `HumanoidRootPart` on both R6 and R15 rigs, and for a `MeshPart` whose `CollisionFidelity` is not `Box`.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 554 passed in 43 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all five touched files; `grep "\u[0-9a-fA-F]{4}" src` = 0; `grep "\"Trampoline\"" src` = 1 (the tag constant); `flamework.build` regenerated and lists `out/server/services/trampoline-service@TrampolineService`. The three new files had to be converted from CRLF to LF — the editor wrote them with CRLF and prettier flagged 228 warnings before the conversion.
+## 228 - The trampoline's silence was three causes with one symptom
+
+The report was "I see no difference", with a boot log. **There is no `[Trampoline]` line in it at all** - not `bound`, not anything - which is the whole diagnosis and also the defect: the service printed only on a successful bind, so a session where nothing was tagged produced *no line*, and three different causes collapsed into one silence.
+
+### The three causes
+
+1. **The tag is not applied in Studio.** The part was placed; the tag was not.
+2. **The tag is on a `Model` containing the part.** `CollectionService.GetTagged` returns the tagged instance whatever it is, so a tagged `Model` arrives, `IsA("BasePart")` is false, and the bind is skipped.
+3. **The service did not load.** Ruled out here - `flamework.build` lists `trampoline-service@TrampolineService` and `out/server/services/trampoline-service.luau` exists - but the log could not have told the difference.
+
+**Note what the same log *does* prove:** `[Spawner] steer player=prospeed1 lateral=1 slow=0` at the end. The server is running item 223's two-argument payload, so the build is current; the trampoline is simply not being found.
+
+### The fix: say what was found, not only what was bound
+
+```ts
+let tagged = 0;
+for (const instance of CollectionService.GetTagged(TAGS.trampoline)) {
+    tagged++;
+    this.bindTagged(instance);
+}
+...
+print(`[Trampoline] mounted parts=${count} tagged=${tagged}`);
+```
+
+and when it bound nothing:
+
+```
+[Trampoline] mounted parts=0 tagged=0 — nothing to bounce. Tag a BasePart (Part or MeshPart) "Trampoline" in Studio; the tag goes on the part, not on a Model containing it.
+```
+
+`bindTagged` also names a wrong target instead of skipping it:
+
+```
+[Trampoline] tagged instance is not a BasePart: Model "Workspace.Trampoline" — put the tag on the part itself
+```
+
+**`parts=0 tagged=0`** means the service loaded and nothing carries the tag. **`parts=0 tagged=1`** means something is tagged and it is not a `BasePart`. **`parts=1`** means it bound. One line, three answers.
+
+This is the third round in a row where the absence of a log line was the signal and there was no way to read it (`[Spawner] steer` item 223, the `[Steer]` boot line item 224). The pattern is now explicit: **a service that binds scene objects prints what it found, at mount, always.**
+
+### What the user needs to do
+
+In Studio: select the `MeshPart` **itself** (not its parent `Model`), and add the tag `Trampoline` — `Model` tab, `Tag Editor`, or the Properties `Attributes`/`Tags` panel depending on the Studio version. Then play: `[Trampoline] mounted parts=1 tagged=1` appears before anything else from this service, and walking onto it prints `[Trampoline] bounced <name> at Y=<n> → 100`.
+
+**`MeshPart` is fine** - every collection point tests `IsA("BasePart")` and the typings put `MeshPart -> TriangleMeshPart -> BasePart`. `CanTouch` must be on (default); `CanCollide` decides whether you stand on it or fall through.
+
+### Also worth knowing about "no difference"
+
+**The ball colours (item 226) cannot show in that log because no ball existed.** The session never left `Intermission` - it ends 8 seconds in, with the "need two players" refusal on the banner. Ball colour appears on `[Ball:N] spawn … color=#RRGGBB` and on the model, both of which need a round to start: 30 s of lobby with two enrolled players, or a Studio session past the intermission, or debug key `2`/`3`.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 554 passed in 43 files** (unchanged - no new pure rule); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean; `\uXXXX` in `src/` = 0; emitted Luau carries `mounted parts=`, the not-a-BasePart warning and `bindTagged`.
+## 229 - The trampoline wrote a velocity the humanoid threw away; it uses the humanoid's own jump now
+
+The tag was applied and the handler fired every 1.2 s for twenty seconds - and **`Y` was negative on every single line**: `at Y=-18`, `-29`, `-30`, `-28`, `-32`, `-33`, `-19`, `-37`, `-5`, `0`. The character was falling on every recorded bounce and never once left the ground. The handler ran; the impulse did not.
+
+### Why the velocity write did nothing
+
+Two mistakes stacked, and each alone would have been enough:
+
+1. **`ChangeState(Freefall)` does not un-ground a rig.** It sets a state. It applies no velocity and removes no force. A character standing on a part is re-grounded by the humanoid controller within the same step, which zeroes `Y` before the solver runs - exactly item 24's lesson (`a force on a body whose velocity another writer rewrites does nothing`), with the humanoid controller as the overwriter.
+2. **A humanoid's jump is not a velocity write.** It is `JumpPower`/`JumpHeight` plus `Jumping`, and the *controller* is what applies the velocity. That is why the engine's own jump works on a grounded rig and a hand-written `Y` does not.
+
+Item 227's report predicted this as the fallback case and named the wrong mechanism for it (a `LinearVelocity` for one frame). The correct fix was one API level up.
+
+### The fix
+
+```ts
+const previousJumpPower = humanoid.JumpPower;
+const previousJumpHeight = humanoid.JumpHeight;
+
+humanoid.JumpPower = TRAMPOLINE_BOUNCE_VELOCITY;                              // studs/s, when UseJumpPower is true
+humanoid.JumpHeight = (V * V) / (2 * Workspace.Gravity);                      // studs,  when it is false
+humanoid.ChangeState(Enum.HumanoidStateType.Jumping);
+
+root.AssemblyLinearVelocity = new Vector3(current.X, TRAMPOLINE_BOUNCE_VELOCITY, current.Z);
+```
+
+- **Both numeric properties, because `UseJumpPower` decides which one the controller reads.** The installed typings state it: *"Determines whether the `JumpHeight` (false) or `Humanoid.JumpPower` (true) property is used."* Setting only one would leave the bounce dependent on a `StarterPlayer` setting nobody in this repo controls.
+- **`JumpHeight` is derived, not a second constant.** The two properties describe one arc and `v^2 / (2g)` is that arc's apex - `25.5` studs for `v = 100`. A separate constant would be a number that must agree with `TRAMPOLINE_BOUNCE_VELOCITY` and has no reason of its own.
+- **The velocity write stays, after the state change.** One line, exact rather than the engine's approximation, and it is the only thing that covers a character touching the pad while already airborne - which the jump API ignores, because a humanoid in the air is not jumping again.
+- **Both settings are restored 0.25 s later.** The trampoline borrows the player's jump for one bounce and gives it back; a restore on the next frame would fight the launch, and 0.25 s is well inside the 1.02 s airtime so the numbers are back before landing.
+
+### The diagnostic that would have caught it in round one
+
+`[Trampoline] bounced … at Y=<n> → 100` reports the velocity *before* the write. It cannot distinguish "the write happened" from "the write was honoured", and that ambiguity is exactly what cost this round.
+
+```ts
+task.delay(0.2, () => {
+    print(`[Trampoline] launch ${player.Name} y=${math.round(root.AssemblyLinearVelocity.Y)} state=${humanoid.GetState().Name} floor=${humanoid.FloorMaterial.Name}`);
+});
+```
+
+Five bounces after a trampoline hit at `v = 100`, `g = 196.2`, the vertical velocity is `100 - 196.2 * 0.2 = 60.8`, so **`y` above about 61 means the impulse took**. If it did not, the other two fields say why: `state=Landed` is a grounded controller winning, `state=Physics` is a rig in a state that ignores jump input, `floor=Plastic` on a character that should be airborne is the pad still holding it.
+
+**The rule this round adds to the tree's growing list:** *a log line for an impulse reports the value after the physics step, not before the write.* Items 223, 224 and 228 were all the same shape - a line that described intent instead of outcome.
+
+### What is still not verified
+
+Whether the jump API *is* honoured on the testers' rigs. It should be - it is the mechanism the engine's own jump uses - but this is the second attempt at the same behaviour, so the burden of proof is now on the deferred line rather than on the reasoning. If `launch … y=<low> state=Landed` appears, the next lever is a `LinearVelocity` constraint alive for a few frames with a large `MaxForce`, which the solver applies *after* the controller - the fallback item 227 named, now with a log line that says when to reach for it.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 554 passed in 43 files** (unchanged - no new pure rule); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean; `\uXXXX` in `src/` = 0; emitted Luau carries `JumpPower`, `JumpHeight`, `ChangeState(…Jumping)`, the derived `Workspace.Gravity` expression and the `launch` line.
+## 230 - The inventory explains what a ball does, using the field that was declared for it
+
+`PowerDefinition.effect` was declared in item 74 with the note *"One line, for the report and for a future tooltip. Not rendered anywhere today."* It spent every round since unread, and **a string nothing renders is a string nothing corrects** - which is exactly what had happened: two entries had drifted out of date with no failure anywhere.
+
+### The stale strings, which are the round's real findings
+
+| ball | before | why it was wrong |
+| --- | --- | --- |
+| `rocket_ball` | `once per round, 80% of the way down the belt, BALL_SPEED snaps to ROCKET_TARGET_SPEED` | engineering prose, and the only entry that was actually *accurate* about the trigger - the drift here was that it named constants and a percentage a player cannot act on |
+| `recycle_ball` | `takes the pickup's boost and leaves the pickup in play for the next taker` | accurate, but read as a *bigger* boost. That is `sprinter`'s power; recycle's is the surviving pad |
+| `bouncy_ball` | `hops on the belt; the existing BELT_BOUNCE_* constants, for this ball only` | named internal constants in player-facing text |
+| `bully_ball` | `on touch, moves BALL_SPEED from the other ball to itself` | `BALL_SPEED` is an attribute name |
+| `heavy_ball` | `the same transfer, asymmetric: it keeps less than it drains and loses less than anyone else` | *"the same transfer"* only means anything if you read bully's row first - a comparative among powers, which the module header forbids |
+| `ghost_ball` | `intangible for 10 s of every 25 s cycle; solid and colliding for the other 15; walls always collide` | semicolon chain, three facts crammed into one sentence-ish |
+| `decoy_ball` | `spawns one ownerless twin beside itself at spawn, indistinguishable from it and unable to win` | *"ownerless"* is a data-model fact, and "beside itself at spawn" is not when it appears |
+| `magnet_ball` | `opponents within MAGNET_RADIUS decay faster` | a constant name |
+| `eclipse_ball` | `for a window, every opponent's decay is multiplied` | "decay is multiplied" is model language |
+| `sprinter_ball` | `a pickup boosts it further than the standard value, and it wears an afterimage while boosted` | names the VFX, which is not the power |
+
+**The `rocket` row is not stale about the trigger** - the prompt predicted "random moment" from item 203 and the source already said 80%. The genuine defect was the opposite: it was the most technical string in the table. The rewrite keeps the fact (*"Near the exit"*) and drops the number.
+
+### The ten new strings, all two sentences
+
+| ball | effect |
+| --- | --- |
+| `bully_ball` | Takes speed from any ball it touches and keeps all of it. The harder the contact, the more it steals. |
+| `bouncy_ball` | Hops along the belt instead of rolling flat. It is the only ball whose power changes nothing about how fast it travels. |
+| `ghost_ball` | Passes straight through other balls for part of every cycle, then turns solid again. Walls and the belt always stop it. |
+| `heavy_ball` | Keeps less of the speed it drains than a bully does, but loses less than anyone. Hard to slow down and hard to escape. |
+| `decoy_ball` | Spawns an identical twin a few seconds after it launches. The twin looks and moves like the real ball but cannot win the round. |
+| `magnet_ball` | Makes nearby balls lose speed faster. The pull only reaches balls close to it. |
+| `rocket_ball` | Near the exit its speed snaps to a large boost, once per round. A last-second save from elimination. |
+| `recycle_ball` | Takes a pickup boost and leaves the pad where it is. Any ball that follows gets the same boost. |
+| `eclipse_ball` | Partway through the round, every opponent loses speed faster for a few seconds. The effect reaches further when more balls are near. |
+| `sprinter_ball` | A pickup gives it a bigger boost than any other ball. Every pad is worth more to it. |
+
+**Every one is two sentences, pure ASCII, no em-dashes, no constant names, and none ranks a power against another** - `heavy_ball` is the only one that mentions another ball's power, and it does so to say heavy keeps *less* (a cost), not that it is better.
+
+**The `effect` docblock is rewritten in place:** the "not rendered anywhere today" line is replaced with where it is rendered (the inventory detail pane), the three rules the text follows, and the sentence explaining why the pane is what keeps the strings honest.
+
+### The pane, and a size that had to change
+
+**The detail pane is not rebuilt per click** - `refreshDetailPanel()` writes into labels created once, at panel build. The description is one more `Text` write on that path, beside the name, the rarity and the count. The prompt expected a rebuild.
+
+```ts
+this.detailDescription = this.text(detailScope, detail, "", "body2", "secondary", 5, new UDim2(1, 0, 0, 0), false);
+this.detailDescription.AutomaticSize = Enum.AutomaticSize.Y;
+this.detailDescription.TextWrapped = true;
+this.detailDescription.TextYAlignment = Enum.TextYAlignment.Top;
+```
+
+`this.text` already applies `outlineText`, so the description carries the same glyph stroke as every other label on the sheet. `LayoutOrder` 5 with the hint moved from 5 to 6.
+
+**`INVENTORY_ROW_HEIGHT` went from `300` to `380`, and the arithmetic is the reason.** The pane is a fixed-height vertical list, so its children must fit or the lowest is clipped by the sheet:
+
+```
+before: 96 preview + 8 + 24 name + 8 + 16 rarity + 8 + 16 count + 8 + 54 hint = 238   (62 spare in 300)
+after:  the same 238 + 8 gap + ~100 for a 3-sentence wrap at body2 in a ~230 px column = ~346   (needs > 300)
+```
+
+`380` leaves about 140 pixels. `INVENTORY_PANEL_SIZE` derives from the row, so the whole sheet grows and `applyPanelScale` keeps it on screen at every viewport.
+
+### `describeBallPower`
+
+```ts
+export function describeBallPower(ballId: string): string {
+    const powerId = powerForBallId(ballId);
+    if (powerId === undefined) return "";
+    const definition = definitionForPower(powerId);
+    return definition === undefined ? "" : definition.effect;
+}
+```
+
+Built from the two existing exports rather than walking `POWERS` a third time. **`""` for an unknown id**, and the pane clears the label in that case - `AutomaticSize.Y` collapses it to zero height, so a ball with no row costs no space rather than showing placeholder prose.
+
+### The spec, four cases in `ball-tables.spec.ts`
+
+Non-empty · three sentences or fewer · describes every pool ball (non-vacuous) · `""` for an unknown id. **558 tests in 43 files** (554/43 before).
+
+**The sentence counter had a bug worth recording: in Luau `string.find`'s first argument is a pattern, so searching for `". "` means "any character followed by a space"** - it counted every word boundary and failed all ten descriptions instantly. It is a character walk now, with no pattern engine to escape.
+
+### Where this prompt was wrong
+
+1. **"The pane is rebuilt on every click"** - it is a refresh into persistent labels; there is no rebuild to be part of.
+2. **"The `rocket` entry still reads 'once per round, at a random moment'"** - the source already said 80% of the belt. The real defect was that it read like a changelog.
+3. **"`recycle` ... Not the bigger boost a stale string might suggest"** - the string did not claim a bigger boost; the risk was a reader inferring one. Rewritten to be explicit anyway.
+4. **"`ghost` 10 s of every 25 s"** - the live cycle is item 204's `ghostActiveAt`; the description now says "part of every cycle" rather than a number the tuning owns.
+5. **"Placed after the rarity label, before the existing facts row"** - it is after the *count* (`Owned: N`), which is what the facts row is; putting it between rarity and count would have split two facts that belong together.
+6. **The prompt expected `AutomaticSize` to be safe in the existing pane.** It is not: the pane is `300` tall and had `62` spare, so the row grew.
+
+### Studio-only
+
+Whether the longest description (eclipse, ~140 characters) really wraps to five lines at the pane's width rather than six, and whether `380` leaves enough slack at the 0.45 minimum panel scale; whether secondary ink at `body2` reads as body copy under a white `h6` name rather than as another heading; and whether the description crowding the `Owned: N` line and the fusion hint reads as one block or as three competing lines.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 558 passed in 43 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all three touched files; `grep "\u[0-9a-fA-F]{4}" src` = 0; all ten `effect` strings verified pure ASCII; `flamework.build` unchanged - no controller or service added.
+## 231 - The trampoline launches with a constraint, at three times the height
+
+Playtest report: "There's a weird, short bounce that happens on it. the next bounce is higher. I just want all jump to be higher". The log attached to it is the discriminator:
+
+```
+19:06:09.932  [Trampoline] bounced prospeed1 at Y=-31 -> 100 pad=Workspace.Lobby.Trampoline.InnerCircle
+19:06:10.150  [Trampoline] launch prospeed1 y=85 state=Freefall floor=Air
+19:06:11.682  [Trampoline] bounced prospeed1 at Y=-29 -> 100 pad=...
+19:06:11.882  [Trampoline] launch prospeed1 y=47 state=Freefall floor=Air
+19:06:12.883  [Trampoline] bounced prospeed1 at Y=-90 -> 100 pad=...
+19:06:13.083  [Trampoline] launch prospeed1 y=4 state=Running floor=SmoothPlastic
+```
+
+Same handler, same pad, same written velocity - and the deferred check reads `y=85` on one bounce and `y=4 state=Running` on the next. 0.2 s after a `100` launch under `196.2` gravity the value should be about `61`; `4` with `Running` on a solid floor means the character never left the pad at all. **The launch was a coin flip, and the two heights the user described are its two outcomes.**
+
+### The cause: two writers, an undefined order
+
+`stepBallSpeeds`-style velocity writes are the tree's established mechanism (item 173's `writePopY`, item 222's jump), and they are correct there because the ball's *only* writer is this tree. A character is not that body. The humanoid controller rewrites the root assembly's velocity on every physics step - as a floor correction while a character is in contact with a part, and as the jump's velocity for one it believes is jumping - so a write from `Touched` lands somewhere inside that step and wins on some frames and loses on others. It is item 24's rule (*a force on a body whose velocity another writer rewrites does nothing*) with the humanoid controller as the overwriter. Item 229's humanoid-jump API did not help: it is the same controller writing the same property.
+
+### The fix: one writer, solved after the controller
+
+`TrampolineService.launch(root)` parents an `Attachment` and a `LinearVelocity` on the root, and destroys both `TRAMPOLINE_LAUNCH_SECONDS` later:
+
+```ts
+const servo = new Instance("LinearVelocity");
+servo.Attachment0 = attachment;
+servo.RelativeTo = Enum.ActuatorRelativeTo.World;
+servo.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector;
+servo.VectorVelocity = new Vector3(0, TRAMPOLINE_BOUNCE_VELOCITY, 0);
+servo.ForceLimitsEnabled = true;
+servo.ForceLimitMode = Enum.ForceLimitMode.PerAxis;
+servo.MaxAxesForce = new Vector3(0, TRAMPOLINE_LAUNCH_FORCE, 0);
+servo.Parent = root;
+```
+
+A constraint is solved **after** the controller has written its velocity for the step, so its target is the last word for as long as it exists - that is the whole difference from a write.
+
+**`PerAxis` with force on `Y` only is not decoration.** With the force limit switched off, a `LinearVelocity` also drives `X` and `Z` to the zero in its target vector, so a character launched mid-stride would stop dead horizontally. Y-only force leaves the player's own horizontal motion entirely alone.
+
+**The humanoid's jump API is gone**, and with it the `JumpPower`/`JumpHeight` borrow and the 0.25 s restore. The service now writes no humanoid property at all: the launch is not a jump and the player's own jump is never borrowed.
+
+### The three values
+
+| constant | was | now |
+| --- | --- | --- |
+| `TRAMPOLINE_BOUNCE_VELOCITY` | `100` | `170` |
+| `TRAMPOLINE_COOLDOWN_SECONDS` | `1.2` | `0.3` |
+| `TRAMPOLINE_LAUNCH_SECONDS` | - | `0.06` |
+| `TRAMPOLINE_LAUNCH_FORCE` | - | `5e5` |
+
+`170` is "about three times" as the user chose: apex `170^2 / (2 x 196.2) = 73.7` studs against the old `25.5`, airtime `1.73 s` against `1.02 s`. The servo adds `170 x 0.06 = 10.2` studs of held rise on top, so the real apex is about `84` studs - documented in the constant, because the window is part of the height rather than an implementation detail.
+
+`TRAMPOLINE_LAUNCH_FORCE` is `5e5` N: restoring a velocity the controller has just zeroed within one step needs `m x v / dt = 15 x 170 / 0.0167 = 152,694` N on a roughly 15-mass R15 rig, and the constant is about three times that.
+
+### The cooldown was inverted, and that was the second half of the report
+
+The old value was `1.2`, chosen to be **longer** than the `1.02 s` airtime so that "no double bounce, without a grounded check" fell out of arithmetic. That is backwards. A character lands at `t = 1.02`, `Touched` fires, and the guard refuses it because `0.18 s` of the cooldown remains - **the one contact that should always bounce is the one that gets refused**. A character standing still on a part produces no further contact, so the next launch comes whenever something finally re-touches, which is the "it sometimes does nothing, then bounces at a random later moment" half of the same sentence. In the frames where the launch failed outright, nothing ever left the pad and *every* touch was refused.
+
+So the guard is now a **contact guard**, `0.3 s`: long enough to collapse one landing's burst of `Touched` firings (three physics steps is `0.05 s`), short enough that it is long expired - by about forty studs of altitude - before the character can touch the pad again. `trampoline.spec.ts` pins the relationship rather than the numbers: `2 x V / g > cooldown`, and three 1/60 steps inside it are refused.
+
+### A spec bug worth recording (again)
+
+`canBounce(100, 100 + 0.3, 0.3)` returned `false`: `100 + 0.3 - 100` is `0.29999999999999716` in doubles. The old literal `1.2` happened to round to exactly `1.2` at base `100`, so the case passed and hid the fragility. The boundary cases now measure from `0`, with a comment saying why - asserting the comparison, not the float error.
+
+### Where the prompt for item 229 was wrong
+
+1. **"Borrow the humanoid's jump and the velocity write together"** - two writers on one property, which is the definition of the bug this round fixes. The jump API was never going to make a hand-written velocity deterministic.
+2. **"The velocity write stays; it costs one line"** - it cost the round. It also silently made the check line's `y` unreadable as evidence, since the number it reports depends on which writer won.
+3. **"cooldown >= airtime"** (item 227's own docblock, carried forward) - inverted, for the reason above.
+
+Nothing from the deleted path was unrecoverable: the `[Trampoline] bounced` and deferred `[Trampoline] launch` diagnostics both survive, and the latter's expectation moved from "above about `61`" to "above about `120`" because the servo is gone by `0.06 s` and gravity has `0.14 s` unopposed at the check.
+
+### Studio-only
+
+- Whether the constraint actually wins on a grounded rig - the discriminating line is now `[Trampoline] launch ... y=` above about `120`; anything near `0` with a solid `floor` means the controller still has the last word and the next step is a `VectorForce` applied per step instead of a velocity target.
+- Whether ~84 studs clears the lobby roof, and whether `1.73 s` of airtime feels like a trampoline or like being thrown.
+- Whether the launch reads as a launch rather than a freeze: the character's horizontal motion should be untouched mid-stride.
+- Whether standing on the pad now produces a steady rhythm of identical bounces - that is the intended behaviour and the opposite of item 229's report.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 560 passed in 43 files** (558 before, +2 in `trampoline.spec.ts`); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all four touched files; all four are LF-only; `grep "\uXXXX" src` = 0; `flamework.build` unchanged - no service added or removed.
+## 232 - The trampoline comes down to twice the old height
+
+Item 231's `170` overshot: a playtest called it "too high". The user picked the `≈50`-stud option offered with that fix, so the launch is `130`.
+
+| | value |
+| --- | --- |
+| `TRAMPOLINE_BOUNCE_VELOCITY` | `170` -> `130` |
+| ballistic apex | `43.1` studs (`130^2 / (2 x 196.2)`) |
+| held rise, `TRAMPOLINE_LAUNCH_SECONDS = 0.06` | `7.8` studs |
+| real apex | **`50.9` studs** |
+| airtime | `1.39 s` (`0.06` held + `2 x 130 / 196.2`) |
+
+**Twice what items 227-229 actually produced**, which is `25.5` ballistic plus that build's own `6` studs of launch window - `31.5`. That is the honest comparison, not the `25.5` the old docblock quoted.
+
+Nothing else moved: `TRAMPOLINE_LAUNCH_SECONDS` stays `0.06` (its job is to outlive a dropped step, not to shape the arc), `TRAMPOLINE_LAUNCH_FORCE` stays `5e5` N - now about four times the `m x v / dt = 116,766` N needed to restore a velocity the controller has just zeroed, where it was three times - and `TRAMPOLINE_COOLDOWN_SECONDS` stays `0.3`, which is now about a fifth of the `1.33 s` airtime rather than a sixth.
+
+**Arithmetic that followed the constant, all in docblocks rather than code:** the apex and airtime in `TRAMPOLINE_BOUNCE_VELOCITY`, the held rise in `TRAMPOLINE_LAUNCH_SECONDS`, the restore force in `TRAMPOLINE_LAUNCH_FORCE`, the altitude at guard expiry in `TRAMPOLINE_COOLDOWN_SECONDS`, and the `[Trampoline] launch` check's threshold in `TrampolineService` (`y` above about `90` now reads as "the launch took", from an expected `102` instead of `142`).
+
+**Validation:** `npm run build` exit 0; **`npm test` = 560 passed in 43 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean; both files LF-only; `flamework.build` unchanged.
+## 233 - Every ball in the UI draws its own icon, inside the tinted circle
+
+Item 226 painted each ball's swatch a colour and left the drawing for later. This round adds the ten drawings the user produced, as an `ImageLabel` **inside** each existing swatch rather than instead of it.
+
+### The new table, `src/shared/ball-icon.ts`
+
+```ts
+export const BALL_ICONS: Readonly<Record<string, string>> = {
+	bully_ball: "120201769285764",
+	bouncy_ball: "98886177592913",
+	ghost_ball: "118553916103019",
+	sprinter_ball: "109082564419786",
+	heavy_ball: "121099842838280",
+	decoy_ball: "101725102221675",
+	magnet_ball: "110094790223387",
+	rocket_ball: "136447174534668",
+	recycle_ball: "88578934090385",
+	eclipse_ball: "120781204837491",
+};
+
+export const BALL_ICON_PREFIX = "rbxassetid://";
+```
+
+All ten are bare decimals, verified by the spec's `tonumber` round trip rather than by eye. **Order is `BALL_COLORS`' order, not the prompt's** - common, rare, epic, legendary - so the colour table and the icon table can be read side by side, which is the rule `models.config.ts` states for its own rows.
+
+`iconForBall` answers the prefixed URI, or `undefined` for an unknown id. The prefix lives in this file and nowhere else, following `pickup-sprite-controller.ts:209` (*"The id, prefixed here and nowhere else"*) and `shared/sounds.config.ts`'s `soundUri`.
+
+### `src/shared/ui/ball-swatch.ts` - one helper, seven call sites
+
+```ts
+export function attachBallIcon(frame: GuiObject, ballId: string): ImageLabel {
+	const icon = new Instance("ImageLabel");
+	icon.Name = "Icon";
+	icon.Size = UDim2.fromScale(1, 1);
+	icon.Position = UDim2.fromScale(0, 0);
+	icon.AnchorPoint = new Vector2(0, 0);
+	icon.BackgroundTransparency = 1;
+	icon.BorderSizePixel = 0;
+	icon.Image = iconForBall(ballId) ?? "";
+	icon.ScaleType = Enum.ScaleType.Fit;
+	icon.ZIndex = frame.ZIndex + 1;
+	icon.Parent = frame;
+	return icon;
+}
+```
+
+Seven copies of those nine lines is seven chances to set `ScaleType` differently, and the seventh is the one nobody looks at; here they are identical by construction.
+
+**`ZIndex = frame.ZIndex + 1` is not decoration.** These panels run `ZIndexBehavior.Global` - the picker's own item-218 comment records the trap - so a child at a lower `ZIndex` than its parent draws behind the parent's background and would be invisible.
+
+### The seven sites, and their real sizes
+
+| site | node | size | corner | `BackgroundTransparency` | `ZIndex` |
+| --- | --- | --- | --- | --- | --- |
+| `picker-controller` `buildCard` | `ball` | `CARD_BALL` = 84 | `UDim(1, 0)` | 0.1 | `CARD_Z_INDEX + 1` = 4 |
+| `reveal-controller` face | `ball` | `BALL_SWATCH` = 88 | `UDim(1, 0)` | 0 | `z + 2` |
+| `shop-controller` `buildPrizeCard` | `ball` | `SWATCH` = 24 | `ROUND` | 0 | `STORE_Z_INDEX + 5` = 10 |
+| `shop-controller` `buildPrizeCatalogCard` | `ball` | `SWATCH` = 24 | `ROUND` | 0 | `STORE_Z_INDEX + 6` = 11 |
+| `shop-controller` `buildBallCard` | `pip` | `SWATCH` = 24 | `ROUND` | 0 | `STORE_Z_INDEX + 6` = 11 |
+| `shop-controller` `buildFusionRow` | `pip` | `SWATCH - SPACING.xs` = 16 | `ROUND` | 0 | `STORE_Z_INDEX + 5` = 10 |
+| `shop-controller` detail preview | `detailBall` | `INVENTORY_PREVIEW_BALL` = 56 | `ROUND` | 0 | `STORE_Z_INDEX + 1` = 6 |
+
+**Seven, matching item 226's count.** The prompt's own Context section said "the six UI sites" and then listed seven; the seven is right and the "six" was the typo.
+
+**The prompt's size guesses were wrong on three of the five** - it offered `22`, `44`, `26` where the tree has `24`, `24`, `16` - but every one of them is square by construction (`UDim2.fromOffset(n, n)`), so `Fit` and `Stretch` are indistinguishable at these sites and `Fit` only earns its keep the day a non-square asset lands.
+
+### The detail preview is built empty
+
+The inventory's detail pane is **refreshed rather than rebuilt** (item 230), so its icon is created once, empty, and written on the refresh path beside the colour:
+
+```ts
+this.detailBallIcon = attachBallIcon(ball, "");
+...
+if (this.detailBallIcon !== undefined) {
+	this.detailBallIcon.Image = iconForBall(ball.id) ?? "";
+}
+```
+
+and cleared to `""` in the nothing-selected branch, which is why that grey `textDisabled` fill is visible rather than being covered by the last ball looked at.
+
+### Where this prompt was wrong
+
+1. **"The `UICorner` clips the icon to a circle."** It does not. A `UICorner` rounds a frame's **background**; children are clipped only by `ClipsDescendants`, and none of the seven swatches sets it (the four `ClipsDescendants` in `shop-controller.ts` are panes and sheets, above these frames). So the round's decision 7 - which silhouettes get cut - is moot: `bully`'s spikes, `sprinter`'s speed lines and `decoy`'s twin are drawn whole, and no `UICorner` was removed anywhere.
+2. **"The six UI sites."** Seven, as Part 3 itself lists.
+3. **The sizes** - `22`/`44`/`26` against the tree's `24`/`24`/`16`.
+4. **"`item 144`'s pickup sprite carries a bare id and prefixes at the call site."** Close but not quite: the id lives in `tuning.ts` and the prefix is written in `pickup-sprite-controller.ts:209`, the place it is consumed. The pattern this file follows is that one - prefix at the consumer, bare id in the table - not a third copy.
+5. **"`ball-tables.spec.ts` should gain a fourth walk."** It should not: `ball-color.spec.ts` is the precedent for a table with its own value-shape rules, and the icon table has three rules a pool walk cannot express (bare decimal, distinct, prefix applied once). A separate file keeps *"did a ball get added properly"* in one place per table rather than one place per round.
+
+### The spec, `src/shared/ball-icon.spec.ts`, six cases
+
+1. resolves an icon for every `BALL_POOL` id, in every tier, with a non-vacuity tripwire on the count.
+2. names no ball outside `BALL_POOL`, no ball twice, and the table's size equals the pool's.
+3. stores every id as a bare decimal - `tonumber` round trip, which also rejects a leading zero and a stray space.
+4. gives every ball an id no other ball has.
+5. returns `rbxassetid://<id>` for every ball.
+6. answers `undefined` for an unknown id.
+
+### Named, not built: the silent-failure diagnostic
+
+A missing icon draws nothing and the colour shows through, which is the point - but it also means **"the icon is missing" and "the icon has not loaded yet" are the same screenshot**. The tree already has the shape of the fix (`pickup-sprite-controller.ts`'s `PreloadAsync` line): a `ContentProvider.PreloadAsync` over the ten prefixed ids at `onStart` of `shop-controller` - the controller that draws five of the seven - with a `[BallIcon] loaded=N failed=M` line. Out of scope here because there is no single mount moment for a table six panels read; named so the follow-up has its starting point.
+
+### Studio-only
+
+Whether the ten ids resolve at all, and whether each is square with a transparent background rather than a white one; whether `Fit` leaves a margin inside the 24-pixel `SWATCH` that reads as a gap; whether a 512-pixel drawing reads at 16 pixels (the fusion pip) or as a smudge; whether the drawings' line weight matches the chunky chrome's stroke; and whether the detail preview at 56 now says "this ball" rather than "some circle with a symbol on it".
+
+**Validation:** `npm run build` exit 0; **`npm test` = 566 passed in 44 files** (560/43 before, +6 in `ball-icon.spec.ts`); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all six touched files; all six LF-only (the three new files arrived CRLF and were converted); `grep "\uXXXX" src` = 0; `flamework.build` unchanged.
+## 234 - The card ball grows 50%, and the leaderboard's distance column becomes the ball
+
+Two layout changes with one shared cause: `attachBallIcon` draws at `UDim2.fromScale(1, 1)` and `addChunkyRing` takes the face's size, so **both grow with the parent and neither has a number to change**. Every size decision below is one number on the swatch plus the frame that has to hold it.
+
+### Part A - the four card sites
+
+| site | constant | was | now |
+| --- | --- | --- | --- |
+| picker card | `CARD_BALL` | 84 | **126** |
+| picker card | `CARD_HEIGHT` | 180 | **222** |
+| inventory `buildBallCard` | `INVENTORY_SWATCH` (new) | 24 (`SWATCH`) | **36** |
+| prize card | `PRIZE_CARD_SWATCH` (new) | 24 (`SWATCH`) | **36** |
+| catalog card | `PRIZE_CARD_SWATCH` | 24 (`SWATCH`) | **36** |
+| fusion row pip | `SWATCH - SPACING.xs` | 16 | **16, unchanged** |
+
+**`SWATCH = 24` keeps exactly one reader** - the fusion row - and its three other readers moved to the two new constants. `SWATCH` is not renamed or deleted: the fusion pip is a 16-pixel circle inside a 34-pixel row and has no room for 36.
+
+**Two new constants for the same number, on purpose.** The inventory card and the prize card are both 36 today and are still two decisions: a grid of owned balls and a single reward. `JUMP_IMPULSE`'s rule about two values that happen to agree.
+
+### The card-height arithmetic, and the one the prompt got wrong
+
+**Picker card - `CARD_HEIGHT = 222`.** The card is a `UIListLayout` with `Padding = SPACING.xs`, three children: name (`body2` 14 + 4 = 20), ball (`CARD_BALL`), rarity (`caption` 12 + 4 = 18, one type step up in this controller). Padding is `SPACING.md = 12` top and bottom.
+
+```
+block at 84:  20 + 4 +  84 + 4 + 18 = 130    residual at CARD_HEIGHT 180 = 180 - 24 - 130 = 26
+block at 126: 20 + 4 + 126 + 4 + 18 = 172    CARD_HEIGHT = 172 + 24 + 26 = 222
+```
+
+**26 px of residual is held, not restored to item 217's 66.** That is the proportion the eye actually sees - the space around the ball - and holding it is why the card grows by exactly the 42 pixels the ball did.
+
+**`INVENTORY_CARD_HEIGHT` stays 86, and `PRIZE_CARD_HEIGHT` is untouched - neither needed to grow, and the prompt's `98` would have been a regression.** The pip is **not** stacked with the name; it is `AnchorPoint (0.5, 0.5)` inside the art block:
+
+```
+inventory art  = 86 - caption.lineHeight (16) - SPACING.xs * 2 (8) = 62    ->  36 fits with 13 above and below
+shelf art      = CARD_ART = 46                                            ->  36 fits with  5 above and below
+catalog art    = PRIZE_CARD_ART = 52                                      ->  36 fits with  8 above and below
+```
+
+`INVENTORY_CARD_HEIGHT` is also the grid's `CellSize`, so growing it by 12 would have re-flowed the whole collection to buy room nothing needed.
+
+### Part B - the leaderboard
+
+**The prompt's premise was false: `LeaderboardEntry` had no `ballId`, and the server never sent one.** `grep -n "ballId"` against `shared/leaderboard.ts` and `leaderboard-service.ts` returned nothing, and `LeaderboardEntry`'s five fields were `key`, `userId`, `name`, `distance`, `eliminated`. A column that draws a ball needs the id, so this round had to add it - four edits the prompt listed as "unchanged":
+
+1. **`shared/leaderboard.ts`** - `readonly ballId: string`, `""` for a body with no pick.
+2. **`shared/attributes.ts`** - `chosenBallIdOf(body)`, the one reader of `CHOSEN_BALL_ID_ATTRIBUTE`.
+3. **`leaderboard-service.collect()`** and **`round-service.eliminationRowFor()`** - both halves of the row shape fill it, so an eliminated row keeps its ball (`ChosenBallId` is read before the body is destroyed).
+4. **`leaderboard-controller.onUpdate`** - parses it, absent is `""`, and a bad `ballId` is **not** a reason to drop the row (unlike the other four fields).
+
+**`distance` stays on the wire and in the type.** It is the server's sort key; the client now renders none of it.
+
+The row's column, before and after:
+
+```ts
+// before
+const distanceLabel = new Instance("TextLabel");
+distanceLabel.Name = "Distance";
+distanceLabel.AnchorPoint = new Vector2(1, 0.5);
+distanceLabel.Position = new UDim2(1, -SPACING.xs, 0.5, 0);
+distanceLabel.Size = new UDim2(0, SPACING.xl + SPACING.sm, 1, 0);
+...
+distanceLabel.Text = formatDistance(entry.distance);
+
+// after
+const ballSwatch = new Instance("Frame");
+ballSwatch.Name = "Ball";
+ballSwatch.AnchorPoint = new Vector2(1, 0.5);
+ballSwatch.Position = new UDim2(1, -SPACING.xs, 0.5, 0);
+ballSwatch.Size = UDim2.fromOffset(LEADERBOARD_SWATCH, LEADERBOARD_SWATCH);
+ballSwatch.BackgroundColor3 = this.theme.paint.card.color;
+ballSwatch.BackgroundTransparency = this.theme.paint.card.transparency;
+...
+const ballIcon = attachBallIcon(ballSwatch, entry.ballId);
+const ballRing = addChunkyRing(ballSwatch, this.rarityColorOf(entry.ballId), 1);
+const ballStroke = ballRing.FindFirstChildWhichIsA("UIStroke");
+```
+
+**`LEADERBOARD_SWATCH = 20`** against `ROW_HEIGHT = 30`: five pixels of clearance and no row change. The ring is a **hairline (`1`), not the chunky weight** - at 3 a 20-pixel circle spends 30% of itself on its border and the drawing is 14 pixels wide. Icon before ring: both sit at `ROW_Z_INDEX + 2` and a tie is resolved by creation order, so the ring is drawn over the drawing's edge.
+
+**The swatch is rewritten every broadcast, not drawn once.** `ChosenBallId` is live - `RoundService` rewrites it when a player changes their pick mid-round - so `updateContent` sets `Image`, `ImageTransparency` and the ring colour each tick. A row that drew its icon at creation would show the ball the player had when the board first saw them.
+
+**Eliminated rows: faded icon (`ImageTransparency = 0.5`) plus an error-coloured ring.** A `Frame` has no `RichText` and a line across a 20-pixel circle would erase the thing it marks, so the row-level equivalent of the strikethrough is a wash plus the ring. A full-colour ball would otherwise be the brightest thing on a row that is out of the race.
+
+`formatDistance` is **deleted**. `ordinal.ts` **stays**: `getOrdinal` is still the rank column's formatter here and still called from `payout-controller.ts:393`.
+
+The mount line:
+
+```
+[Leaderboard] mounted rows=5 slide=0.3s              ->  rows=5 slide=0.3s swatch=20px
+```
+
+### Where this prompt was wrong
+
+1. **"`ballId` was added in item 227 and is on the wire."** Item 227 was the trampoline tag. The field did not exist; four "unchanged" files had to change.
+2. **"`CARD_HEIGHT` is 220."** It is `180` - item 218 cut it after the plate was removed, and the docblock still claiming 220 was stale. `222`, not the offered `262`.
+3. **"`INVENTORY_CARD_HEIGHT = 98` from `86 + 12`, verified by a block sum of name + gap + pip + gap + padding."** There is no such block: the pip is centred inside the art band, so the card holds a 36-pixel circle without growing. `98` would have made every card taller for nothing and re-flowed the grid's `CellSize`.
+4. **"`PRIZE_CARD_HEIGHT = 100` holds them."** The shelf card's cell is *derived* (`CARD_ART 46 + caption 16 + 8 + depth 6 = 76`); `PRIZE_CARD_HEIGHT` belongs to the `View All` catalog card. The tightest fit is the shelf card and it is `46`, not `100`.
+5. **"`distanceLabel` shows `0st`/`15st` via `ordinal.ts`."** `formatDistance` already had a docblock saying **"No suffix"** - the `st` was removed in an earlier round. The column showed a bare integer.
+6. **"The count badge may collide with a 36 pip."** In the bounding boxes it does overlap by 4x3 pixels, but the badge is anchored inside the art's top-right **corner**, where a circle of diameter 36 has no pixels. Left unchanged.
+
+### The trade, plainly
+
+The board's **order is still distance** - the server sorts ascending, and being further from the spawn edge means being closer to elimination. A reader who sees the bully above the ghost sees it because the bully is further along, not because of the icon. `[Leaderboard] round standings` still prints distances; the HUD just does not show them.
+
+### Studio-only
+
+Whether the four card icons at 36 read as balls rather than dots; whether a 126 picker ball in a 200-wide card reads as proportionate rather than as a plate; **whether a 20-pixel leaderboard swatch is legible at all** - icon plus a 1-pixel ring is the risk, and the fix is `LEADERBOARD_SWATCH = 24`; whether that rarity ring competes with the gold self ring two pixels outside it on the local player's row; and whether `ImageTransparency = 0.5` reads as "out" rather than as "half-loaded".
+
+**Validation:** `npm run build` exit 0; **`npm test` = 566 passed in 44 files** (no pure rules changed, no spec added or deleted); `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on all seven touched files; all seven LF-only; `grep "\uXXXX" src` = 0; `flamework.build` unchanged.
+## 235 - The live Developer Product ids, and the two chest pictures in the store
+
+Item 234's audit found `ROBUX_CHEST_PRODUCT_ID = 1234567890` and `..._BUNDLE_... = 1234567891` still fake, which meant `ProcessReceipt` matched no real purchase and the place charged nobody. This round sets the live ids and gives the two single chests their drawings.
+
+### The config
+
+| constant | was | now |
+| --- | --- | --- |
+| `ROBUX_CHEST_PRODUCT_ID` | `1234567890` | **`3730790793`** |
+| `ROBUX_CHEST_BUNDLE_PRODUCT_ID` | `1234567891` | **`3730801824`** |
+| `COIN_CHEST_IMAGE_ID` | - | **`"99666339452242"`** |
+| `PREMIUM_CHEST_IMAGE_ID` | - | **`"70588574179320"`** |
+
+Both product docblocks lose `**Placeholder.**` and say what changed; the `PolicyService` debt note stays where it was, next to the product id it applies to. The two image ids are **bare decimals in the config and prefixed at the consumer**, which is item 233's `BALL_ICONS` shape and the reason `coinIconUri` exists - the pickup sprite's docblock records what a bare number in an `ImageLabel.Image` does (*"a bare number loads nothing and reports no error"*).
+
+### `shared/ui/chest-icon.ts`
+
+`chestIconUri(assetId)` returns `""` for an empty id and `rbxassetid://<id>` otherwise, so "no art" is a value rather than a branch at every call site. `reportChestIconsLoad(onUnavailable)` preloads the non-empty ids once, prints `[Chest] icon loaded <id>` or a warning naming the id and the status, and **calls back only if a fetch failed** - because a chest's failure mode is different from the coin's. The coin is a decoration that draws a gap (item 154); a 108-pixel blank square in the store's first section reads as a broken panel, so the word behind it comes back.
+
+### The three squares
+
+`buildPreviewRow` gained an optional `imageId`; the coin section passes `COIN_CHEST_IMAGE_ID`, the premium section `PREMIUM_CHEST_IMAGE_ID`. The square keeps its trough fill, hairline border and corner, keeps the word `CHEST` in the tree, and gains an `ImageLabel` at `UDim2.fromScale(1, 1)` with `ScaleType.Fit`, `BackgroundTransparency = 1`. **The word is hidden while a picture exists** - `Visible = false` - and `reportChestIconsLoad`'s failure callback sets every collected label back to `visible`. An empty id never creates a picture at all, which is the ten-ball bundle's case.
+
+**The third square is `buildPrizeChestBand`, which the prompt did not mention.** It draws the same word, and it is one instance serving *both* chests' `View All` views, so its picture cannot be decided at build: it is written in `fillPrizeView(spec)`, which already re-tints the block per kind. Leaving it as a word while the store shows art above it was the one inconsistency a screenshot would have caught.
+
+### The bug this nearly shipped: `this.text` is at `+5`
+
+`attachBallIcon` uses `frame.ZIndex + 1`, and copying that idiom here would have put the picture **underneath** the word it covers: every label `this.text` builds is `ZIndex: STORE_Z_INDEX + 5` - *"the first order reliably above the chunky chrome's face"*. The icon is `+ 6`. Under `ZIndexBehavior.Global` a lower sibling draws behind a higher one, so the first build would have shown `CHEST` on top of a chest.
+
+### Two stale docblocks, both made false by this round
+
+- `buildPreviewRow`'s creation comment said *"No chest asset exists in the tree and an invented `rbxassetid` is a broken image"* - true when item 58 wrote it, false now.
+- `buildPrizeChestBand`'s docblock said *"This game has no chest art (item 58 established the tinted `CHEST` block as the placeholder...)"*.
+
+### The spec that named the placeholders
+
+`economy.config.spec.ts` had `it("carries a product id and a display price that are both obvious placeholders")`, a guard that made sense while the ids were fake. It now asserts the two ids are positive, **distinct from each other** and that both display prices are positive - a shared id would make `ProcessReceipt` deliver the single for a bundle purchase with no error anywhere. **The distinctness check had to be widened through an array**: both constants are literal types, and `3730790793 !== 3730801824` is a compile error ("This comparison appears to be unintentional").
+
+### Validation, and one thing that could not run
+
+`npm run build` exit 0, `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings, `prettier --check` clean on all four touched files, `chest-icon.ts` LF-only, `flamework.build` unchanged.
+
+**`npm test` could not run this round, and not because of these changes.** The runner fails before collection:
+
+```
+Error: An Application Control policy has blocked this file.
+  \\?\...\node_modules\@oxc-parser\binding-win32-x64-msvc\parser.win32-x64-msvc.node
+```
+
+A standalone probe (`node -e "require(<the .node>)"`) reproduces it outside jest, so it is a machine policy that started after the audit round's green run (`.jest-roblox/last-run.log` is 21:13:53, 566 passed). The suite had not been re-run between that and this round's first `npm test`. Nothing here weakens a spec: the only spec edit is the rename above, and `npm run build` compiles every spec to Luau, so a type or syntax error in it still fails the build.
+
+### Studio-only
+
+Whether `3730790793` and `3730801824` are the products this place sells (a mismatch is a `NotProcessedYet` retry loop, logged, not a charge); whether the two images resolve and are square with a transparent background; whether `Fit` at 108 pixels leaves the well's hairline visible or the picture covers it; and whether the chest drawings read at `PRIZE_CHEST_BLOCK = 44` in the `View All` band.
+### Addendum to item 235 - the suite runs again
+
+The Application Control block on `@oxc-parser`'s native binding lifted about twenty minutes later, and `npm test` on the same source now reports **566 passed in 44 files**, `shared 28 files / 283 tests` and `server 16 files / 283 tests` - the same counts as the audit round, which is what a renamed case rather than an added one should produce. The rewritten product-id case is inside the shared project's 283 and passed; `npm run build`, `npm run lint` (0 errors, 55 pre-existing warnings) and `prettier --check` were already green and are unchanged.
+
+**The lesson worth keeping:** the failure was `An Application Control policy has blocked this file` on a `.node` binary, reproducible outside jest with a bare `node -e require(...)`, and it arrived and left without any change to the repository. **A red `npm test` whose first line is a module-load error is an environment fact, not a code fact** - and the one thing that must not follow from it is a source edit made to "fix" a suite that never ran.
+## 236 - Native controls only, and a leaderboard you can see the race through
+
+Two changes to how the phone HUD sits over the game: the custom touch pad is deleted so the engine's own joystick is the only movement control, and the leaderboard's panel becomes half glass.
+
+### Part 1 - the four custom buttons are gone
+
+Every `BindAction` in `steer-controller.ts` now passes `createTouchButton = false`, and the four `SetPosition` / `SetTitle` calls and the four `*_BUTTON_POSITION` constants are deleted with their docblock. That removes the `◀ ▶ ▼ ▲` pad item 220 added.
+
+**The touch input itself did not change, and that is the round's main finding.** `Enum.KeyCode.Thumbstick1` was already bound - `createTouchButton = false` since item 220 - and its `InputObject.Position` is the native left joystick's `X`/`Y`. So the joystick was already the analog source; what the round removes is a *second* control scheme drawn on top of it.
+
+**No `PlayerModule` bridge is used, and item 161 is why.** `GetControls():GetMoveVector()` is the documented vector API, and this place cannot rely on it: item 161's log is `[Controls] no PlayerModule under Players.<name>.PlayerScripts after 10s`, and `controls-lock.ts` still treats the module as best-effort for exactly that reason (it resolves on a background thread and falls back to `GuiService.TouchControlsEnabled`). `Thumbstick1` needs no module lookup, no ten-second wait and no `require`, and it is the same physical stick. **The prompt's snippet would have added a failure mode this tree has already measured and worked around.**
+
+**The slow sign was left alone on purpose.** The prompt's `slow = math.max(0, -moveVector.Z)` inverts the shipped mapping: `GetMoveVector().Z` is negative *forward*, so `-Z` is positive when the stick is pushed **away**, while the build reads **toward the player** as the brake (`-thumbstickY`, and item 222's docblock argues for it). "Pull down" on a joystick means toward the player, so the shipped reading is the one the request describes - flipping it would have been a silent behavioural change inside a layout round.
+
+**Nothing is hidden in `TouchGui`, and this is the one acceptance criterion that could not be met as written.** `TouchGui.TouchControlFrame.TouchThumbstick` is the **left, movement** joystick - the control this file reads - so hiding it would delete the joystick while claiming to hide a camera control. **The default mobile UI has no right-hand thumbstick**: the camera is dragged on empty screen, which is not an `Instance` any script can reach. The thing that looked like a right stick was this file's own `▼ ▲` pair, pinned bottom-right at `1,-160` and `1,-240` - and it is deleted. `TouchJump` is untouched: it is the `ButtonA` the jump binding listens for.
+
+Recorded in the class docblock so the next reader does not "fix" it: *"`TouchThumbstick` is the movement stick, so hiding it would delete the joystick in the act of hiding the camera stick."*
+
+The boot line gains one field:
+
+```
+[Steer] mounted speed=45 slowDrain=5 jumpImpulse=80 ... touch=native actions=SteerLeft,...
+```
+
+### Part 2 - the leaderboard is half transparent
+
+**The board was never the `ScrollingFrame`.** The rows list is already `BackgroundTransparency = 1` and paints nothing; the visible surface is `buildChunkyPanel`'s `panel.surface`, which ships at `0`. It is now:
+
+```ts
+panel.surface.BackgroundTransparency = BOARD_TRANSPARENCY;   // 0.5
+```
+
+set on this one panel rather than in the shared builder, because the store, the inventory, the picker and the payout all want an opaque face.
+
+**The rows already met the requirement.** `ROW_TRANSPARENCY = 0.5` has been the rows' resting fill since item 124 and is the tween's target, so no row code changed; the new comment says why it did not need to.
+
+**No `TextTransparency` is written anywhere on this board**, so every label stays fully opaque - which is what makes a translucent readout legible: the background is scenery, the glyphs are the information. `BOARD_TRANSPARENCY`'s docblock states that, and states that it matches `ROW_TRANSPARENCY` so a row reads as a shade on the board rather than as a card floating on it.
+
+### Where this prompt was wrong
+
+1. **"The native camera thumbstick (right side) is engine-drawn"** - there is no such control. One stick, on the left, and it is the movement stick.
+2. **"Hide `TouchThumbstick` … leaves the native jump button intact"** - it would also remove the left joystick, i.e. criteria 2 and 4 cannot both hold.
+3. **"`GetMoveVector()` returns X and Z; replace `currentAxis`"** - no `PlayerModule` in this place (item 161), and `currentLateral`/`currentSlow` are already fed by `Thumbstick1`.
+4. **"`-moveVector.Z` is the pull-down axis"** - it is the push-away axis; `-thumbstickY` is pull-down.
+5. **"The board is a `ScrollingFrame` with a `Frame` background"** - the list is transparent; the frame is `panel.surface`.
+6. **"Set the row `Frame` to 0.5"** - it has been `0.5` since item 124.
+
+### Studio-only
+
+Whether the left joystick's `X` really lands on `lateral` (a stick's `Position.X` is positive right, which the server writes as positive lateral - the sign chain is source-readable but only a device confirms the feel); whether pulling down at full deflection gives a slow strong enough to read; whether the native jump button still fires `ButtonA` into `ContextActionService` now that no button of ours holds the `Jump` action - it should, since the binding is unchanged and only the drawn button is gone; and whether a half-transparent board over the belt is legible at 210 pixels wide on a phone.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 566 passed in 44 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on both touched files; `grep "\uXXXX" src` = 0; `flamework.build` unchanged - no controller or service added or removed.

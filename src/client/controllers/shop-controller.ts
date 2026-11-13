@@ -25,6 +25,8 @@ import {
 	ROBUX_CHEST_PRODUCT_ID,
 	ROBUX_CHEST_RARITIES,
 	robuxChestWeights,
+	COIN_CHEST_IMAGE_ID,
+	PREMIUM_CHEST_IMAGE_ID,
 } from "shared/economy.config";
 import { ChestOdd, chestOdds, robuxChestOdds } from "shared/odds";
 import {
@@ -56,9 +58,17 @@ import { attachPressFeedback } from "shared/ui/press";
 import { attachClickSound, playPurchaseSound } from "shared/ui/sounds";
 import { applyPanelScale } from "shared/ui/ui-scale";
 import { coinIconUri, reportCoinIconLoad } from "shared/ui/coin";
+import { chestIconUri, reportChestIconsLoad } from "shared/ui/chest-icon";
 import { ballName as displayName, rarityLabel as tierName } from "shared/ball-name";
+import { describeBallPower } from "shared/powers.config";
+import { colorForBall } from "shared/ball-color";
+import { iconForBall } from "shared/ball-icon";
+import { attachBallIcon } from "shared/ui/ball-swatch";
 import { getRevealController, REVEAL_MIN_REMAINING_SECONDS } from "client/controllers/reveal-controller";
 import { INTERMISSION_SECONDS } from "shared/tuning";
+import { PLAYER_COMPETING_ATTRIBUTE } from "shared/attributes";
+import { isShoppingAvailable } from "shared/spectate";
+import { isSpectating, onSpectatingChanged } from "client/spectating";
 
 /**
  * **The sheet's type scale: every variant one step larger than the game scale.**
@@ -198,6 +208,33 @@ const SHELF_SCROLL_SPEED = 26;
 /** **Placeholder.** Diameter of a rarity swatch circle, in pixels. */
 const SWATCH = 24;
 
+/**
+ * **Placeholder.** Diameter of the ball inside an inventory card or a prize card, in pixels: **50% larger than `SWATCH`**
+ * (item 234).
+ *
+ * `SWATCH` stays `24` and still sizes the one swatch that did not grow - the fusion row's material pip, which sits in a
+ * 34-pixel row and has no room for more. These two are the cards: the swatch on a card is the thing the card is *about*, and at
+ * 24 it read as a badge in the corner of an art block.
+ *
+ * **Two constants rather than one.** The inventory card and the prize card are the same size today, and they are still two
+ * numbers because they are two decisions: the inventory is a scrolling grid of owned balls, the prize card is a single
+ * reward, and a designer retuning one should not silently retune the other. That is the rule `JUMP_IMPULSE` states about
+ * two values that happen to agree.
+ *
+ * The icon is not sized here - `attachBallIcon` draws at `UDim2.fromScale(1, 1)` inside the circle, so the drawing grows with
+ * it.
+ */
+const INVENTORY_SWATCH = 36;
+
+/**
+ * **Placeholder.** The same 50% for a prize card, kept separate from `INVENTORY_SWATCH` on purpose - see there.
+ *
+ * **This is the tightest fit in the tree, and the two prize cards differ.** The shelf card's art is `CARD_ART = 46`, so a
+ * 36-pixel ball leaves 5 pixels above and below; the `View All` catalog card's art is `PRIZE_CARD_ART = 52` and leaves 8.
+ * Neither cell grows, because the ball is centred inside the art block rather than stacked with the name. **A further 50%
+ * (`54`) would overflow the shelf card's art**, which is the line to watch if this is retuned.
+ */
+const PRIZE_CARD_SWATCH = 36;
 /** **Placeholder.** Draw order of the store's chrome, above `hudCore`'s rail. */
 const STORE_Z_INDEX = 5;
 
@@ -252,7 +289,19 @@ const PURCHASE_GUARD_TIMEOUT_SECONDS = 30;
  * area, so it has to have a height of its own for `AutomaticCanvasSize` to have something to be taller than, and a
  * fraction would make a tall monitor stretch a grid of 84-pixel cards over 900 pixels of emptiness.
  */
-const INVENTORY_ROW_HEIGHT = 300;
+/**
+ * **Placeholder.** The inventory's content row, in pixels: the `Balls` grid or the `Fusion` list, beside their detail pane.
+ *
+ * **Raised from `300` to `380` in item 230, and the arithmetic is the reason.** The detail pane is a fixed-height vertical list,
+ * so its children have to fit or the lowest one is clipped by the sheet. Before the description existed they came to
+ * `96 + 8 + 24 + 8 + 16 + 8 + 16 + 8 + 54 = 238`, leaving `62` pixels spare. A three-sentence description at `body2` in a
+ * column about `230` pixels wide wraps to roughly five lines, which is `5 x 20 + 8 = 108` - more than the spare, so the pane
+ * had to grow by the difference with margin. `380` leaves about `140`.
+ *
+ * **The sheet's height is derived from this** (`INVENTORY_PANEL_SIZE`), so the whole panel grows with it and `applyPanelScale`
+ * keeps it on screen at every viewport - the growth is a design change, not a clipping risk.
+ */
+const INVENTORY_ROW_HEIGHT = 380;
 
 /** The inventory sheet: one comfortable column, tall enough for the row plus its bands. */
 const INVENTORY_PANEL_SIZE = UDim2.fromOffset(
@@ -343,7 +392,15 @@ const INVENTORY_TABS = ["Balls", "Fusion"];
 /** **Placeholder.** Share of the row taken by the collection; the detail pane takes the rest (~75/25). */
 const INVENTORY_COLLECTION_FRACTION = 0.72;
 
-/** **Placeholder.** Card size in the collection grid, in pixels. */
+/**
+ * **Placeholder.** Card size in the collection grid, in pixels.
+ *
+ * **The height did not grow with `INVENTORY_SWATCH` (item 234), and that is a measurement rather than an omission.** The pip is
+ * not stacked with the name: it is **centred inside the art block**, whose height is
+ * `INVENTORY_CARD_HEIGHT - caption.lineHeight - SPACING.xs * 2 = 86 - 16 - 8 = 62`. A 36-pixel circle inside a 62-pixel band
+ * has 13 pixels of clearance above and below, so the card holds it unchanged - and the height is also the grid's `CellSize`,
+ * so growing it would have re-flowed the whole collection for nothing.
+ */
 const INVENTORY_CARD_WIDTH = 84;
 const INVENTORY_CARD_HEIGHT = 86;
 
@@ -420,11 +477,27 @@ interface ChestSpec {
  * half of a rule that only makes sense whole ("opening one closes the other"). One file, one `open` field, one place
  * where exclusivity is true by construction.
  *
- * ## The phase rule, and which of the two readings it is
+ * ## When the tabs are visible (item 219)
  *
- * **Tabs are visible only during `Intermission`. A panel already open stays open when the phase changes, and closes on
- * entry to the *next* `Intermission` — not on exit from this one.** That is reading (B): a player mid-decision when
- * `Waiting` begins keeps their sheet and their place in it, but the way back in is gone until the next intermission.
+ * **Whenever this player's camera is not on the arena** — `isShoppingAvailable(phase, competing, spectating)`, which is the
+ * negation of `cameraWantsArena`. That predicate was `phase === "Intermission"` from item 50 until item 219, written when
+ * "shopping is a between-rounds activity" was true. Item 209 capped a round at 120 seconds, and a player eliminated at second
+ * 30 then sat idle for ninety seconds with no way to spend anything; a player who joined mid-round had the same problem for
+ * the whole round. Both are looking at their own character and neither is driving a ball, so both may shop.
+ *
+ * The three states it gets right that the phase rule could not:
+ *
+ * - **`Playing`, eliminated, not spectating** — lobby camera, tabs shown, panels open.
+ * - **`Playing`, eliminated, pressed `Watch Race`** — arena camera, tabs hidden, any open panel's lock released.
+ * - **`Waiting`, not competing** (a late joiner before the race starts) — lobby camera, tabs shown. A competitor in
+ *   `Waiting` keeps the picker, which is that phase's panel; the rule gets this without knowing what a picker is.
+ *
+ * ## The other half of the old rule is unchanged
+ *
+ * **A panel already open stays open when the phase changes, and closes on entry to the *next* `Intermission` — not on exit
+ * from this one.** That is reading (B) of item 50: a player mid-decision when `Waiting` begins keeps their sheet and their
+ * place in it, but the way back in is gone until the next intermission. Availability governs *opening* a panel, never
+ * *closing* one.
  *
  * ## Why the store's text is NOT big-ui `Text`
  *
@@ -452,6 +525,14 @@ export class ShopController implements OnStart {
 
 	private open: "shop" | "inventory" | "none" = "none";
 	private phase = "unknown";
+
+	/**
+	 * Whether the rail is on screen and a panel may be opened: **`isShoppingAvailable` for the current three facts** (item 219).
+	 *
+	 * Stored rather than re-derived at each reader because three places need the same answer (the rail, the open press, the
+	 * movement lock) and a second derivation is how one of them ends up disagreeing after a change nobody re-read.
+	 */
+	private available = false;
 
 	/**
 	 * When this client last saw the phase *become* `Intermission`, on `os.clock()`.
@@ -521,6 +602,9 @@ export class ShopController implements OnStart {
 
 	/** The identity band's three live pieces: the tinted block, the chest's name, and its tier summary. */
 	private prizeChestBlock?: Frame;
+	/** The block's picture and the word behind it, both written per view because one band serves both chests (item 235). */
+	private prizeChestIcon?: ImageLabel;
+	private prizeChestFallback?: TextLabel;
 	private prizeChestName?: TextLabel;
 	private prizeOddsLabel?: TextLabel;
 
@@ -585,6 +669,15 @@ export class ShopController implements OnStart {
 	 */
 	private inspectBallId?: string;
 
+	/**
+	 * The word `CHEST` in each chest square, kept so it can be re-shown if the picture does not arrive (item 235).
+	 *
+	 * Two entries, one per section. The labels stay in the tree with `Visible = false` when a picture exists, so the
+	 * fallback is one property per label rather than a rebuild - `reportChestIconsLoad`'s failure callback is the only
+	 * writer.
+	 */
+	private readonly chestFallbackLabels = new Array<TextLabel>();
+
 	/** The `Fusion` tab's chosen material. */
 	private fusionMaterialId?: string;
 
@@ -613,9 +706,13 @@ export class ShopController implements OnStart {
 	private fusionList?: ScrollingFrame;
 	private detailPreview?: Frame;
 	private detailBall?: Frame;
+	/** The preview's drawing, inside `detailBall` (item 233). Written by `refreshDetailPanel`, never rebuilt. */
+	private detailBallIcon?: ImageLabel;
 	private detailName?: TextLabel;
 	private detailRarity?: TextLabel;
 	private detailCount?: TextLabel;
+	/** The ball's power description (item 230). Empty for a ball with no `POWERS` row. */
+	private detailDescription?: TextLabel;
 	private detailHint?: TextLabel;
 	private fusionMaterialLabel?: TextLabel;
 	private fusionEmptyLabel?: TextLabel;
@@ -636,6 +733,13 @@ export class ShopController implements OnStart {
 		this.rail = this.buildRail(gui);
 
 		this.applyPhase(this.readPhase());
+
+		// **Both inputs to the availability rule are watched, not polled (item 219).** `Competing` is written by the server at
+		// spawn, at elimination and at teardown; `spectating` is this client's own `Watch Race` toggle. Neither has a readable
+		// value on the first frame, which is why `applyAvailability` reads both fresh rather than being handed them.
+		this.player.GetAttributeChangedSignal(PLAYER_COMPETING_ATTRIBUTE).Connect(() => this.applyAvailability());
+		onSpectatingChanged(() => this.applyAvailability());
+
 		this.connectRemotes();
 		this.connectAttributes();
 		this.connectPolicyGate();
@@ -648,7 +752,19 @@ export class ShopController implements OnStart {
 		// that refused to open over a picture.
 		reportCoinIconLoad();
 
-		print(`[Shop] mounted phase=${this.phase} tabs=${this.rail.Visible ? "visible" : "hidden"}`);
+		// **Can the engine fetch the two chest pictures? (item 235.)** The panels are already built, so this cannot decide
+		// whether to draw a picture - it decides whether to keep the word behind it. A failure re-shows `CHEST` in both
+		// squares rather than leaving 108 pixels of empty well, which is the one cosmetic failure this store treats as a
+		// broken panel rather than as a decoration that did not arrive.
+		reportChestIconsLoad(() => {
+			for (const label of this.chestFallbackLabels) {
+				label.Visible = true;
+			}
+		});
+
+		print(
+			`[Shop] mounted phase=${this.phase} avail=${tostring(this.available)} tabs=${this.rail.Visible ? "visible" : "hidden"}`,
+		);
 	}
 
 	/**
@@ -872,15 +988,13 @@ export class ShopController implements OnStart {
 			}
 		}
 
-		this.rail.Visible = inIntermission;
-
-		// **`Modal` follows the phase as well as the panel, so the phase change has to re-answer it (item 161).**
+		// **The rail and the movement lock both follow availability, and both are re-answered here (items 161, 219).**
 		//
-		// It is called here *before* the early return, and that ordering is the whole point: item 50's rule below leaves the
-		// sheet open when the phase leaves `Intermission`, so this is the one moment the panel is still visible and must stop
-		// swallowing input. Putting it after the return would make a store left open across `Playing` keep a dead joystick for
-		// the rest of the round — the failure this round exists to prevent, arriving from the other side.
-		this.applyModal();
+		// Called *before* the early return, and that ordering is still the whole point: item 50's rule below leaves the sheet
+		// open when the phase changes, so this is the one moment the panel is still visible and must stop swallowing input.
+		// Putting it after the return would make a store left open across `Playing` keep a dead joystick for the rest of the
+		// round — the failure item 161 exists to prevent, arriving from the other side.
+		this.applyAvailability();
 
 		if (!inIntermission) {
 			// (B): the sheet stays open. Only the way back in is removed.
@@ -970,7 +1084,16 @@ export class ShopController implements OnStart {
 		}
 	}
 
+	/**
+	 * A rail press. **Refused when the player cannot shop** (item 219) - a second reader of `available` rather than a second
+	 * rule, so a press that arrives after the rail has been hidden (a touch queued on the frame the phase changed) cannot open a
+	 * panel the camera has already taken the player away from.
+	 */
 	private toggle(target: PanelId): void {
+		if (!this.available) {
+			return;
+		}
+
 		this.setOpen(this.open === target ? "none" : target);
 	}
 
@@ -998,6 +1121,48 @@ export class ShopController implements OnStart {
 	}
 
 	/**
+	 * Re-answers "may this player shop?", and puts the rail, the lock and one log line in step with the answer (item 219).
+	 *
+	 * ## Why one function
+	 *
+	 * The rail's visibility, a fresh press and the movement lock are three readers of one fact. Written at each site they drift
+	 * in the direction that is invisible in a single run — a hidden rail over a panel the player can still open by keyboard focus,
+	 * or a visible rail over a locked character. This is the one place the fact is computed.
+	 *
+	 * ## What it deliberately does not touch
+	 *
+	 * **A panel already open stays open.** Item 50's reading (B) is about which panel a player is looking at, not about when the
+	 * store is open, so availability governs the rail and the lock and never calls `setOpen`. The panel closes with its `X`, or
+	 * on entry to the next `Intermission` (`applyPhase`).
+	 *
+	 * ## The log line
+	 *
+	 * One per *change*, like `applyModal`'s, because "why did the tabs vanish" is answered by three inputs and a line printed on
+	 * every `Player` attribute write would bury the two that matter. `competing` is `=== true` rather than truthy: the attribute is
+	 * `undefined` on a player who joined mid-round and never had it written, and `undefined` must read as "not competing".
+	 */
+	private applyAvailability(): void {
+		const competing = this.player.GetAttribute(PLAYER_COMPETING_ATTRIBUTE) === true;
+		const spectating = isSpectating();
+		// **No phase means no answer, and "hidden" is the answer.** `RoundState` is the one input that must exist before this
+		// question can be asked at all: without it the client cannot tell a lobby from a belt, and `cameraWantsArena` answers
+		// "not the arena" for every string it does not recognise. Opening the store is the harmless direction in practice, but a
+		// boot line reading `avail=true phase=unknown` reads like a bug in the shop rather than like a missing value, so the
+		// unreadable case stays closed - which is what `readPhase` already warns about.
+		const available = this.phase !== "unknown" && isShoppingAvailable(this.phase, competing, spectating);
+
+		if (available !== this.available) {
+			this.available = available;
+			print(
+				`[Shop] avail=${tostring(available)} phase=${this.phase} competing=${tostring(competing)} spectating=${tostring(spectating)}`,
+			);
+		}
+
+		this.rail.Visible = available;
+		this.applyModal();
+	}
+
+	/**
 	 * Decides whether movement is taken away, and it is the **only place the lock is taken or released in this controller** (item
 	 * 161).
 	 *
@@ -1009,19 +1174,23 @@ export class ShopController implements OnStart {
 	 * touch, **stops the click and not the character**: the dynamic thumbstick is drawn and driven by the `PlayerModule`'s touch
 	 * controls, which read `UserInputService` rather than GUI hit-testing. See `client/controls-lock.ts` for the whole argument.
 	 *
-	 * ## Why it is `open !== "none"` **and** the phase is `Intermission`
+	 * ## Why it is `open !== "none"` **and** the player can shop
 	 *
-	 * This is where item 50's phase rule and this round's input fix collide, and the collision is real: item 50 says a panel left
-	 * open when the phase changes **stays open**, so a store opened in `Intermission` and left open is still on screen during
-	 * `Playing`. If the lock followed visibility alone, that player could not move for the whole race — the panel over the belt
-	 * *and* the character frozen, with nothing in any log to say why.
+	 * This is where item 50's "a panel left open stays open" rule and the input lock collide, and the collision is real: a store
+	 * opened in the lobby and left open is still on screen when the round begins. If the lock followed visibility alone, that
+	 * player could not move for the whole race — the panel over the belt *and* the character frozen, with nothing in any log to
+	 * say why.
 	 *
 	 * So it follows both. A panel left open across a phase change keeps item 50's behaviour exactly — visible, not closed by the
-	 * phase — but gives movement back, so the player can still race under it. The cost is named rather than hidden: **a panel
+	 * phase — but gives movement back, so the player can still drive under it. The cost is named rather than hidden: **a panel
 	 * covering the belt is something the player can still drive under.** Closing it with the `X` restores both.
+	 *
+	 * **The second half is `available`, not `phase === "Intermission"` (item 219).** Availability is exactly "the camera is not
+	 * on the arena", so a player whose camera has gone back to the arena gets their movement back on the same frame the tabs
+	 * hide — including the eliminated player who presses `Watch Race` with a panel open.
 	 */
 	private applyModal(): void {
-		const wants = this.open !== "none" && this.phase === PHASE_INTERMISSION;
+		const wants = this.open !== "none" && this.available;
 
 		if (wants === (this.controlsRelease !== undefined)) {
 			return;
@@ -1529,7 +1698,7 @@ export class ShopController implements OnStart {
 
 		this.text(scope, section, "Coin Chest", "h6", "primary", 1, new UDim2(1, 0, 0, SECTION_TITLE_HEIGHT), false);
 
-		this.buildPreviewRow(scope, section, 2, chestOdds());
+		this.buildPreviewRow(scope, section, 2, chestOdds(), COIN_CHEST_IMAGE_ID);
 		this.buildPrizeHeaderRow(scope, section, 3, "coin");
 
 		const shelf = this.buildPrizeShelf(scope, section, 4);
@@ -1670,7 +1839,7 @@ export class ShopController implements OnStart {
 		badgeLabel.TextColor3 = this.theme.colors.premium;
 		badgeLabel.TextYAlignment = Enum.TextYAlignment.Center;
 
-		this.buildPreviewRow(scope, section, 2, robuxChestOdds());
+		this.buildPreviewRow(scope, section, 2, robuxChestOdds(), PREMIUM_CHEST_IMAGE_ID);
 		this.buildPrizeHeaderRow(scope, section, 3, "premium");
 
 		const shelf = this.buildPrizeShelf(scope, section, 4);
@@ -1829,12 +1998,21 @@ export class ShopController implements OnStart {
 	 * **The square is a fixed 124 pixels, not a fraction.** The previous version gave the preview a share of the panel
 	 * width, so it stretched into a wide empty box on a large screen — the "oversized empty container" the brief calls
 	 * out. A fixed square beside a fixed-width statistics column keeps the two grouped.
+	 *
+	 * ## The picture, and the word behind it (item 235)
+	 *
+	 * The square is still a well - trough fill, hairline border, rounded corner - and it still carries the word `CHEST`.
+	 * The drawing is an `ImageLabel` on top of it. **The word is hidden while a picture exists and re-shown if the engine
+	 * cannot fetch it**: a 108-pixel blank square reads as a broken panel, so the fallback is a real state rather than a
+	 * comment. `reportChestIconsLoad` is what turns the word back on, and an empty `imageId` never adds a picture at all -
+	 * which is the ten-ball bundle's case, and the reason the parameter is optional.
 	 */
 	private buildPreviewRow(
 		scope: Fusion.Scope<unknown>,
 		parent: Instance,
 		order: number,
 		odds: Array<ChestOdd>,
+		imageId?: string,
 	): void {
 		const row = Fusion.New(
 			scope,
@@ -1887,9 +2065,50 @@ export class ShopController implements OnStart {
 			Parent: preview,
 		});
 
-		const previewLabel = this.text(scope, preview, "CHEST", "caption", "disabled", 1, UDim2.fromScale(1, 1), false);
-		previewLabel.TextXAlignment = Enum.TextXAlignment.Center;
-		previewLabel.TextYAlignment = Enum.TextYAlignment.Center;
+		// **The fallback, and it is a state rather than a comment** (item 235). Until this round the square *was* the word:
+		// there was no chest art and an invented `rbxassetid` would have been a broken image on every client. The drawing now
+		// exists, so the word becomes what shows when there is no picture - either because the id is empty (the bundle) or
+		// because the engine could not fetch it, which `reportChestIconsLoad` re-enables below.
+		const fallbackLabel = this.text(
+			scope,
+			preview,
+			"CHEST",
+			"caption",
+			"disabled",
+			1,
+			UDim2.fromScale(1, 1),
+			false,
+		);
+		fallbackLabel.TextXAlignment = Enum.TextXAlignment.Center;
+		fallbackLabel.TextYAlignment = Enum.TextYAlignment.Center;
+		this.chestFallbackLabels.push(fallbackLabel);
+
+		const uri = imageId === undefined ? "" : chestIconUri(imageId);
+		if (uri !== "") {
+			Fusion.New(
+				scope,
+				"ImageLabel",
+			)({
+				Name: "ChestIcon",
+				// The whole square: `Fit` keeps the drawing's aspect rather than stretching it into the well, which is what a
+				// non-square upload needs and what a square one cannot tell apart from `Stretch`.
+				Size: UDim2.fromScale(1, 1),
+				BackgroundTransparency: 1,
+				BorderSizePixel: 0,
+				Image: uri,
+				ScaleType: Enum.ScaleType.Fit,
+				// **`+ 6`, because the word it covers is at `+ 5`.** `this.text` gives every label it builds `STORE_Z_INDEX + 5`
+				// (that is the first order reliably above the chunky chrome's face), so the `+ 1` `attachBallIcon` uses would put
+				// this picture *under* the word - these panels run `ZIndexBehavior.Global`, where a lower child draws behind its
+				// sibling.
+				ZIndex: STORE_Z_INDEX + 6,
+				Parent: preview,
+			});
+
+			// The word is *behind* the picture, not removed from the tree: one property revives it, and that property is the
+			// only thing the failure callback has to touch.
+			fallbackLabel.Visible = false;
+		}
 
 		// Rarity statistics, immediately beside the square. A vertical list so the four rows are evenly spaced however
 		// many tiers exist, from `chestOdds()` rather than from a copy.
@@ -2230,8 +2449,9 @@ export class ShopController implements OnStart {
 		ball.Name = "Ball";
 		ball.AnchorPoint = new Vector2(CENTRE, CENTRE);
 		ball.Position = UDim2.fromScale(CENTRE, CENTRE);
-		ball.Size = UDim2.fromOffset(SWATCH, SWATCH);
-		ball.BackgroundColor3 = tint;
+		ball.Size = UDim2.fromOffset(PRIZE_CARD_SWATCH, PRIZE_CARD_SWATCH);
+		// **The ball's colour on the swatch, the rarity on the ring and the art wash** (item 226).
+		ball.BackgroundColor3 = colorForBall(ballId) ?? tint;
 		ball.BorderSizePixel = 0;
 		ball.ZIndex = STORE_Z_INDEX + 5;
 		ball.Parent = art;
@@ -2239,6 +2459,9 @@ export class ShopController implements OnStart {
 		const ballCorner = new Instance("UICorner");
 		ballCorner.CornerRadius = ROUND;
 		ballCorner.Parent = ball;
+
+		// **The ball's own drawing on the prize card** (item 233), inside the colour swatch item 226 put here.
+		attachBallIcon(ball, ballId);
 
 		const name = new Instance("TextLabel");
 		name.Name = "Name";
@@ -2396,10 +2619,13 @@ export class ShopController implements OnStart {
 	/**
 	 * The chest's identity, in one band.
 	 *
-	 * The reference puts this in a whole column - a large render, a name plate and a stacked odds table. This game has no
-	 * chest art (item 58 established the tinted `CHEST` block as the placeholder and an invented `rbxassetid` is a broken
-	 * image on every client), so the column collapses to a row: block, name, and the tier percentages on one line. The odds
-	 * are here rather than only in the chest section because this is where the player is reading what the chest can give.
+	 * The reference puts this in a whole column - a large render, a name plate and a stacked odds table. The block is the
+	 * picture and the name plus the tier percentages sit beside it. The odds are here rather than only in the chest section
+	 * because this is where the player is reading what the chest can give.
+	 *
+	 * **This band is shared by both kinds**, so its picture is decided per view in `fillPrizeView` rather than here: the
+	 * block is built once and re-tinted, renamed and re-pictured as the player moves between the coin chest's prizes and the
+	 * premium chest's. The word `CHEST` is still behind the picture and re-shows if the fetch fails (item 235).
 	 */
 	private buildPrizeChestBand(scope: Fusion.Scope<unknown>, parent: Instance, order: number): void {
 		const band = Fusion.New(
@@ -2454,6 +2680,24 @@ export class ShopController implements OnStart {
 		const blockLabel = this.text(scope, block, "CHEST", "overline", "disabled", 1, UDim2.fromScale(1, 1), false);
 		blockLabel.TextXAlignment = Enum.TextXAlignment.Center;
 		blockLabel.TextYAlignment = Enum.TextYAlignment.Center;
+		this.chestFallbackLabels.push(blockLabel);
+		this.prizeChestFallback = blockLabel;
+
+		// Built empty and filled per view, because this band is one instance serving both chests (item 235). `+ 6` puts it above
+		// the word, which `this.text` builds at `+ 5`.
+		this.prizeChestIcon = Fusion.New(
+			scope,
+			"ImageLabel",
+		)({
+			Name: "ChestIcon",
+			Size: UDim2.fromScale(1, 1),
+			BackgroundTransparency: 1,
+			BorderSizePixel: 0,
+			Image: "",
+			ScaleType: Enum.ScaleType.Fit,
+			ZIndex: STORE_Z_INDEX + 6,
+			Parent: block,
+		});
 
 		// The name and the odds, stacked in one cell so the band is one row high however long the odds line gets.
 		const textColumn = Fusion.New(
@@ -2801,6 +3045,18 @@ export class ShopController implements OnStart {
 			}
 		}
 
+		// **The picture, per view** (item 235). One band serves both chests, so the drawing is a property written on the
+		// way in rather than part of the build - and the word beneath it is visible only when there is no picture to cover it.
+		if (this.prizeChestIcon !== undefined) {
+			const uri = chestIconUri(spec.kind === "premium" ? PREMIUM_CHEST_IMAGE_ID : COIN_CHEST_IMAGE_ID);
+			this.prizeChestIcon.Image = uri;
+
+			const fallback = this.prizeChestFallback;
+			if (fallback !== undefined) {
+				fallback.Visible = uri === "";
+			}
+		}
+
 		const grid = this.prizeGrid;
 		const empty = this.prizeEmpty;
 		if (grid === undefined || empty === undefined) {
@@ -2884,8 +3140,9 @@ export class ShopController implements OnStart {
 		ball.Name = "Ball";
 		ball.AnchorPoint = new Vector2(CENTRE, CENTRE);
 		ball.Position = UDim2.fromScale(CENTRE, CENTRE);
-		ball.Size = UDim2.fromOffset(SWATCH, SWATCH);
-		ball.BackgroundColor3 = tint;
+		ball.Size = UDim2.fromOffset(PRIZE_CARD_SWATCH, PRIZE_CARD_SWATCH);
+		// **The ball's colour on the swatch, the rarity on the ring and the art wash** (item 226).
+		ball.BackgroundColor3 = colorForBall(ballId) ?? tint;
 		ball.BorderSizePixel = 0;
 		ball.ZIndex = STORE_Z_INDEX + 6;
 		ball.Parent = art;
@@ -2893,6 +3150,10 @@ export class ShopController implements OnStart {
 		const ballCorner = new Instance("UICorner");
 		ballCorner.CornerRadius = ROUND;
 		ballCorner.Parent = ball;
+
+		// **The ball's own drawing on the catalog card** (item 233) - the same one line as the prize card above it, because the
+		// two cards differ in size and z-order rather than in what a ball looks like.
+		attachBallIcon(ball, ballId);
 
 		const name = new Instance("TextLabel");
 		name.Name = "Name";
@@ -3395,8 +3656,9 @@ export class ShopController implements OnStart {
 		pip.Name = "Ball";
 		pip.AnchorPoint = new Vector2(CENTRE, CENTRE);
 		pip.Position = UDim2.fromScale(CENTRE, CENTRE);
-		pip.Size = UDim2.fromOffset(SWATCH, SWATCH);
-		pip.BackgroundColor3 = tint;
+		pip.Size = UDim2.fromOffset(INVENTORY_SWATCH, INVENTORY_SWATCH);
+		// **The ball's colour on the swatch, the rarity on the ring and the art wash** (item 226).
+		pip.BackgroundColor3 = colorForBall(ball.id) ?? tint;
 		pip.BorderSizePixel = 0;
 		pip.ZIndex = STORE_Z_INDEX + 6;
 		pip.Parent = art;
@@ -3404,6 +3666,10 @@ export class ShopController implements OnStart {
 		const pipCorner = new Instance("UICorner");
 		pipCorner.CornerRadius = ROUND;
 		pipCorner.Parent = pip;
+
+		// **The ball's own drawing on the inventory card** (item 233). This is the swatch a player compares against the detail
+		// preview below it, so the two now show the same drawing at two sizes rather than two shades of the same colour.
+		attachBallIcon(pip, ball.id);
 
 		const countLabel = new Instance("TextLabel");
 		countLabel.Name = "Count";
@@ -3468,7 +3734,9 @@ export class ShopController implements OnStart {
 		pip.AnchorPoint = new Vector2(0, CENTRE);
 		pip.Position = UDim2.fromScale(0, 0.5);
 		pip.Size = UDim2.fromOffset(SWATCH - SPACING.xs, SWATCH - SPACING.xs);
-		pip.BackgroundColor3 = tint;
+		// **The ball's colour on the swatch, the rarity on the row's ring** (item 226) - so the material you are choosing
+		// matches the swatch on the card you chose it from.
+		pip.BackgroundColor3 = colorForBall(ball.id) ?? tint;
 		pip.BorderSizePixel = 0;
 		pip.ZIndex = STORE_Z_INDEX + 5;
 		pip.Parent = rowChrome.face;
@@ -3476,6 +3744,10 @@ export class ShopController implements OnStart {
 		const pipCorner = new Instance("UICorner");
 		pipCorner.CornerRadius = ROUND;
 		pipCorner.Parent = pip;
+
+		// **The material pip's drawing** (item 233) - the material you are choosing should look like the ball you chose it from,
+		// which is the argument the colour on this pip already made, one level more literal.
+		attachBallIcon(pip, ball.id);
 
 		const nameLabel = new Instance("TextLabel");
 		nameLabel.Name = "Name";
@@ -3532,6 +3804,12 @@ export class ShopController implements OnStart {
 				this.detailBall.BackgroundColor3 = this.theme.colors.textDisabled;
 			}
 
+			if (this.detailBallIcon !== undefined) {
+				// Nothing selected, so nothing is drawn - the same `""` the `ImageLabel` was built with, and the reason the grey
+				// above is visible at all rather than being covered by the last ball looked at.
+				this.detailBallIcon.Image = "";
+			}
+
 			label.Text = "Nothing selected";
 			label.TextColor3 = this.theme.colors.textSecondary;
 
@@ -3541,6 +3819,12 @@ export class ShopController implements OnStart {
 
 			if (this.detailCount !== undefined) {
 				this.detailCount.Text = "";
+			}
+
+			if (this.detailDescription !== undefined) {
+				// **Empty, not a placeholder sentence.** With nothing selected there is no ball and therefore nothing to describe;
+				// `AutomaticSize.Y` collapses the label to zero height so the pane's rhythm does not change.
+				this.detailDescription.Text = "";
 			}
 
 			if (this.detailHint !== undefined) {
@@ -3553,7 +3837,14 @@ export class ShopController implements OnStart {
 		const tint = this.theme.colors.rarity[ball.rarity];
 
 		if (this.detailBall !== undefined) {
-			this.detailBall.BackgroundColor3 = tint;
+			// **The ball's colour, like every other swatch** (item 226). This is the large preview beside the detail text - the
+			// closest the inventory gets to showing you the ball itself.
+			this.detailBall.BackgroundColor3 = colorForBall(ball.id) ?? tint;
+		}
+
+		if (this.detailBallIcon !== undefined) {
+			// **And the ball's drawing on top of it** (item 233), which is the part that actually says *which* ball this is.
+			this.detailBallIcon.Image = iconForBall(ball.id) ?? "";
 		}
 
 		label.Text = displayName(ball.id);
@@ -3567,6 +3858,14 @@ export class ShopController implements OnStart {
 		if (this.detailCount !== undefined) {
 			this.detailCount.Text = `Owned: ${ball.count}`;
 			this.detailCount.TextColor3 = this.theme.colors.textSecondary;
+		}
+
+		if (this.detailDescription !== undefined) {
+			// **Rewritten, not rebuilt.** The pane's labels are created once when the panel is built and every selection change
+			// goes through this function, so the description is one more `Text` write on that path - the same way the name,
+			// the rarity and the count already work. A rebuilt label would be a second construction site to keep in step.
+			this.detailDescription.Text = describeBallPower(ball.id);
+			this.detailDescription.TextColor3 = this.theme.colors.textSecondary;
 		}
 
 		if (this.detailHint !== undefined) {
@@ -4195,6 +4494,10 @@ export class ShopController implements OnStart {
 
 		this.corners(detailScope, ball, 0, ROUND);
 		this.detailBall = ball;
+		// **Built empty, filled by `refreshDetailPanel`** (item 233). The pane is refreshed rather than rebuilt (item 230), so the
+		// preview's drawing is one more property written on that path, right beside the colour - creating the `ImageLabel` here
+		// keeps that path to property writes and gives it nothing to construct.
+		this.detailBallIcon = attachBallIcon(ball, "");
 
 		this.detailName = this.text(
 			detailScope,
@@ -4226,13 +4529,34 @@ export class ShopController implements OnStart {
 			new UDim2(1, 0, 0, PANEL_TYPE.body2.size),
 			false,
 		);
+		// **The power description** (item 230). Secondary ink because the name is the heading and this is body copy, wrapped
+		// because a sentence does not fit a fixed width, and `AutomaticSize.Y` so a two-sentence ball and a three-sentence ball
+		// both read correctly instead of one of them trailing blank space.
+		//
+		// **`TextTruncate.AtEnd`, and it is a safety net rather than the plan.** The spec caps every description at three
+		// sentences, and `INVENTORY_ROW_HEIGHT` was raised to fit that; a future string that ignores the cap truncates visibly
+		// instead of pushing the row's hint off the bottom of the sheet.
+		this.detailDescription = this.text(
+			detailScope,
+			detail,
+			"",
+			"body2",
+			"secondary",
+			5,
+			new UDim2(1, 0, 0, 0),
+			false,
+		);
+		this.detailDescription.AutomaticSize = Enum.AutomaticSize.Y;
+		this.detailDescription.TextWrapped = true;
+		this.detailDescription.TextYAlignment = Enum.TextYAlignment.Top;
+
 		this.detailHint = this.text(
 			detailScope,
 			detail,
 			"",
 			"caption",
 			"secondary",
-			5,
+			6,
 			new UDim2(1, 0, 0, PANEL_TYPE.caption.lineHeight * 3),
 			false,
 		);
