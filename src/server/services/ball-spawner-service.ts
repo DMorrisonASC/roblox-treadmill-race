@@ -2066,9 +2066,11 @@ export class BallSpawnerService implements OnStart {
 			// ball at `BALL_SPEED = 0` is travelling toward the exit at the full belt speed. Slowing down is *how you lose
 			// ground*, and the ball's own spin is the honest report of that.
 			//
-			// At `BALL_SPEED = 10` and a fully held input this drains `SLOW_DRAIN_RATE = 5`/s, so the ball reaches
-			// `BALL_SPEED_MIN` in `2 s` and then stops falling - the clamp is the floor, so holding the key past that point is
-			// free rather than punishing.
+			// At `BALL_SPEED = 10` a fully held input drains `2 + SLOW_DRAIN_RATE = 27`/s - the natural decay plus `25` - so the
+			// ball reaches `BALL_SPEED_MIN` in `0.37 s` rather than the `5 s` the decay alone would take, and then stops falling:
+			// the clamp is the floor, so holding the key past that point is free rather than punishing. A boosted ball at
+			// `BOOST_TARGET_BALL_SPEED = 80` needs `2.96 s` of full hold for the same trip, which is the range this one number
+			// has to serve.
 			const slowDrain = -slowAxis * SLOW_DRAIN_RATE * dt;
 			// `advanced`, not `next`: `next` is a Lua global and roblox-ts rejects the identifier outright — the same
 			// reason the line above calls its intermediate `decayed`.

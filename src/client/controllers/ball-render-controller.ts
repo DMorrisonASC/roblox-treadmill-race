@@ -1,11 +1,12 @@
-import { CollectionService, ReplicatedStorage, RunService } from "@rbxts/services";
+import { CollectionService, Players, ReplicatedStorage, RunService } from "@rbxts/services";
 import { Controller, OnStart } from "@flamework/core";
-import { BALL_SPEED_ATTRIBUTE, GHOST_ACTIVE_ATTRIBUTE } from "shared/attributes";
+import { BALL_SPEED_ATTRIBUTE, GHOST_ACTIVE_ATTRIBUTE, OWNER_USER_ID_ATTRIBUTE } from "shared/attributes";
 import { GHOST_TRANSPARENCY_WHILE_ACTIVE } from "shared/config/ghost.config";
 import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import { TAGS } from "shared/tags";
-import { BALL_PHANTOM_NAME } from "shared/tuning";
+import { BALL_PHANTOM_NAME, STEER_SPEED } from "shared/tuning";
 import { apparentSpinAxis, apparentSpinRate } from "shared/apparent-spin";
+import { currentSteerAxis } from "client/controllers/steer-controller";
 
 /**
  * Frames between re-orthonormalisations of the accumulated roll.
@@ -23,6 +24,42 @@ const PROBE_INTERVAL_SECONDS = 1;
 
 /** TEMPORARY INSTRUMENTATION (item 197). Total `probe` lines this session, so the diagnostic cannot flood. */
 const PROBE_LINE_LIMIT = 16;
+
+/**
+ * **Placeholder.** How far ahead of the server's position to draw the local ball, expressed as seconds of steering, in
+ * seconds.
+ *
+ * ## What this represents, and why it is a constant
+ *
+ * The server moves a ball on its own tick, some 50-200 ms after this client sent an axis. Between "the thumb moved" and "the
+ * server's position arrived", the client is showing a ball that has not steered yet. This number is how much of that gap to
+ * skip: the phantom is drawn `STEER_SPEED * axis * this` studs along the belt's lateral axis, which is exactly the distance
+ * the server will have moved the ball by the time this client sees it.
+ *
+ * **It is a lead, not a simulation.** Nothing here predicts collisions, the belt, powers, or the opponent; it is a visual
+ * offset on an anchored part that no code reads. See the class docblock.
+ *
+ * `0.15` against `STEER_SPEED = 45` is a lead of **6.75 studs at full lock** — about a third of a 20-stud ball's diameter,
+ * which reads as the ball responding rather than as the ball sliding away from its true position. Raising it hides more
+ * latency and lies more; lowering it is the honest extreme where steering feels like the round trip again.
+ */
+const PREDICTION_LAG_SECONDS = 0.15;
+
+/**
+ * **Placeholder.** The time constant of the local phantom's approach to its target, in seconds.
+ *
+ * ## Why the local ball is smoothed and every other ball is not
+ *
+ * A remote ball's position *is* the server's, so copying it exactly is right - any smoothing there would add lag to a body
+ * this client cannot predict anyway. The local ball's target moves for two reasons at once: the server's correction arriving,
+ * and the lead being recomputed from the live axis. Copying it exactly would show both as a snap - most visibly when the thumb
+ * is released, where the lead collapses from 6.75 studs to zero in one frame.
+ *
+ * `0.08` is a fifth of a second to settle to within 2%, which is fast enough to read as "the same ball" and slow enough that
+ * a correction is a glide. It is a **time constant**, not a per-frame fraction, so the smoothing behaves identically at 30 and
+ * 144 fps; a bare `Lerp(target, 0.2)` would be twice as fast on a twice-as-fast machine.
+ */
+const PHANTOM_SMOOTHING_TAU = 0.08;
 
 /**
  * The one phase the ball rolls in.
@@ -47,6 +84,14 @@ interface PhantomState {
 	 * minute, and writing seven properties per frame for a state that has not changed is the kind of cost this tree removes.
 	 */
 	dimmed: boolean;
+	/**
+	 * Whether this body is the local player's own, decided once when the phantom is built (item 238).
+	 *
+	 * `OwnerUserId` is written by the spawner **before** the body is parented, so reading it here cannot catch a body
+	 * mid-write; and it does not change for the life of a body. Kept on the state so the per-frame loop does not pay an
+	 * attribute read per ball to answer a question whose answer cannot change.
+	 */
+	local: boolean;
 }
 
 /**
@@ -77,10 +122,20 @@ interface PhantomState {
  *
  * ## Position from the ball, rotation from the roll
  *
- * `phantom.CFrame = new CFrame(ball.Position) * spin`, where `spin` is this controller's own accumulated rotation about the
- * belt's spin axis. **`ball.CFrame.Rotation` is never read** — that would hand the skin back the physics tumble this exists
- * to remove. The ball's position is replicated, so the skin can be no smoother than the ball; it is never *behind* by more
- * than a frame, because this runs on `RenderStepped`.
+ * `phantom.CFrame = new CFrame(ball.Position + lead) * spin`, where `spin` is this controller's own accumulated rotation about
+ * the belt's spin axis. **`ball.CFrame.Rotation` is never read** — that would hand the skin back the physics tumble this exists
+ * to remove.
+ *
+ * **`lead` is zero for every body except the local player's own** (item 238). For that one body it is
+ * `STEER_SPEED * axis * PREDICTION_LAG_SECONDS` studs along the belt's lateral axis, and the phantom eases into its target
+ * instead of copying it. That is a **visual lead, not a prediction of state**: the phantom is anchored, `CanCollide`,
+ * `CanQuery` and `CanTouch` are all off, the real ball is hidden on this client only, and nothing in the tree reads a
+ * phantom's position. So the server still owns the ball, every other client still sees the unaided positions, and this
+ * client's only claim is that its *picture* of its own ball is where the server's next broadcast will put it.
+ *
+ * Without the lead, the same input took a round trip to appear — which is what "the ball is stiff and half a second behind my
+ * thumb" was describing. `README.md` used to say "no client prediction"; it now says what is true, which is that no client
+ * predicts *state*.
  *
  * ## Who poses the markers
  *
@@ -199,7 +254,13 @@ export class BallRenderController implements OnStart {
 		this.copyTextures(ball, phantom);
 
 		phantom.Parent = ball;
-		this.phantoms.set(ball, { phantom, spin: new CFrame(), framesSinceNormalize: 0, dimmed: false });
+		this.phantoms.set(ball, {
+			phantom,
+			spin: new CFrame(),
+			framesSinceNormalize: 0,
+			dimmed: false,
+			local: ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE) === Players.LocalPlayer.UserId,
+		});
 
 		// Hidden only once the skin exists, so there is no frame in which the ball has vanished and nothing has replaced it.
 		ball.LocalTransparencyModifier = 1;
@@ -271,7 +332,13 @@ export class BallRenderController implements OnStart {
 		}
 	}
 
-	/** The belt's `RightVector`, or `+X` before a belt has replicated. See `apparentSpinAxis` for what it feeds. */ private beltRight(): Vector3 {
+	/**
+	 * The belt's frame, resolved by tag and cached until the part goes away.
+	 *
+	 * One resolution for two questions - the roll's axis and the steering axis - because they are the same part and a second
+	 * copy of this scan would be a second `cachedBelt` that could disagree about which belt is live.
+	 */
+	private beltFrame(): CFrame | undefined {
 		if (this.cachedBelt === undefined || this.cachedBelt.Parent === undefined) {
 			this.cachedBelt = undefined;
 
@@ -283,7 +350,28 @@ export class BallRenderController implements OnStart {
 			}
 		}
 
-		return this.cachedBelt === undefined ? Vector3.xAxis : this.cachedBelt.CFrame.RightVector;
+		return this.cachedBelt === undefined ? undefined : this.cachedBelt.CFrame;
+	}
+
+	/** The belt's `RightVector`, or `+X` before a belt has replicated. See `apparentSpinAxis` for what it feeds. */
+	private beltRight(): Vector3 {
+		const frame = this.beltFrame();
+		return frame === undefined ? Vector3.xAxis : frame.RightVector;
+	}
+
+	/**
+	 * The belt's **lateral** axis: the direction the server steers a ball along (item 238).
+	 *
+	 * **Not `RightVector`.** `RightVector` is the direction a ball rolls *about*, which is a different vector once the belt is
+	 * rotated, and it happens to be world `-Z` on this fixture. Steering runs along `RightVector:Cross(UpVector)` - the same
+	 * expression `BallSpawnerService.stepBallSpeeds` uses for `across` - which is world `+X` here. Using `RightVector` would
+	 * draw the local ball's lead across the belt instead of along it.
+	 *
+	 * Falls back to `+X` before a belt has replicated, matching `beltRight`'s fallback and the fixture's own orientation.
+	 */
+	private beltAcross(): Vector3 {
+		const frame = this.beltFrame();
+		return frame === undefined ? Vector3.xAxis : frame.RightVector.Cross(frame.UpVector).Unit;
 	}
 
 	/** Advances every phantom's roll and copies it onto the part. One loop, one connection, `RenderStepped`. */
@@ -323,7 +411,30 @@ export class BallRenderController implements OnStart {
 				}
 			}
 
-			state.phantom.CFrame = new CFrame(ball.Position).mul(state.spin);
+			// **The pose. Remote balls copy the server exactly; the local ball leads it and eases into it** (item 238).
+			//
+			// The offset is the distance the server will still move this body during roughly one round trip:
+			// `STEER_SPEED * axis * PREDICTION_LAG_SECONDS` studs along the belt's **lateral** axis (not world `X`, and not
+			// `RightVector` - see `beltAcross`). It is applied to an **anchored, non-colliding, non-queryable part** whose
+			// position nothing reads, so it cannot affect the simulation: the server still owns the ball, and this client still
+			// shows the server's position, just 0.15 s ahead of it.
+			// **`isLocal`, not `local` - `local` is a Luau keyword** and roblox-ts rejects the identifier outright.
+			const isLocal = state.local && rolling;
+			const steerAxis = isLocal ? currentSteerAxis() : 0;
+			const target = new CFrame(
+				steerAxis === 0
+					? ball.Position
+					: ball.Position.add(this.beltAcross().mul(steerAxis * STEER_SPEED * PREDICTION_LAG_SECONDS)),
+			).mul(state.spin);
+
+			// **The anti-snap (item 238).** Two things move this target at once - the server's correction arriving, and the lead
+			// being recomputed from the live axis - and copying it outright would show both as a jump, none more visible than the
+			// frame a thumb is released on, where the lead collapses from several studs to zero. A time-constant lerp turns that
+			// into a glide: `1 - exp(-dt / tau)` is the fraction of the remaining distance to close this frame, which is
+			// frame-rate independent in a way a bare `Lerp(target, 0.2)` is not.
+			state.phantom.CFrame = isLocal
+				? state.phantom.CFrame.Lerp(target, 1 - math.exp(-frameDt / PHANTOM_SMOOTHING_TAU))
+				: target;
 
 			// **The ghost fade, applied from the state the server publishes (item 204).** Read every frame - one attribute read
 			// beside the `BALL_SPEED` read above - but \`applyGhostSkin\` writes only when the value changed, because a ghost

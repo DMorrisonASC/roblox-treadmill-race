@@ -764,7 +764,7 @@ export const PICKUP_SIZE = new Vector3(20, 20, 20);
  * arrives. Twelve pads over `333 x 173` is one per `4,800` square studs; twenty is one per `2,880` - a target roughly every
  * 1.5 seconds of belt travel rather than every 2.5. The shortfall line reports it if the placement cannot keep up.
  */
-export const PICKUP_MAX_COUNT = 20;
+export const PICKUP_MAX_COUNT = 8;
 
 /**
  * **Placeholder.** How far the drawn disc's edge is kept from the belt's edge, in studs — a margin *beyond* the arithmetic
@@ -1390,9 +1390,14 @@ export const STEER_SPEED = 45;
  *
  * ## The arithmetic
  *
- * The tick's natural decay is `BALL_SPEED_DECAY_RATE` (`0.1`/s). At `SLOW_DRAIN_RATE = 5` a fully held slow input drains
- * **fifty times** as fast, so a ball at `BALL_SPEED = 10` reaches `BALL_SPEED_MIN = 0` in **2 s**, and a ball at the
- * `BALL_SPEED_START` ceiling of `12` takes **2.4 s**.
+ * The tick's natural decay is `BALL_SPEED_DECAY_RATE` (`2`/s). At `SLOW_DRAIN_RATE = 25` a fully held slow input adds `25`/s
+ * on top of it - a combined `27`/s, **thirteen and a half times** the decay alone - so a ball at `BALL_SPEED_START = 10`
+ * reaches `BALL_SPEED_MIN = 0` in **0.37 s**.
+ *
+ * **The floor of the range is a third of a second; the ceiling is nearly four.** `BALL_SPEED_MAX` is `100`, and a ball boosted
+ * to `BOOST_TARGET_BALL_SPEED = 80` takes **2.96 s** to empty at a full hold, `3.70 s` from `100`, and **5.5 s** at half
+ * deflection (`2 + 0.5 * 25 = 14.5`/s). That spread is the point: the drain is a *term* in the tick's sum rather than a rate
+ * set by the input, so one number has to serve a starting ball and a boosted one, and it cannot be emphatic for both.
  *
  * **What that does to the ball is the mechanic, not a bug.** `relative = BALL_SPEED - BELT_SPEED` and the along-belt velocity
  * is `-relative`, so dropping `BALL_SPEED` below the reference moves the ball **toward the exit edge** - away from where it
@@ -1403,14 +1408,15 @@ export const STEER_SPEED = 45;
  * So this control is a **brake that costs ground**, and the ball's own spin reports it honestly: the roll is driven by
  * `BALL_SPEED`, so the ball looks like it is turning more slowly while the belt keeps moving under it.
  *
- * Two seconds is the whole budget, so this reads as a **brake you hold for a moment**, not a lever you toggle and leave on.
- * Held for the full two seconds the ball has spent all of its speed and is travelling toward the exit at belt speed; a
- * designer who wants a gentler brake halves this, and one who wants a trap doubles it.
+ * A starting ball has a third of a second of budget, so this reads as a **flick**, not a lever you toggle and leave on; a
+ * boosted ball has seconds of it, and there the brake is a real decision. Held to the end of either, the ball has spent all
+ * of its speed and is travelling toward the exit at belt speed. A designer who wants a gentler brake halves this, and one who
+ * wants a trap doubles it.
  *
  * It is a term in the same `tickDelta` sum the powers use, not a second clamp: one writer per tick (item 74), so a power's
  * delta and this drain land in the same arithmetic and the single `math.clamp` applies to the total.
  */
-export const SLOW_DRAIN_RATE = 5;
+export const SLOW_DRAIN_RATE = 25;
 
 /**
  * **Placeholder.** The upward velocity a player's jump gives their ball, in studs per second.
@@ -1432,7 +1438,7 @@ export const SLOW_DRAIN_RATE = 5;
  * `2 * 80 / 196.2 = 0.816 s` and an apex of `80^2 / (2 * 196.2) = 16.3` studs - about four-fifths of a 20-stud ball's
  * diameter above where it started, which clears a contact and is visible from the camera without reading as a launch.
  */
-export const JUMP_IMPULSE = 80;
+export const JUMP_IMPULSE = 120;
 
 /**
  * **Placeholder.** The minimum interval between two accepted player jumps, in seconds.

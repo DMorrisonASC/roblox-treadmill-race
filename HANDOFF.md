@@ -8477,3 +8477,223 @@ One line per session names the reader that first produced a deflection: `[Steer]
 Whether the virtual stick's gesture reads well at `60` pixels of radius (a drag inside the radius is a partial deflection, outside is full lock); whether a drag on the left half fights a camera that is dragged anywhere on a screen with no `PlayerModule` camera script; whether a Joy-Con reaches `InputChanged` with `KeyCode = Thumbstick1` on the user's platform; and whether the two gamepad readers ever disagree - `[Steer] stick source=gamepad` plus a moving ball answers all four.
 
 **Validation:** `npm run build` exit 0; **`npm test` = 566 passed in 44 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean; `grep "\uXXXX" src` = 0; `flamework.build` unchanged.
+## 238 - The stick stops being stiff, and the local ball is drawn at the speed of the thumb
+
+Reported as *"stiffness"* plus a *"0.5-second delay"*. Two separate causes, both real: the input was thresholded twice before it left the client, and the picture waited a round trip for the server.
+
+### Part 1 - the three numbers
+
+| constant | was | now | what it was doing |
+| --- | --- | --- | --- |
+| `THUMBSTICK_DEADBAND` | `0.2` | **`0.05`** | threw away a fifth of the throw before any reader saw it |
+| `AXIS_SEND_THRESHOLD` | `0.1` | **`0.02`** | sent nothing while a thumb made small adjustments |
+| `TOUCH_STICK_RADIUS` | `60` | **`120`** | made a two-pixel wobble a third of full lock |
+
+**The deadband's original reason does not apply to a finger.** It was written for a physical stick, which rests off-centre - but this game's touch stick's origin *is* where the thumb landed (item 237), so the only thing to reject is a still thumb's wobble on a 120-pixel radius. `0.05` rejects that and nothing else.
+
+**`AXIS_SEND_THRESHOLD` is a wire-cost lever, not a feel lever**, which is why lowering it is safe: the server accepts every message and the client already sends at most one per `Heartbeat`. At `0.02` a deliberate full sweep is about fifty messages over a second.
+
+### Part 2 - the visual lead
+
+`currentSteerAxis()` is exported from `steer-controller.ts` as **module state**, written on every `Heartbeat` *before* the send threshold is applied - so the drawing path hears about movement the wire deliberately does not:
+
+```ts
+liveAxis = lateral;   // published even when nothing is sent
+```
+
+The render controller reads it only for the local player's own body (`OWNER_USER_ID_ATTRIBUTE === LocalPlayer.UserId`, decided once at `track`) and only while the round is rolling:
+
+```ts
+const isLocal = state.local && rolling;
+const steerAxis = isLocal ? currentSteerAxis() : 0;
+const target = new CFrame(
+	steerAxis === 0
+		? ball.Position
+		: ball.Position.add(this.beltAcross().mul(steerAxis * STEER_SPEED * PREDICTION_LAG_SECONDS)),
+).mul(state.spin);
+
+state.phantom.CFrame = isLocal
+	? state.phantom.CFrame.Lerp(target, 1 - math.exp(-frameDt / PHANTOM_SMOOTHING_TAU))
+	: target;
+```
+
+`PREDICTION_LAG_SECONDS = 0.15` against `STEER_SPEED = 45` is a **6.75-stud lead at full lock** - about a third of a 20-stud ball's diameter. `PHANTOM_SMOOTHING_TAU = 0.08` is a time constant, so the glide behaves the same at 30 and 144 fps; the prompt's `Lerp(target, 0.2)` is a *per-frame* fraction that is twice as fast on a machine running twice as often.
+
+**`beltAcross()` is new and the prompt's `ball.Position.X` was wrong.** Steering runs along `beltFrame.RightVector:Cross(UpVector)` - the same `across` the server computes in `stepBallSpeeds` - which is world `+X` on this fixture but is *not* `RightVector` (`(0, 0, -1)` here, the axis a ball rolls **about**) and not world `X` once the belt is rotated. `beltRight` and `beltAcross` now share one `beltFrame()` resolver, so there is one cached belt rather than two.
+
+**What is predicted, and what is not.** The phantom is anchored with `CanCollide`, `CanQuery`, `CanTouch` and shadows off, the real ball is hidden on this client only, and nothing in the tree reads a phantom's position. So this is a **visual lead on the local player's own picture**, not a simulated body: the server still owns the ball and every other client still sees the unaided positions. `README.md`'s *"No client prediction: the server owns the velocity…"* is now *"No client prediction of **state**…"* with the cosmetic exception named and its constant.
+
+### Where this prompt was wrong
+
+1. **"`predictiveX = ball.Position.X + …`"** - world `X` is not the lateral axis; the lead would draw along the wrong direction on any rotated belt, and it is `RightVector` rather than `across` even here.
+2. **"`LagTimeEstimate`" has no units and no value** - it is seconds of steering (`0.15`), and at `STEER_SPEED = 45` the number matters: 0.15 s is seven studs, 0.5 s would be twenty-two and read as the ball sliding away from its true position.
+3. **"`phantom.CFrame:Lerp(targetCFrame, 0.2)`"** - a per-frame alpha is frame-rate dependent; the tree's own smoothing elsewhere is time-constant based.
+4. **"`BallRenderController` copies the server's CFrame with a delay"** - it copies it *exactly*, every `RenderStepped` frame. The delay is the round trip, not the copy; the fix is a lead, not a faster copy.
+5. **"the tree explicitly forbids client prediction in the README"** - it said *no client prediction*, not why, and the reason it is safe to add one here is that the phantom is already a purely visual, non-colliding stand-in. The README line is updated rather than left contradicting the code.
+
+### Studio-only
+
+Whether 6.75 studs of lead at full lock reads as "responsive" or as "the ball is ahead of where it is" - the honest trade, and `PREDICTION_LAG_SECONDS` is the single number that moves it; whether 120 pixels is a comfortable full lock on a small phone, where a two-thumb-width drag may exceed the left half of the screen; and whether the 80 ms easing reads as smooth rather than as floaty when the thumb is released mid-corner.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 566 passed in 44 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean on both touched files; `grep "\uXXXX" src` = 0; `flamework.build` unchanged; `README.md` is still LF-only with no stray bytes (checked after a PowerShell backtick ate a character during the edit - `` `b `` is a backspace escape, which is worth remembering for any future README edit).
+## 239 - "Slow reaches the server as zero" was false: the wire is fine, the ball is against the wall
+
+The brief said the slow axis never arrives. The attached 1146-line log says otherwise, and the difference matters because it moves the round from "fix the client" to "the client is correct and the *game* is what the player is complaining about".
+
+### What the log actually contains
+
+```
+[Steer] mounted ... touch=native sources=module,touch,gamepad          (new build)
+[Steer] stick source=touch                                             <- the virtual stick is producing input
+[Steer] no PlayerModule after 8s — steering reads the virtual touch stick and the gamepad instead
+```
+
+129 `[Ball:N] sample` lines, 119 with `roundActive=true`, and the distinct `steerAxis/slowAxis` pairs include:
+
+```
+steerAxis=0.321  slowAxis=0.697
+steerAxis=0.402  slowAxis=0.709
+steerAxis=-1     slowAxis=0.546
+steerAxis=-0.818 slowAxis=0.326
+```
+
+**Slow is arriving, at up to 0.709.** And it is being applied exactly as the arithmetic says: over `t=18.1s..20.4s` the player's ball held `slow=0.546` and `BALL_SPEED` fell `25.5 -> 20.9 -> 18.2 -> 13.9 -> 11.2`, i.e. **4.7/s** - `BALL_SPEED_DECAY_RATE 2 + 0.546 x SLOW_DRAIN_RATE 5`, to the decimal.
+
+### Part 1, the five questions, from source
+
+1. **`currentSlow()`** - `steer-controller.ts:428`. Reads `this.currentStick()`, and `math.max(0, -stick.Y)` at `:431`; when the stick is inside the deadband it falls back to `this.slowDown ? 1 : 0` at `:434`.
+2. **`currentLateral()`** - `:398`. **The same `currentStick()` call**, no second source.
+3. **The keyboard state** - set at `:339` by the `SlowDown` binding, whose keys are `W`/`Up`/`DPadUp`/`S`/`Down`/`DPadDown` (`:343`, `:348`), and **read** at `:434`. Not dead.
+4. **The touch stick's `Y`** - `:580`: `const dy = (this.touchOrigin.Y - input.Position.Y) / TOUCH_STICK_RADIUS`. Screen `Y` grows downward, so a drag *down* gives a **negative** `dy`, `-Y` is positive, and `max(0, -Y)` fires. The sign is right; item 237's description matches the code.
+5. **`pushAxis()`** - `:644`. Compares **both** axes against the last sent pair (`lateralMoved` and `slowMoved`), sends if either moved.
+
+**None of the three candidate bugs is present.** No sign inversion, no dead keyboard state, no stale `Y`.
+
+### Why the brief's evidence looked like a bug
+
+`[Spawner] steer` prints **once per player per round** - the first non-zero axis, guarded by `steerLogged` (`ball-spawner-service.ts:1970-1973`). The first message of a touch gesture is whatever the thumb did first, which is usually lateral, so the one line a round produces is very often `slow=0`. **That line cannot report slow after the first message**, and reading it as "slow is always zero" was reading a sampling artefact.
+
+The `[Ball:N] sample` lines were the decisive ones and they were in the same log.
+
+### What was shipped
+
+One new diagnostic, `[Steer] axis`, printed from `pushAxis` **before** the send threshold so it also covers the frames the wire deliberately skips:
+
+```
+[Steer] axis source=touch x=-0.12 y=-0.61 lateral=-0.12 slow=0.61 keys=slow:false
+```
+
+`logAxis` (`:684`) prints immediately when "is slow being asked for" changes and otherwise at most every `AXIS_LOG_INTERVAL_SECONDS = 0.5` with `AXIS_LOG_DELTA = 0.1` of movement, so a gesture is a handful of lines and a resting thumb is silence. The raw `x`/`y` are the **pre-deadband** values (`noteStick`, `:414`), because a filtered value cannot separate "the device produced nothing" from "the deadband ate it" - the exact ambiguity this round was built on.
+
+Nothing else changed: no constant, no gesture, no payload, no server line, no other controller.
+
+### The real finding: the ball is pinned at the start wall for eighteen seconds
+
+`x` is the belt-local along-belt coordinate. The player's ball:
+
+```
+t=2.1  x=-62.9   BALL_SPEED=79.9   <- pickup, ball races toward -X
+t=3.2  x=-131.3  BALL_SPEED=77.3   <- arrives at the wall
+...     x stays between -130.8 and -131.9 for 17.7 s
+t=20.4 x=-131.5  BALL_SPEED=11.2   <- drained below BELT_SPEED
+t=21.5 x=-129.7  BALL_SPEED=6.8    <- finally travelling toward the exit
+t=22.0 x=-124.3
+```
+
+Ball radius 10, so its edge sits at local `X = -141.3`, which is **25.2 studs inside the belt's -X end** (half-length 166.5). `along` flips sign every sample (`-69.8`, `+48.6`, `-65.9`, `+45.6`) - **the ball is rattling against that wall**, because the model re-drives it into the barrier at `BALL_SPEED - BELT_SPEED` every tick and the collision throws it back.
+
+This is what "I can not intentionally move backwards; the ball is not going towards exit" is: the ball *is* being slowed, and it *will* come back - after about eighteen seconds of sitting against a wall, because `BALL_SPEED` has to fall from 80 to below `BELT_SPEED = 10` before the model's velocity points the other way, and the natural decay is only `BALL_SPEED_DECAY_RATE = 2`/s.
+
+**No code creates that barrier.** `grep -i barrier src` returns one docblock and nothing else; the only place the name appears is the scene path in the treadmill log, `Workspace.Treadmill5.game-parts.belt-barriers.belt`. So it is designer geometry, not a miscount in `src/`.
+
+### Where this prompt was wrong
+
+1. **"The log confirms it. One `[Spawner] steer` line, and it is `slow=0`."** That line is once-per-round by design and cannot show slow later; the sample lines in every log since the deadband fix show slow up to 0.709.
+2. **"56 of 57 samples have `slowAxis=0`"** - true of the *previous* round's log (before `THUMBSTICK_DEADBAND` went from `0.2` to `0.05`), not of the attached one.
+3. **Even the earlier log had `slow=0.315` on one sample**, which the brief correctly called proof the path can work - and then treated the other 56 as proof it does not.
+4. **"Part 4 - verify the keyboard path works… if `currentSlow` ignores it, the fix is one line."** It does not ignore it (`:434`); the one-line fix was already there since item 237.
+
+### Studio-only
+
+Whether a Joy-Con/gamepad reaches the `Thumbstick1` readers (`[Steer] axis source=gamepad` answers it); whether a downward drag on a real phone produces `y<0` at the same magnitude `x` does - the new line answers this on the next run; and whether `W` alone prints `keys=slow:true slow=1` in the lobby.
+
+### The ball-at-wall follow-up, as asked
+
+**Is the barrier intentional?** The code implies yes: it is scene geometry in `belt-barriers`, and a start-side wall is what keeps a boosted ball on the tread. Only Studio can name the part, which is the one thing to confirm.
+
+**Recommended fix, in order of value and cost:**
+
+1. **Make the barrier absorb instead of bounce** - the rattle is the visible symptom (`along` flipping ±70/s). Setting the scene part's `Elasticity` to `0` (or the ball's `CustomPhysicalProperties` elasticity at that contact) turns eighteen seconds of vibration into a ball resting quietly against a wall.
+2. **Give slow a floor-aware ramp** - `SLOW_DRAIN_RATE` applies a constant 5/s, so the last 20 studs/s of an 80-speed ball take as long as the first. A drain proportional to `max(0, BALL_SPEED - BELT_SPEED)` would collapse the overshoot quickly and leave the fine control intact. That is a tuning change with a feel consequence, so it wants its own round and its own playtest.
+3. **Lower `BOOST_TARGET_BALL_SPEED`** (`80`) or the pickup grants. Cheapest, bluntest, and it changes the game's speed.
+
+What the code does *not* support is moving the barrier: nothing in `src/` knows where it is.
+
+**Validation:** `npm run build` exit 0; **`npm test` = 566 passed in 44 files**; `npm run lint` 0 errors with the same 55 pre-existing `viewport.ts` warnings; `prettier --check` clean; `grep "\uXXXX" src` = 0; `flamework.build` unchanged.
+## 240 - A held slow input is wired end to end; the round's real error was arithmetic in a docblock
+
+The brief listed five candidates for "a held press loses its level". Traced all five against source: **none of them is present in this tree**, the input path is intact, and the one thing that *was* wrong is that three separate places explained a `SLOW_DRAIN_RATE` the game does not use.
+
+### Every writer of every level, and every place one is cleared
+
+| level | written | cleared | read |
+|---|---|---|---|
+| `slowDown` | `steer-controller.ts:350` - the `SLOW_ACTION` binding, on `Begin`/`Change` | `:350`, on `End`/`Cancel` of the same binding | `:445`, the fallback in `currentSlow` when the stick is inside `THUMBSTICK_DEADBAND` |
+| `gamepadStick` | `:375` (CAS `Enum.KeyCode.Thumbstick1`) and `:535` (`UserInputService.InputChanged`) | `:371` (CAS `End`) and `:544` (`InputEnded`, filtered to `KeyCode === Thumbstick1`) | `:484`, the second branch of `currentStick` |
+| `touchStick` | `:592` (`TouchMoved`; `dy` negated at `:589`) | `:579` (`TouchStarted`) and `:602` (`release`, called from `TouchEnded` **and** from the `Touch` half of `InputEnded`) | `:472`, the first branch of `currentStick` |
+
+`pushAxis` is driven from `Heartbeat` (`:248`) and reads `currentLateral` (`:409`) and `currentSlow` (`:439`) once per frame. Nothing else in the file writes any of the three levels.
+
+### The five candidates, checked
+
+1. **A stray `End` clears the level.** No. Every clearer is filtered: `release` compares the `InputObject` by **identity** (`:599`), so a second finger - or any touch that was not the one that armed the stick - cannot clear it; the gamepad `InputEnded` is filtered to `Thumbstick1`, so releasing `W` cannot zero it; and the CAS handler only zeroes `gamepadStick` on that same action's `End`.
+2. **Only `X` is compared, so a `Y`-only change is never sent.** No. `pushAxis` (`:664-665`) compares **both** axes against `AXIS_SEND_THRESHOLD`, and the diagnostic's `moved` (`:707`) does the same.
+3. **A sign inversion.**
+   No. `dy = (touchOrigin.Y - input.Position.Y) / TOUCH_STICK_RADIUS` (`:589`), so a drag *down* is negative, and `currentSlow` negates it exactly once: `math.max(0, -stick.Y)` (`:442`).
+4. **A frozen `Y`.** No - and retention is the feature. `TouchMoved` is the only writer and fires on every move, including moves that only change `x`; between events the value is kept, which is what "held" means.
+5. **The keyboard is unread.** No. `:445` reads `slowDown`, set at `:350` by a binding carrying `W`, `Up`, `DPadUp`, `S`, `Down` and `DPadDown`.
+
+### What the old line could not see, and the age that fixes it
+
+`[Steer] axis` went **quiet once the level settled** - it printed on a transition, then only on change - so a held press and a press that had been cleared looked identical: one line, then silence. `[Steer] held` now carries the age of the current hold and prints a heartbeat every `AXIS_LOG_INTERVAL_SECONDS` while slow is above zero:
+
+```
+[Steer] held source=touch x=-0.12 y=-0.61 lateral=-0.12 slow=0.61 keys=slow:false held=1.5s
+```
+
+**`held=` climbing** (`0.5s`, `1s`, `1.5s`) is a hold that persists, frame after frame, from the digitiser to the wire. **`held=` returning to `0s` while `slow>0`** is candidate 1 for real, and the next run says which in one glance.
+
+### The arithmetic that actually was wrong
+
+`SLOW_DRAIN_RATE` ships as `25`; `HEAD` has `5`; and three places still explained `5`:
+
+- `tuning.ts`'s docblock: "`BALL_SPEED_DECAY_RATE` (`0.1`/s)", "At `SLOW_DRAIN_RATE = 5` a fully held slow input drains **fifty times**", "`BALL_SPEED = 10` … in **2 s**", "the `BALL_SPEED_START` ceiling of `12` … **2.4 s**". The decay is `2`/s, the drain is `25`/s, and `BALL_SPEED_START` is `DEFAULT_BELT_SPEED = 10`, not `12`.
+- `ball-spawner-service.ts:2069`: "this drains `SLOW_DRAIN_RATE = 5`/s, so the ball reaches `BALL_SPEED_MIN` in `2 s`".
+- The previous item's own conclusion, at `HANDOFF.md:8560`: `2 + 0.546 x 5 = 4.7/s`.
+
+All three now state the shipped values: decay `2`/s, drain `25`/s, **`27`/s combined**, `0.37 s` from a starting ball, `2.96 s` from `BOOST_TARGET_BALL_SPEED = 80`, `3.70 s` from `BALL_SPEED_MAX = 100`, and `5.5 s` from `80` at half deflection (`2 + 0.5 * 25 = 14.5`/s).
+
+**That also re-reads the last log.** Its `4.7/s` is a measurement of the *previous* build: at `slow=0.546` the shipped number drains `15.65`/s, which empties a `25.5`-speed ball in `1.6 s` rather than the `2.3 s` the samples took to fall.
+
+### Is the brake "too slow"? No at the floor, yes at the ceiling
+
+One constant has to serve a `10`-speed ball and an `80`-speed one, and it cannot be emphatic for both: a starting ball has a **third of a second** of budget, a boosted ball has **three**, and a half-held boosted ball has **five and a half**. So "it takes too long" is true precisely when the ball is fast - which is also when the ball has three times the distance to lose. The two fixes from item 239 (a drain proportional to `max(0, BALL_SPEED - BELT_SPEED)`, or a lower `BOOST_TARGET_BALL_SPEED`) are tuning changes with a feel consequence, and neither belongs in a round that is not a playtest.
+
+### Does `W` brake? Yes - by source
+
+`W`/`Up`/`DPadUp` (and `S`/`Down`/`DPadDown`) are bound to `SLOW_ACTION` (`:346-360`), the handler sets `slowDown` on `Begin`/`Change` (`:350`) and clears it on `End`/`Cancel`, and `currentSlow` returns `1` from it (`:445`) whenever the stick is inside `THUMBSTICK_DEADBAND`. The one behavioural asymmetry: **the stick wins over the key** while it is outside the deadband, so holding `W` *and* pushing the stick forward reads as the stick. Pressing `W` alone prints `keys=slow:true slow=1`.
+
+### Where this prompt was wrong
+
+1. **The attached log is the 08:41 one, from before item 238.** It predates `THUMBSTICK_DEADBAND` `0.2 -> 0.05`, `TOUCH_STICK_RADIUS` `60 -> 120` and `AXIS_SEND_THRESHOLD` `0.1 -> 0.02`, so its small `slow` values describe code that is not what ships.
+2. **Candidates 1-3 are all absent**, and so are 4 and 5 - the trace above is the evidence for each.
+3. **"One `[Spawner] steer` line says `slow=0`"** is the same artefact as last round: that line is once per player per round, so it can only ever report the first non-zero axis.
+4. **The round's own premise - that the docblock would match - was inverted.** The constant had already been raised to `25` while the prose, the spawner comment and item 239 all still said `5`. The prompt asked for the check, and the check is what found it.
+
+### Studio-only
+
+Whether `held=` climbs on a real phone (`0.5s`, `1s`, `1.5s` under a stationary thumb) or returns to `0s`; whether a downward drag produces `y<0` at a magnitude comparable to `x`; and whether the brake now reads as an instant stop on a starting ball - `0.37 s` is short enough that it may overshoot the intent, which is a question for the next playtest rather than for the code.
+
+### Validation
+
+`npm run build` exit 0; **`npm test` = 566 passed in 44 files**; `npm run lint` 0 errors with the same **55** pre-existing `viewport.ts` warnings; `prettier --check "src/**/*.ts"` clean apart from that same pre-existing `viewport.ts` file; `grep "\uXXXX" src` = 0; `flamework.build` untouched.

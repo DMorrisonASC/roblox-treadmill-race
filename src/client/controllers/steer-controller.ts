@@ -17,11 +17,29 @@ const STEER_THUMBSTICK_ACTION = "SteerThumbstick";
 const SLOW_ACTION = "SlowDown";
 const JUMP_ACTION = "Jump";
 
-/** **Placeholder.** Thumbstick deflection below this reads as centred - stick drift, not a design number. */
-const THUMBSTICK_DEADBAND = 0.2;
+/**
+ * **Placeholder.** Deflection below this reads as centred, `0 .. 1`.
+ *
+ * **`0.05`, down from `0.2` (item 238).** The `0.2` was chosen for a *physical* stick, which drifts - a worn analog stick
+ * rests at a few percent and a gamepad has a real deadzone of its own. A **finger does not drift**: the virtual stick's origin
+ * *is* where the thumb landed, so the only thing this has to reject is the wobble of a thumb held still, which is a couple of
+ * pixels of a 120-pixel radius. Twenty percent of the throw being dead is why steering felt stiff: a third of the usable travel
+ * did nothing at all.
+ */
+const THUMBSTICK_DEADBAND = 0.05;
 
-/** **Placeholder.** How far the axis must move before another message goes out. Ten messages for a full sweep. */
-const AXIS_SEND_THRESHOLD = 0.1;
+/**
+ * **Placeholder.** How far the axis must move before another message goes out, `0 .. 1`.
+ *
+ * **`0.02`, down from `0.1` (item 238).** This is purely a wire-cost lever - the server accepts every message it is sent and
+ * the client already sends at most one per `Heartbeat` - so at `0.1` a player making fine adjustments was sending nothing at all
+ * while their thumb moved and the ball drifted. At `0.02` a full sweep is fifty messages, and a full sweep takes about a second
+ * of deliberate motion, so the cost is one message per frame only while somebody is actively steering.
+ *
+ * **It is not the smoothing threshold.** `BallRenderController` reads `currentSteerAxis()`, which bypasses this number entirely,
+ * so the drawn ball responds to every pixel even when the wire does not hear about it.
+ */
+const AXIS_SEND_THRESHOLD = 0.02;
 
 /** The phase a round's steering belongs to. A client cannot import the server's `RoundPhase`. */
 const PHASE_PLAYING = "Playing";
@@ -42,10 +60,12 @@ const MOUNT_WAIT_SECONDS = 10;
 /**
  * **Placeholder.** A touch drag this far from where the thumb landed is full deflection, in pixels.
  *
- * The engine's own dynamic stick uses roughly this radius. Only the *fallback* path uses it - the distance is a share of
- * the drag, so a smaller number makes steering twitchier and a larger one makes a full lock hard to reach.
+ * **`120`, up from `60` (item 238).** `60` made the stick *twitchy*, not responsive: a third of the screen's comfortable thumb
+ * travel was full lock, so the useful range of the gesture fell inside `THUMBSTICK_DEADBAND` and was discarded. Doubling the
+ * radius means a small thumb movement is a small deflection - the analog control a stick exists to give - while a full sweep
+ * of about two thumb-widths still reaches full lock.
  */
-const TOUCH_STICK_RADIUS = 60;
+const TOUCH_STICK_RADIUS = 120;
 
 /**
  * **Placeholder.** How long to wait for `PlayerModule` before settling on the fallback readers, in seconds.
@@ -55,6 +75,27 @@ const TOUCH_STICK_RADIUS = 60;
  * the client for 2.6 s when it was done inline, which is why it is never done inline here.
  */
 const PLAYER_MODULE_WAIT_SECONDS = 8;
+
+/**
+ * **Placeholder.** How often `[Steer] held` may repeat while the brake is held or the axes are merely drifting, in seconds.
+ *
+ * `pushAxis` runs sixty times a second. A line per frame is unreadable and would dominate the log; a line per change is
+ * unaffordable because a thumb wobbles. Half a second is fast enough to follow a gesture and slow enough that one drag is a
+ * handful of lines - and it is the cadence the `held=` age is sampled at, so a held press shows `0.50s`, `1.00s`, `1.50s`.
+ */
+const AXIS_LOG_INTERVAL_SECONDS = 0.5;
+
+/**
+ * **Placeholder.** How far an axis must move before it is worth another line, `0 .. 1`.
+ *
+ * A tenth of the throw. Anything smaller reports a still thumb.
+ */
+const AXIS_LOG_DELTA = 0.1;
+
+/** Two decimal places, for a log field that is read as a number rather than as a float. */
+function formatAxis(value: number): string {
+	return tostring(math.round(value * 100) / 100);
+}
 
 /**
  * The local player's **ball controls**: steering, slow and jump, sent to the server when they change.
@@ -162,6 +203,30 @@ export class SteerController implements OnStart {
 
 	/** One line naming which source first produced a real deflection, so a run says what the device is. */
 	private loggedStickSource = false;
+
+	/**
+	 * The raw reading `currentStick` used on the last frame, and the log bookkeeping for `[Steer] held` (items 239, 240).
+	 *
+	 * `stickSource` is a string rather than an enum because it is only ever printed: `touch`, `gamepad`, `module`, `none`.
+	 */
+	private stickSource = "none";
+	private stickX = 0;
+	private stickY = 0;
+	private loggedLateral = 0;
+	private loggedSlow = 0;
+	private loggedSlowActive = false;
+	private loggedAt = 0;
+
+	/**
+	 * The `os.clock()` at which slow last rose from zero, so `[Steer] held` can print how long the brake has been *held*.
+	 *
+	 * **This is the field the "held" question turns on.** A level that is recomputed from the digitiser every frame and a level
+	 * that is cleared by a stray `End` and then re-read to the same number are indistinguishable in a single sample; the age of
+	 * the current hold is what separates them. An age that climbs while `slow>0` is a real hold. An age that keeps dropping
+	 * back to zero while `slow>0` means something is re-arming the level every frame (candidate 1), and `slow=0` with
+	 * `held=0s` on every line means the level never set at all.
+	 */
+	private slowSince = 0;
 
 	/** The last `(lateral, slow)` this client sent, so the heartbeat can send only real changes. */
 	private lastSentLateral = 0;
@@ -351,6 +416,19 @@ export class SteerController implements OnStart {
 	}
 
 	/**
+	 * Records the raw stick reading the last `currentStick` call used, for the `[Steer] held` line (items 239, 240).
+	 *
+	 * **Raw, not post-deadband.** The diagnostic's whole job is to separate "the device never produced a `Y`" from "the `Y`
+	 * arrived and something downstream dropped it", and a value already filtered by `THUMBSTICK_DEADBAND` cannot tell those
+	 * apart - a still thumb and a broken reader both read `0`.
+	 */
+	private noteStick(source: string, x: number, y: number): void {
+		this.stickSource = source;
+		this.stickX = x;
+		this.stickY = y;
+	}
+
+	/**
 	 * The slow axis, `0 .. 1`: how hard the player is asking to lose speed.
 	 *
 	 * **Positive means slow, and the stick's forward axis is negated to get there.** Pulling the stick toward the player is
@@ -399,6 +477,7 @@ export class SteerController implements OnStart {
 				this.logStickSource("touch");
 			}
 
+			this.noteStick("touch", this.touchStick.X, this.touchStick.Y);
 			return this.touchStick;
 		}
 
@@ -407,6 +486,7 @@ export class SteerController implements OnStart {
 			math.abs(this.gamepadStick.Y) > THUMBSTICK_DEADBAND
 		) {
 			this.logStickSource("gamepad");
+			this.noteStick("gamepad", this.gamepadStick.X, this.gamepadStick.Y);
 			return this.gamepadStick;
 		}
 
@@ -418,10 +498,12 @@ export class SteerController implements OnStart {
 					this.logStickSource("module");
 				}
 
+				this.noteStick("module", move.X, -move.Z);
 				return new Vector2(move.X, -move.Z);
 			}
 		}
 
+		this.noteStick("none", 0, 0);
 		return Vector2.zero;
 	}
 
@@ -574,13 +656,72 @@ export class SteerController implements OnStart {
 		const lateral = this.currentLateral();
 		const slow = this.currentSlow();
 
+		// **Published even when nothing is sent** (item 238). The render controller's visual lead reads this on every frame, so it
+		// has to be the *live* axis rather than the last one that crossed the send threshold - otherwise a thumb held inside the
+		// threshold while the server catches up would draw a ball that stops steering and then jumps.
+		liveAxis = lateral;
+
 		const lateralMoved = math.abs(lateral - this.lastSentLateral) > AXIS_SEND_THRESHOLD;
 		const slowMoved = math.abs(slow - this.lastSentSlow) > AXIS_SEND_THRESHOLD;
+
+		// **The diagnostic, before the early return** (item 239). It has to see the frames the wire does not: a thumb inside
+		// `AXIS_SEND_THRESHOLD` is exactly the state "the control does nothing" is reported from, so a line printed only on a send
+		// would be silent in the case it exists to explain.
+		this.logAxis(lateral, slow);
+
 		if (!lateralMoved && !slowMoved) {
 			return;
 		}
 
 		this.send(lateral, slow);
+	}
+
+	/**
+	 * One line naming what the input layer actually sees, plus how long it has been held, so the next run is decisive (items
+	 * 239, 240).
+	 *
+	 * ```
+	 * [Steer] held source=touch x=-0.12 y=-0.61 lateral=-0.12 slow=0.61 keys=slow:false held=1.5s
+	 * ```
+	 *
+	 * **Five readings, five different stories**, which is why the fields travel together: a `y` of `0` with an `x` that moves
+	 * means the device is not producing `Y`; a *positive* `y` with `slow=0` means a sign inversion; a negative `y` with
+	 * `slow>0` means the input is right and the fault is further down; `keys=slow:true` with `slow=0` means the keyboard state
+	 * is set but unread; and a `held=` that keeps returning to `0s` while `slow>0` means the level is being cleared and
+	 * re-read rather than held.
+	 *
+	 * **Transition-first, then a heartbeat while the brake is held, then nothing at rest.** A change in whether slow is being
+	 * asked for prints immediately - that is the event under investigation - and a *held* level prints once per
+	 * `AXIS_LOG_INTERVAL_SECONDS` so the age is visible climbing. Ordinary drift prints on the same interval only when it also
+	 * moved by `AXIS_LOG_DELTA`, and at rest nothing prints at all, because every field starts at the value it would report.
+	 */
+	private logAxis(lateral: number, slow: number): void {
+		const now = os.clock();
+		const slowActive = slow > 0;
+		const edge = slowActive !== this.loggedSlowActive;
+		const due = now - this.loggedAt >= AXIS_LOG_INTERVAL_SECONDS;
+		const moved =
+			math.abs(lateral - this.loggedLateral) > AXIS_LOG_DELTA ||
+			math.abs(slow - this.loggedSlow) > AXIS_LOG_DELTA;
+
+		if (!edge && !(due && (slowActive || moved))) {
+			return;
+		}
+
+		if (edge) {
+			this.slowSince = slowActive ? now : 0;
+		}
+
+		const held = slowActive ? now - this.slowSince : 0;
+
+		this.loggedAt = now;
+		this.loggedLateral = lateral;
+		this.loggedSlow = slow;
+		this.loggedSlowActive = slowActive;
+
+		print(
+			`[Steer] held source=${this.stickSource} x=${formatAxis(this.stickX)} y=${formatAxis(this.stickY)} lateral=${formatAxis(lateral)} slow=${formatAxis(slow)} keys=slow:${tostring(this.slowDown)} held=${formatAxis(held)}s`,
+		);
 	}
 
 	/**
@@ -682,4 +823,31 @@ export class SteerController implements OnStart {
 			}
 		});
 	}
+}
+
+/**
+ * The lateral axis the local player is asking for **right now**, for the render controller's visual lead (item 238).
+ *
+ * ## Why this is module state rather than a method on the controller
+ *
+ * `BallRenderController` needs one number, sixty times a second, and it must not construct, resolve or depend on this
+ * controller to get it: Flamework hands out instances but a `RenderStepped` loop that reaches into another controller's
+ * private state is the coupling the tree avoids everywhere else. A module-level variable written by the one instance that
+ * owns the input, read through a function, is the same shape `shared/ui/coin.ts` uses for its load report - state that
+ * belongs to a fact rather than to an object.
+ *
+ * **`0` until the first frame of input**, which is the honest answer: "not steering" is a zero axis, and the render
+ * controller treats zero as "no lead" rather than as a datum to be corrected.
+ */
+let liveAxis = 0;
+
+/**
+ * The live lateral axis, `-1 .. 1`, for clients that draw rather than send.
+ *
+ * Deliberately **not** the last value sent: the send is thresholded (`AXIS_SEND_THRESHOLD`) so that the wire carries ten
+ * messages a sweep rather than sixty, and a lead driven by the sent value would stutter in exactly the range where the
+ * player is making fine adjustments - which is the range this exists to make feel immediate.
+ */
+export function currentSteerAxis(): number {
+	return liveAxis;
 }

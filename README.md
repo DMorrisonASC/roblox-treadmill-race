@@ -433,8 +433,9 @@ below was rejected or deferred on purpose, not forgotten — do not offer to add
 
 No mesh or model support — every `model` in [`src/shared/models.config.ts`](src/shared/models.config.ts)
 is `undefined`, and a test fails if a ball id has no entry, so the swap fails the suite rather than
-drawing the same sphere. No client prediction: the server owns the velocity and every client sees the
-result a round trip later. Audio is **six one-shot UI sounds, one round song and two lobby songs** and nothing else — a button press, a
+drawing the same sphere. No client prediction of **state**: the server owns the velocity and every client sees the
+result a round trip later. The one exception is cosmetic - `ball-render-controller` draws the local player's own ball up
+to `PREDICTION_LAG_SECONDS` of steering ahead of the server and eases it back, so thumb-to-ball is not a round trip. Audio is **six one-shot UI sounds, one round song and two lobby songs** and nothing else — a button press, a
 granted purchase, a coin earn, a ball leaving the belt, a ball-ball hit, and a pickup that actually raised a ball's speed
 (`src/shared/sounds.config.ts`) — with no ambience and nothing positional. The two songs are the only sounds with a lifecycle
 rather than an event. The round song fades in over two seconds **starting with the 3-2-1 countdown**, loops `0:00 → 1:27` once and then
