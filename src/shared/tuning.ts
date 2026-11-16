@@ -1687,3 +1687,113 @@ export const SPECTATE_LABEL_ON = "Stop Watching";
  * `shared/vfx-scale.ts`, whose item 101 docblock is rewritten in place to say what changed.
  */
 export const BASE_BALL_RADIUS = 0.5;
+
+/**
+ * **Placeholder.** How long the steering hint is on screen in total, in seconds, fade-in included.
+ *
+ * Three seconds is the countdown's `Start!` fade plus the first moment of the race: long enough for a player who has never
+ * steered a ball to read two arrows, short enough that it is gone before the first pickup is contested. It is measured from
+ * the frame the hint is drawn, not from `Playing` entry - a client that joins mid-round gets the same three seconds the player
+ * who started the round got, which is the only reading that helps the late joiner.
+ */
+export const STEERING_HINT_SECONDS = 3;
+
+/**
+ * **Placeholder.** How long the arrows take to appear, in seconds.
+ *
+ * A quarter-second fade rather than a cut, for the reason the countdown uses one: an element that snaps into existence over
+ * live gameplay reads as a glitch. The fade also does the work the disappearance has to undo, so the two ends of the hint look
+ * like one thing rather than a pop and a vanish.
+ */
+export const STEERING_HINT_FADE_IN_SECONDS = 0.25;
+
+/**
+ * **Placeholder.** How long the arrows take to leave, in seconds.
+ *
+ * Twice the fade-in, deliberately: arriving is an event and leaving is housekeeping, and a symmetric fade makes the departure
+ * feel like a second event.
+ */
+export const STEERING_HINT_FADE_OUT_SECONDS = 0.5;
+
+/**
+ * **Placeholder.** The arrow's glyph size, in pixels, **on a `STEERING_HINT_REFERENCE_SHORT_AXIS` screen**.
+ *
+ * This is not the drawn size on every device - `steeringHintScale` multiplies it by the viewport's short axis against the
+ * reference - and the split is the point: a poster-sized glyph is what makes the hint readable over a moving belt, and a
+ * literal 96 px is a quarter of a phone's short axis.
+ */
+export const STEERING_HINT_TEXT_SIZE = 96;
+
+/**
+ * **Placeholder.** How see-through the arrows are once faded in, `0 .. 1`.
+ *
+ * Semi-transparent is a requirement of the brief: the player has to be able to see the belt and their ball *through* the hint,
+ * because the hint is asking them to look at those things. Half is the value that reads as an overlay rather than either a
+ * solid poster or a smudge.
+ */
+export const STEERING_HINT_TRANSPARENCY = 0.5;
+
+/**
+ * **Placeholder.** The arrow outline's thickness, in pixels.
+ *
+ * The countdown's number (item 149's `OUTLINE_THICKNESS`), reused rather than re-guessed because the hint and the `Start!` it
+ * follows are on screen a tenth of a second apart, and two weights of outline there would read as two different posters.
+ */
+export const STEERING_HINT_OUTLINE_THICKNESS = 4;
+
+/**
+ * **Placeholder.** The left arrow's horizontal position, as a fraction of the HUD's width.
+ *
+ * **Fractions, not pixels**, because the layer is `CoreUISafeInsets`: the box already excludes the topbar and the bottom inset,
+ * so a share of it lands in the same place relative to the screen on every aspect ratio, and a pixel offset would not.
+ */
+export const STEERING_HINT_LEFT_X = 0.15;
+
+/** **Placeholder.** The right arrow's horizontal position, as a fraction of the HUD's width. Symmetric with the left. */
+export const STEERING_HINT_RIGHT_X = 0.85;
+
+/**
+ * **Placeholder.** Both arrows' vertical position, as a fraction of the HUD's height.
+ *
+ * Below centre, where a thumb reaches on a phone and below the leaderboard's top-right stack, so neither arrow is drawn over a
+ * row of the board in the three seconds it is up.
+ */
+export const STEERING_HINT_Y = 0.65;
+
+/**
+ * The two glyphs, written **literally** rather than as `\uXXXX` escapes: an escape sequence is a load error in Luau (item 50),
+ * and the tree has shipped these two characters before - item 220's custom touch buttons were titled `◀` and `▶` until item 236
+ * deleted the pad.
+ *
+ * They are here, beside the words of the spectate control, because the *symbol* is the design: the brief bans instructional
+ * text, and "no text" is a property of these two values rather than of the controller that draws them.
+ */
+export const STEERING_HINT_LEFT_GLYPH = "◀";
+export const STEERING_HINT_RIGHT_GLYPH = "▶";
+
+/**
+ * **Placeholder.** The screen's short axis, in pixels, that `STEERING_HINT_TEXT_SIZE` was designed against.
+ *
+ * A 1080p desktop's height, near enough: at or above it the arrows draw at the full designed size, and below it they shrink. See
+ * `steeringHintScale` for the arithmetic and `STEERING_HINT_MIN_SCALE` for the floor.
+ */
+export const STEERING_HINT_REFERENCE_SHORT_AXIS = 540;
+
+/**
+ * **Placeholder.** The smallest the arrows are drawn at, as a fraction of the designed size.
+ *
+ * A legibility floor, not a layout one: the two scenarios pull opposite ways, and at 0.4 an arrow on a portrait phone is a
+ * speck over a moving belt. `0.62` puts the logged 381-pixel phone viewport at 68 px - the size the brief floated as an
+ * alternative to 96 - and leaves a portrait phone at a visible arrow rather than none.
+ */
+export const STEERING_HINT_MIN_SCALE = 0.62;
+
+/**
+ * **Placeholder.** Draw order for the hint inside `hudCore`.
+ *
+ * Above every other tenant of that layer - the leaderboard's rows are at `4` and the picker's labels at `6` - because the hint
+ * is a three-second overlay that has to be legible over whatever the HUD happens to be showing at the moment `Playing` starts.
+ * It cannot outrank the countdown: that is a different `ScreenGui` at display order `35`, and a layer boundary is absolute
+ * whatever the z-indices on either side say.
+ */
+export const STEERING_HINT_Z_INDEX = 8;

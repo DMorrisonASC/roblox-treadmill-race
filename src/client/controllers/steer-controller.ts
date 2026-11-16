@@ -130,8 +130,15 @@ function formatAxis(value: number): string {
  * - **Not a custom touch UI any more (item 236).** Every `BindAction` here passes `createTouchButton = false`, so the engine
  *   draws nothing on this file's behalf. The four `◀ ▶ ▼ ▲` buttons item 220 shipped are gone: they were a second, chunkier
  *   control scheme laid over the one the engine already draws, and on a phone they read as a right-hand thumbstick that this
- *   game does not have. **The native left joystick is the touch input** - it arrives here as `Enum.KeyCode.Thumbstick1` on the
- *   stick binding below, which is the same physical control the default control scripts use.
+ *   game does not have. **A device whose `PlayerModule` resolves gets the engine's own on-screen left joystick**, which
+ *   reaches this file through the `Thumbstick1` readers only if the engine synthesises stick input for it - the one thing
+ *   `bindGamepadStick` records as unsettled from source. **In this place the module never resolves** (item 237), so the path
+ *   that actually runs is the virtual stick below.
+ * - **Not the only thing on screen about steering (item 241).** Everything above is about what the *stick* draws, which is
+ *   nothing. The affordance - two semi-transparent arrows for the first three seconds of a round this player is racing in - is
+ *   `SteeringHintController`, a separate controller with no connection to this one: it reads the phase and `Competing` and never
+ *   touches an input binding, this file's axis, or its remote. That separation is deliberate, so an input round and a
+ *   presentation round cannot break each other.
  * - **Not the owner of the engine's touch UI, and it must not hide it.** `TouchGui.TouchControlFrame.TouchThumbstick` is the
  *   **left, movement** stick - the very control this file reads - so hiding it would delete the joystick in the act of
  *   "hiding the camera stick". The default mobile UI has no right-hand thumbstick to hide: the camera is dragged on empty

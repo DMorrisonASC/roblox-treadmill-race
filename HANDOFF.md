@@ -8697,3 +8697,50 @@ Whether `held=` climbs on a real phone (`0.5s`, `1s`, `1.5s` under a stationary 
 ### Validation
 
 `npm run build` exit 0; **`npm test` = 566 passed in 44 files**; `npm run lint` 0 errors with the same **55** pre-existing `viewport.ts` warnings; `prettier --check "src/**/*.ts"` clean apart from that same pre-existing `viewport.ts` file; `grep "\uXXXX" src` = 0; `flamework.build` untouched.
+## 241 - Two arrows for three seconds: the affordance a stick that draws nothing could not give
+
+Item 236 deleted the custom touch pad and item 237 replaced it with a virtual stick read from raw touches that **draws nothing until a thumb is already on the left half**. That left the game with a control scheme no new player could discover: the picker taught them to choose and the countdown told them when, and by the frame the belt moves both are gone. This round adds the one on-screen statement that lateral control exists, in a vocabulary that survives a language barrier - two chevrons, no words, three seconds, once per client per session.
+
+### What was verified against source, not assumed
+
+- **`RoundState`** is a `StringValue` in `ReplicatedStorage` (`shared/remotes.ts:31`), read once and subscribed by `CharacterFreezeController`, `SpectateController` and `TreadmillCameraController`. The new controller does the same, with the same bounded `WaitForChild` (10 s), warn-and-return.
+- **`Player.Competing`** (`shared/attributes.ts:400`) is read on `GetAttributeChangedSignal` **and once at boot**, the pattern `CharacterFreezeController` and `SpectateController` both use - so a client that starts mid-round has it on its first frame rather than at the next write.
+- **`layers.ts`** - `hudCore` is `CoreUISafeInsets` at display order `20`; `splash` is `CoreUISafeInsets` at `35`. The layer boundary is absolute, so the hint draws **under** the countdown's fading `Start!` whatever z-index either side uses. No layer was added: `UiLayer` and the order chain are untouched.
+- **`outlineText`** (`shared/ui/text.ts:41`) returns the `UIStroke` precisely so a caller can fade it separately - "a stroke's transparency is its own property and does not ride along with the label's" (item 149). The hint fades both ends of both arrows, which is only possible because of that return value.
+- **The glyphs render**: item 220 shipped `◀` and `▶` as `ContextActionService` touch-button titles and they drew on screen until item 236 deleted the pad. That is the empirical answer to "does this engine render U+25C0/U+25B6", and it is why the glyph beat a frame-built chevron.
+
+### The decisions
+
+1. **Glyph, not drawn chevron.** One `TextLabel` per arrow instead of two rotated rectangles and a joint, and it inherits the countdown's stroke, fade and `UIScale` for free. Consequence: the arrows depend on font coverage - if `GothamBlack` lacks the two code points, the engine falls back per-glyph to another face and the arrows appear at the wrong weight. That is a Studio check, named below, and the alternative was a second rendering path nothing would ever test.
+2. **`hudCore` (`20`), not `splash` (`35`).** Agreed with the brief, for its reason: the hint emerges *beneath* the fading `Start!`, so for a tenth of a second the two coexist with the poster on top. The hint never draws over the sheet or the wipe, which is what `hudCore` guarantees.
+3. **`shown` is set by the show, not by `Playing` entry.** The spectator case is the whole reason: a player whose first `Playing` arrives while they are watching somebody else's round is owed nothing *yet*, and marking the session on phase entry would silence the hint in the first round they actually race. It also makes `Playing -> Playing` (item 38's debug restart) free - the flag is already set, so the second entry answers `nothing` with no second suppression flag.
+4. **`TweenService`, not `RenderStepped`.** The countdown drives itself per frame because its deadline is absolute and frame-exact and it must show the caption the *server's* clock says is current. This hint has no deadline and no shared clock - three seconds of local animation started by a local event - so four `Tween` objects replace sixty evaluations a second.
+5. **A `UIScale` from the viewport, not a literal 96 px.** `STEERING_HINT_TEXT_SIZE` is now defined **at `STEERING_HINT_REFERENCE_SHORT_AXIS = 540`** and multiplied by `steeringHintScale`, which is `clamp(shortAxis / 540, 0.62, 1)`. The logged 750 x 381 phone viewport draws at **0.706**, i.e. 68 px - the 72 the brief floated - and a desktop still gets the full poster. The trade: the hint grows a viewport read and two constants, and a rotation during the three seconds does not resize it (the scale is read once, at build).
+
+### The matrix, as a spec rather than a screenshot
+
+`shared/steering-hint.ts` holds the rule (`steeringHintActionFor` -> `show` / `teardown` / `nothing`), the fade-out arithmetic (`steeringHintFadeOutAtSeconds`) and the scale (`steeringHintScale`); `shared/steering-hint.spec.ts` asserts 15 cases over them. The four that cannot be seen in a single round:
+
+- a spectator's `Playing` answers `nothing` **and leaves the session unmarked**, so their first competing round answers `show` - asserted as a two-call sequence;
+- `Playing -> Playing` answers `nothing`, because `shown` is already set;
+- a phase change off `Playing` with the hint up answers `teardown`, as does `Competing` going false (an elimination during the three seconds);
+- `steeringHintScale` measures the **short** axis, so a rotation does not change the size.
+
+### Where this prompt was wrong
+
+1. **The fade-out formula loses a quarter second.** The brief says hold for `STEERING_HINT_SECONDS - FADE_IN - FADE_OUT` = 2.25 s and destroy. But the fade-in is *inside* the three seconds - it starts on the frame the hint is drawn - so that schedule ends the fade-out at 2.75 s and the hint is gone a quarter-second early, which no screenshot would show and every run would be. `steeringHintFadeOutAtSeconds` is `SECONDS - FADE_OUT` = 2.5, and the spec asserts `fadeOutAt + FADE_OUT === SECONDS`.
+2. **The pseudocode's gate is on the phase change only.** `on RoundState change: if value === "Playing" && competing` misses the ordering that actually happens for a joiner: `Competing = true` can be written *after* the phase becomes `Playing`, and a rule that only re-decides on phase changes would then never fire. Both signals call one `apply()`, so whichever arrives second shows the hint.
+3. **`flamework.build` did not need the delete-and-rebuild dance.** It is **gitignored** (`.gitignore:6`), and the ordinary `npm run build` added `steering-hint-controller@SteeringHintController` to it on the first try - verified by grep, one match. Deleting `out/tsconfig.tsbuildinfo` and the registry would have cost a full rebuild for nothing.
+4. **`0.65` is where the brief put it, but the leaderboard is also on `hudCore`.** The board is anchored top-right with `autoHeight`, so its lowest row can reach the right arrow on a tall stack. The hint is at `ZIndex = 8` (the board's rows are at `4`), so the arrow wins the overlap - a deliberate choice rather than an accident, and the alternative (moving the arrows up or down) trades a HUD element's position for a piece of scene geometry's.
+
+### Drift found in adjacent code
+
+`steer-controller.ts`'s "What this is not" list still carried item 236's claim that **"the native left joystick is the touch input - it arrives here as `Enum.KeyCode.Thumbstick1`"**, which item 237 disproved for this place (no `PlayerModule` -> no native joystick -> the virtual stick is the path), and asserted as fact the one thing `bindGamepadStick` records as *unsettled from source*. Rewritten in place, and given a companion bullet pointing at `SteeringHintController` - **comments only, no code, no binding, no payload** - so the next reader of that file does not conclude that nothing on screen suggests steering exists. `round-state-controller.ts` needed nothing: its claim is that the value is readable by any GUI controller without a helper, which this round is the first to exercise.
+
+### Studio-only
+
+Whether `GothamBlack` covers U+25C0/U+25B6 at 96 px (and whether the fallback face, if it is used, reads as the same poster as `Start!`); whether `hudCore`'s `CoreUISafeInsets` puts `0.65` where the eye expects it on a phone in landscape; and whether `0.5` transparency reads as a hint or as a smudge over the belt texture.
+
+### Validation
+
+`npm run build` exit 0; **`npm test` = 581 passed in 45 files** (was 566/44 - the new spec is the 15); `npm run lint` 0 errors with the same **55** pre-existing `viewport.ts` warnings; `prettier --check "src/**/*.ts"` clean apart from that same pre-existing file; `grep "\uXXXX" src` = 0 (the glyphs are literal UTF-8 in `tuning.ts`); `flamework.build` carries exactly one `steering-hint-controller` entry.
