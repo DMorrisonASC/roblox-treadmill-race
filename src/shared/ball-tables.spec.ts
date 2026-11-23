@@ -1,7 +1,36 @@
 import { describe, expect, it } from "@rbxts/jest-globals";
 import { BALL_POOL, RARITIES, rarityOfBall } from "./economy.config";
-import { BALL_MODELS, modelEntryForBallId } from "./models.config";
+import { BALL_MODELS, modelEntryForBallId, modelTemplateNameFor } from "./models.config";
 import { describeBallPower, POWERS, powerForBallId } from "./powers.config";
+
+/**
+ * The table's naming convention, derived **here in the spec** rather than imported from the config.
+ *
+ * That is the whole value of this helper: `models.config.ts` holds ten template names as literals, so a test that asked the
+ * config how to spell `bully_ball` would be comparing an implementation with itself. Deriving the expected name in the test
+ * file makes a typo in the table (`bullyball`, `BullyBall`, `bullyBalll`) a suite failure instead of a ball that draws its
+ * sphere in silence.
+ *
+ * Only the shape this table actually uses is handled: a `snake_case` word list whose first word is untouched and whose later
+ * words are capitalised. A single-word id passes through unchanged, which is `camelCase`'s own rule.
+ */
+function camelCaseOf(ballId: string): string {
+	let out = "";
+	let capitaliseNext = false;
+
+	for (const character of ballId.split("")) {
+		if (character === "_") {
+			capitaliseNext = true;
+		} else if (capitaliseNext) {
+			out += string.upper(character);
+			capitaliseNext = false;
+		} else {
+			out += character;
+		}
+	}
+
+	return out;
+}
 
 /**
  * The cross-validation every ball id has to survive.
@@ -20,8 +49,10 @@ import { describeBallPower, POWERS, powerForBallId } from "./powers.config";
  *
  * ## What this cannot prove
  *
- * That a model is *loaded* — the table is a declaration and nothing reads it yet. That is the point: this round makes the
- * omission loud, and the swap is a later round's work.
+ * That a template *exists in the scene*. The table is a declaration and the lookup is `ServerStorage`'s at spawn, so this
+ * spec proves that every ball id has a name and that the name follows the convention — it cannot prove that
+ * `ServerStorage.BallModels` has an Instance called `bullyBall`. That is what the spawner's boot-time layout check and its
+ * per-id warning are for, and the reason both exist rather than being left to this file.
  */
 describe("ball tables", () => {
 	it("resolves a pool entry, a power and a model entry for every ball id, in one pass", () => {
@@ -35,6 +66,10 @@ describe("ball tables", () => {
 
 				expect(powerForBallId(ballId) !== undefined).toBe(true);
 				expect(modelEntryForBallId(ballId) !== undefined).toBe(true);
+				// **And the template name, not just the entry** (item 242). An entry with `model: undefined` passes every other
+				// line in this loop, which is exactly the hole the model swap had to close: the body spawns, races, and simply
+				// looks like every other ball.
+				expect(modelTemplateNameFor(ballId) !== undefined).toBe(true);
 
 				checked++;
 			}
@@ -58,14 +93,49 @@ describe("ball tables", () => {
 			expect(seen.has(entry.ballId)).toBe(false);
 			seen.add(entry.ballId);
 
-			// `undefined` means "this ball is still its sphere", which is the shipped state. Asserted as a *shape* rather
-			// than as a value, so the day an asset lands this line keeps passing.
-			expect(entry.model === undefined || entry.model.assetId !== undefined).toBe(true);
+			// **A model whose name is the camelCase of its id** (item 242). The value is asserted, not merely its presence:
+			// `templateName` is a hand-authored Instance name, so a typo is a ball that draws nothing, and the only place a
+			// typo can be caught without Studio is a derivation stated independently of the table.
+			expect(entry.model === undefined || entry.model.templateName === camelCaseOf(entry.ballId)).toBe(true);
 		}
 
 		// One entry per ball, computed from the pool rather than typed in: the pair of loops above already implies it, and
 		// stating the count makes "the table grew a stale row" and "the table lost a row" both fail loudly.
 		expect(BALL_MODELS.size()).toBe(poolSize);
+	});
+
+	it("names every template in camelCase, and answers nothing for a ball it does not describe", () => {
+		// The **naming asymmetry** the config documents: the id is `snake_case` data, the template is a `camelCase` Instance
+		// name. Asserted as a shape as well as a value, because "camelCase" is the half a reader will be tempted to normalise:
+		// a template with an underscore in it would still pass an equality check against a mis-derived name, and would then be
+		// an Instance name in the Explorer that no `Instance.Name` convention in this tree produces.
+		for (const entry of BALL_MODELS) {
+			const name = entry.model === undefined ? undefined : entry.model.templateName;
+			if (name === undefined) {
+				continue;
+			}
+
+			// A character walk, for `countSentences`' reason below: no pattern engine to escape, and no risk of a metacharacter
+			// turning a substring test into something else.
+			let hasSeparator = false;
+			for (let index = 0; index < name.size(); index++) {
+				if (name.sub(index, index + 1) === "_") {
+					hasSeparator = true;
+				}
+			}
+
+			expect(hasSeparator).toBe(false);
+			expect(name !== string.lower(name)).toBe(true);
+		}
+
+		// **`undefined`, never a default** (item 242). A function that answered the first template would make a missing entry
+		// indistinguishable from a working one — the ball would wear somebody else's art and no log line would say so.
+		expect(modelTemplateNameFor("unknown_id")).toBe(undefined);
+		expect(modelTemplateNameFor("")).toBe(undefined);
+		expect(modelEntryForBallId("unknown_id")).toBe(undefined);
+
+		// A known id resolves, so the two assertions above are not "this function always answers `undefined`".
+		expect(modelTemplateNameFor("bully_ball")).toBe("bullyBall");
 	});
 });
 

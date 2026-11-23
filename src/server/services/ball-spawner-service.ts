@@ -1,4 +1,4 @@
-import { CollectionService, Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/services";
+import { CollectionService, Players, ReplicatedStorage, RunService, ServerStorage, Workspace } from "@rbxts/services";
 import { OnStart, Service } from "@flamework/core";
 import {
 	BALL_SPEED_ATTRIBUTE,
@@ -16,6 +16,7 @@ import {
 	hasOwnerIdentity,
 	SPAWN_LANE_ATTRIBUTE,
 	CHOSEN_BALL_ID_ATTRIBUTE,
+	chosenBallIdOf,
 	SPAWNER_KILL_Y_ATTRIBUTE,
 	SPAWNER_MAX_LIVE_BALLS_ATTRIBUTE,
 	POWER_ATTRIBUTE,
@@ -24,6 +25,7 @@ import {
 } from "shared/attributes";
 import { powerForBallId } from "shared/powers.config";
 import { colorForBall } from "shared/ball-color";
+import { BALL_MODELS, BALL_MODEL_FOLDER_NAME, modelTemplateNameFor } from "shared/models.config";
 import {
 	BALL_GROUP,
 	collisionGroupFor,
@@ -60,6 +62,7 @@ import {
 	BALL_TEXTURE_ASSET,
 	BALL_TEXTURE_OFFSET_RANGE,
 	BALL_TEXTURE_OFFSET_RANGE_V,
+	BALL_MODEL_NAME,
 	BOOST_HYSTERESIS,
 	DECOY_SPAWN_DELAY_SECONDS,
 	TAIL_WIND_MIN_BALL_SPEED,
@@ -144,6 +147,21 @@ const TEXTURE_FACES: ReadonlyArray<Enum.NormalId> = [
  * covers the first run of the stream. Failures past this cap still warn — see `attachBallTexture`.
  */
 const BALL_TEXTURE_LOG_LIMIT = 3;
+
+/**
+ * How long to wait for `ServerStorage.BallModels` before giving up and saying so; the tree's bounded-wait convention
+ * (item 13).
+ *
+ * **A service, not a replicated instance, so the wait is for the *folder* rather than for replication.** `ServerStorage`
+ * exists the moment the server does; a folder inside it either was authored in the scene or was not. The wait is kept
+ * anyway because the lookup happens in `onStart`, and `onStart` is not always the first thing a server runs — a Rojo-served
+ * place adds the scene's nodes while scripts are already starting, which is the same race every other bounded wait in this
+ * tree exists for.
+ */
+const BALL_MODEL_FOLDER_WAIT_SECONDS = 5;
+
+/** How many missing-template warnings a session may print, so one absent folder cannot bury the log at spawn rate. */
+const BALL_MODEL_WARN_LIMIT = 12;
 
 /**
  * **Placeholder.** Pole marker diameter as a fraction of the ball's radius.
@@ -625,6 +643,34 @@ export class BallSpawnerService implements OnStart {
 
 	/** TEMPORARY INSTRUMENTATION. Bodies whose texture creation has logged; see `BALL_TEXTURE_LOG_LIMIT`. */
 	private ballTextureLogs = 0;
+
+	/**
+	 * `ServerStorage.BallModels`, once the boot probe has found it.
+	 *
+	 * **A cached folder rather than a path walked per spawn.** The lookup is a scene fact that does not change while the
+	 * server runs, and fifty bodies a round × a `FindFirstChild` chain is work with no answer to produce that the first
+	 * lookup did not. `undefined` beside a settled probe means "the folder is not there", which is a settled answer and is
+	 * not retried — see `modelFolderOrNil`.
+	 */
+	private modelFolder?: Folder;
+
+	/**
+	 * Whether the boot probe has finished, however it ended.
+	 *
+	 * The distinction matters because "not looked yet" and "not there" are different states for `modelFolderOrNil`: the
+	 * first should still answer if the folder is on disk (a spawn in the first seconds of the server), the second must not
+	 * spend a lookup per body on a question already answered.
+	 */
+	private modelProbeSettled = false;
+
+	/**
+	 * Template names this session has already reported as missing or unusable, so each one warns **once**.
+	 *
+	 * A per-name set rather than a counter: a folder with nine of the ten templates would otherwise spend a shared budget on
+	 * the one absent id at spawn rate and never report anything else. The names are the interesting fact; how often each was
+	 * asked for is not.
+	 */
+	private readonly reportedModelProblems = new Set<string>();
 	/** Stable ids so two Ctrl+D clones, which share a name and a `GetFullName()`, stay distinguishable. */
 	private readonly spawnerIds = new Map<BasePart, number>();
 	private nextSpawnerId = 0;
@@ -638,6 +684,13 @@ export class BallSpawnerService implements OnStart {
 	private lastSampleAt = 0;
 
 	public onStart(): void {
+		// **The art is checked before a single body exists** (item 242). The templates live in `ServerStorage`, which is not
+		// in `default.project.json`'s tree at all - so on a place built from this project the folder can only come from the
+		// scene, and on a place where nobody authored it the feature draws spheres forever with no line saying why. This is
+		// the one probe that turns that into a sentence in the log; `attachBallModel` then warns per absent template, because
+		// "the folder is missing" and "one of the ten names is wrong" are different mistakes.
+		this.checkModelLayout();
+
 		for (const instance of CollectionService.GetTagged(TAGS.ballSpawner)) {
 			this.bindSpawner(instance);
 		}
@@ -1293,7 +1346,15 @@ export class BallSpawnerService implements OnStart {
 		// replicated as a stream of separate child-creation events, whereas a part parented with its
 		// textures already in place arrives at clients as one tree. Six textures per body makes that
 		// difference worth caring about at stream rates.
-		this.attachBallTexture(ball, entry);
+		//
+		// **A modelled ball draws a welded mesh instead of the six faces** (item 242). The two are mutually exclusive on
+		// purpose: a mesh and the face textures both covering the same 20-stud sphere is z-fighting at best and, at worst, the
+		// textures would be the visible thing and the art would never be seen. `attachBallModel` answers whether it drew
+		// anything, and only a ball it declined keeps the sphere's skin - so a scene with no `ServerStorage.BallModels` still
+		// produces the ball this tree has always produced, and the log says why.
+		if (!this.attachBallModel(ball, chosenBallId ?? "")) {
+			this.attachBallTexture(ball, entry);
+		}
 
 		ball.Parent = this.ballsFolder();
 
@@ -1525,7 +1586,15 @@ export class BallSpawnerService implements OnStart {
 		// The six face textures, before `Parent` so they arrive as one tree rather than as separate child creations — the
 		// same ordering `spawnBall` uses. This consumes one slot of `BALL_TEXTURE_LOG_LIMIT`, which is instrumentation for
 		// the parent's spawn path; a decoy being logged there is acceptable and no longer distinguishable in the log.
-		this.attachBallTexture(decoy, entry);
+		//
+		// **The twin needs its own mesh, and it does not inherit one by spawning** (item 242). `spawnDecoy` builds a bare
+		// `Part` and copies `Shape`, `Size`, `Material` and `Color` by hand - it never calls `spawnBall` - so a twin of a
+		// modelled ball would be a plain sphere beside a mesh. That is not a cosmetic difference: the decoy power exists so a
+		// viewer cannot tell the twin from the parent, so a twin that looks different makes the power do the opposite of its
+		// job. The pick is read from the *parent*, which is the only body that has one, exactly as `AvatarUserId` above is.
+		if (!this.attachBallModel(decoy, chosenBallIdOf(parent))) {
+			this.attachBallTexture(decoy, entry);
+		}
 
 		// **The display identity, before `Parent` like every other attribute a body is drawn from** (item 193). Read from the
 		// *parent*, which is the only body that has owner attributes at all: the twin is ownerless by design, so without this
@@ -2697,6 +2766,342 @@ export class BallSpawnerService implements OnStart {
 	}
 
 	/**
+	 * **The mesh swap** (item 242): gives a modelled ball a welded, correctly-scaled copy of its template and hides the
+	 * sphere underneath it.
+	 *
+	 * ## What this does *not* touch, and why that is the whole constraint
+	 *
+	 * The body stays the body. This function writes **no** `Size`, no `Shape`, no `CanCollide`, no collision group, no
+	 * attribute, no velocity and no `CFrame` on `ball` except `Transparency`. The mesh is a **child** welded to it with
+	 * `WeldConstraint` and `CanCollide = false` / `Massless = true`, so it contributes nothing to the assembly's collision
+	 * geometry, its mass or its inertia. `BALL_SPEED` is written from the body's `Position`, `stepBallSpeeds` re-drives the
+	 * body's velocity, the `Ball` tag and every attribute are already on the body by the time this runs, and the markers
+	 * are sized from the **pool entry** rather than from `ball.Size` — so nothing downstream can tell the difference between
+	 * a modelled body and a plain one except what it looks like.
+	 *
+	 * ## Why the body is hidden and its textures are not created
+	 *
+	 * A mesh and a 20-stud sphere occupy the same space, so leaving both visible is z-fighting: two surfaces at the same
+	 * depth, flickering as the camera moves. The sphere loses, which means `Transparency = 1` on the body.
+	 *
+	 * **`Transparency` is a replicated property and `LocalTransparencyModifier` is not**, so this is the one write that
+	 * hides the sphere for every client rather than for the one running a controller. The ball's own client-side phantom
+	 * still hides the body locally and draws a rolling copy — see `BallRenderController`, which clones **this mesh** instead
+	 * of the six faces when it finds one.
+	 *
+	 * There are no `Texture` children to remove because `spawnBall` only calls `attachBallTexture` when this function
+	 * declines — six instances per body that would never be drawn are six instances not worth replicating. The sweep below
+	 * is still written, because the pair "invisible body, no face textures" is the contract the client reads and a body that
+	 * acquired textures some other way (a re-used instance, a future power that paints one) must not keep drawing them
+	 * through a transparent part — the item-99 fact that a `Texture` renders on an invisible part.
+	 *
+	 * ## How the template is scaled, and why the two mechanisms are not interchangeable
+	 *
+	 * **`MeshPart.Size` is in studs; `SpecialMesh.Scale` is a multiplier** ("determines the size of the mesh relative to its
+	 * original dimensions", per `@rbxts/types`). Only the first can be computed from a target: `MeshPart.MeshSize` ("the
+	 * original size of the part's source mesh geometry, before any scaling applied through `BasePart.Size`") gives the
+	 * authored proportions, so the scale is a **uniform** factor `target / max(MeshSize)` and the ball's silhouette is
+	 * preserved instead of being stretched to a cube. A `SpecialMesh` template cannot be sized this way at all — the mesh's
+	 * original dimensions are inside the asset and no API reports them — so it is drawn at whatever `Scale` the designer
+	 * authored and warns once, rather than being silently mis-sized.
+	 *
+	 * ## The return value
+	 *
+	 * `true` when a mesh was welded. `false` means "draw the ordinary ball", and every `false` path has already said why
+	 * once: no ball id, no entry in the table, no folder, no child by that name, or a child that is not a part. **The
+	 * fallback is the sphere rather than a failure**, because a spawn that throws costs the round a competitor while a
+	 * still-correct body with the wrong skin costs the round some art.
+	 */
+	private attachBallModel(ball: BasePart, ballId: string): boolean {
+		if (ballId === "") {
+			// A body nobody picked a ball for — a `Debug#N` body, or a spawn before item 76. Not a problem to report.
+			return false;
+		}
+
+		const templateName = modelTemplateNameFor(ballId);
+		if (templateName === undefined) {
+			this.reportModelProblem(
+				ballId,
+				`no template name for ball id "${ballId}" — the pool has a ball \`models.config.ts\` does not describe`,
+			);
+			return false;
+		}
+
+		const folder = this.modelFolderOrNil();
+		if (folder === undefined) {
+			// Reported once at boot by `checkModelLayout`; a second line per spawn would be noise around the same fact.
+			return false;
+		}
+
+		const template = folder.FindFirstChild(templateName);
+		if (template === undefined) {
+			const present = this.describeModelFolder(folder);
+			this.reportModelProblem(
+				templateName,
+				`no "${templateName}" in ServerStorage.${BALL_MODEL_FOLDER_NAME} (ball "${ballId}") — the folder has ${present}`,
+			);
+			return false;
+		}
+
+		// A `Model` template is accepted through its `PrimaryPart`, because dragging ten meshes into a folder in Studio is
+		// as likely to land groups as parts. Only one part is welded: the contract is one mesh per ball, and a second part
+		// would need its own offset, its own weld and a decision about which of them is "the ball".
+		const source = template.IsA("BasePart")
+			? template
+			: template.IsA("Model")
+				? (template.PrimaryPart ?? template.FindFirstChildWhichIsA("BasePart"))
+				: undefined;
+		if (source === undefined) {
+			this.reportModelProblem(
+				templateName,
+				`"${templateName}" is a ${template.ClassName} with no \`BasePart\` to weld (ball "${ballId}")`,
+			);
+			return false;
+		}
+
+		const mesh = this.buildBallMesh(source, ball);
+		if (mesh === undefined) {
+			return false;
+		}
+
+		// **One weld, parented to the mesh** — the shape item 15 used for the markers, which item 29 later replaced there
+		// with anchored parts. A `WeldConstraint` has no `C0`/`C1`: it preserves the relative transform the two parts had
+		// when it was created, which is why the mesh is positioned at the body's own `CFrame` first. Parented to the mesh
+		// rather than to the body so it is destroyed with the thing it holds — and **that parentage is also what the client
+		// has to know about**: a clone of the mesh carries a clone of this weld, pointing at the body, which would drag the
+		// phantom behind the physics body instead of letting it roll. `BallRenderController` destroys every constraint in
+		// its clone for exactly that reason.
+		const weld = new Instance("WeldConstraint");
+		weld.Part0 = ball;
+		weld.Part1 = mesh;
+		weld.Parent = mesh;
+
+		mesh.Parent = ball;
+
+		// The pair that stops z-fighting: the sphere is gone and nothing is left to draw its faces.
+		//
+		// **One coupled risk, named rather than discovered later.** `DecoyOutlineController` adornees a `Highlight` to the
+		// **body**, and a `Highlight`'s silhouette is drawn from the part's render geometry — a body at `Transparency = 1` may
+		// therefore draw no outline at all, which would silently remove the one cue a `decoy` player has for telling their twin
+		// from their own ball. Item 79 shipped that outline on a body the *client* already hides (`LocalTransparencyModifier`
+		// in `BallRenderController`), and the feature has been in play since, which is the evidence that a `Highlight` ignores
+		// per-part transparency; this server-side write is the first one that does not depend on that reading. **If the outline
+		// disappears in Studio**, the fix is not to un-hide the body: it is to adornee the controller's `Highlight` to the
+		// visible skin (`BALL_PHANTOM_NAME`), which is what the eye actually sees on a meshed ball and on a plain one alike.
+		ball.Transparency = 1;
+		for (const child of ball.GetChildren()) {
+			if (child.IsA("Texture")) {
+				child.Destroy();
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * The mesh instance itself: cloned, made inert, scaled to the body and posed at its centre.
+	 *
+	 * Split out of `attachBallModel` because scaling is the half with an arithmetic decision in it and the half a future
+	 * round is most likely to revisit (`MeshPart` in studs versus `SpecialMesh` as a multiplier). Returns `undefined` only
+	 * when the clone could not be scaled at all, which is a template whose authored extent reads zero — a mesh that failed
+	 * to load in the scene, which is worth one warning and the sphere rather than a zero-sized ball.
+	 */
+	private buildBallMesh(source: BasePart, ball: BasePart): BasePart | undefined {
+		const mesh = source.Clone();
+
+		// **Every physical property is forced, not inherited.** A template authored in Studio is an ordinary part: it may be
+		// anchored, colliding, queryable or touchable, and any of those would either nail the ball to the spawn point or
+		// change the physics body the whole simulation is built on. The mesh must be a passenger.
+		mesh.Name = BALL_MODEL_NAME;
+		mesh.Anchored = false;
+		mesh.CanCollide = false;
+		mesh.CanQuery = false;
+		mesh.CanTouch = false;
+		mesh.Massless = true;
+
+		const target = math.max(ball.Size.X, ball.Size.Y, ball.Size.Z);
+		const authored = this.authoredExtentOf(mesh);
+		const longest = math.max(authored.X, authored.Y, authored.Z);
+		if (longest <= 0) {
+			this.reportModelProblem(
+				mesh.Name,
+				`template "${source.GetFullName()}" reports an authored extent of ${formatVector(authored)} — nothing to scale`,
+			);
+			mesh.Destroy();
+			return undefined;
+		}
+
+		// **Uniform, not per-axis.** A ball drawn as a 20×20×20 box is a ball only if the art was authored as one; a mesh
+		// whose authored proportions are not a cube would be squashed into one, and a squash on a ball reads as a mistake in
+		// the art rather than as a size. Scaling by the longest axis means the mesh spans `BALL_SIZE` where it is widest and
+		// keeps its proportions everywhere else.
+		const factor = target / longest;
+		mesh.Size = authored.mul(factor);
+
+		// **`SpecialMesh.Scale` is the one case code cannot size**, and it says so once. The property is a multiplier on the
+		// mesh's original dimensions, which are inside the asset; `Scale` would have to be authored as the size the designer
+		// wants, and multiplying it by our factor again would compound two scale systems. `Size` was still written above so a
+		// primitive `MeshType` (`Brick`, `Sphere`, …) follows the ball, which is what those types do read.
+		const special = mesh.FindFirstChildWhichIsA("SpecialMesh");
+		if (special !== undefined && special.MeshType === Enum.MeshType.FileMesh) {
+			this.reportModelProblem(
+				source.Name,
+				`template "${source.GetFullName()}" is a \`SpecialMesh\` with \`MeshType.FileMesh\`, whose \`Scale\` is relative to the asset and cannot be sized from code — it draws at the \`Scale\` authored in Studio. Use a \`MeshPart\` template to have it span BALL_SIZE`,
+			);
+		}
+
+		// The body's own pose, so the weld's preserved-offset rule is the identity. Set before the weld exists (see the
+		// caller), because a `WeldConstraint` locks the relationship it finds rather than one it is given.
+		mesh.CFrame = ball.CFrame;
+
+		return mesh;
+	}
+
+	/**
+	 * The authored size of a mesh clone, in studs — the baseline `buildBallMesh` scales from.
+	 *
+	 * **`MeshPart.MeshSize` for a triangle mesh**, because `Size` has usually been stretched already in Studio and scaling
+	 * from a stretched value would keep the stretch. It is `NotReplicated` per the typings, which is why this is a
+	 * server-side computation and the client only ever clones the finished `Size`.
+	 *
+	 * **`Part.Size` otherwise**, which is the right baseline for a primitive `Shape` and the only one available for a
+	 * `Part` carrying a `SpecialMesh`: a `DataModelMesh` renders inside its parent's box for the generated mesh types, so
+	 * the box is what the ball's size should match.
+	 */
+	private authoredExtentOf(mesh: BasePart): Vector3 {
+		if (mesh.IsA("MeshPart")) {
+			const reported = mesh.MeshSize;
+			if (math.max(reported.X, reported.Y, reported.Z) > 0) {
+				return reported;
+			}
+		}
+
+		return mesh.Size;
+	}
+
+	/**
+	 * The `ServerStorage` folder the templates live in, or `undefined` — a cached answer once the boot probe has settled, a
+	 * direct lookup before that.
+	 *
+	 * **Never blocks.** The bounded wait is `checkModelLayout`'s, on its own thread; a `WaitForChild` here would put up to
+	 * five seconds in front of a spawn, and this file has one pathological case for that already (`bindSpawner`'s start-up
+	 * ordering). The pre-settled lookup exists so a body spawned in the first seconds still gets its art rather than drawing
+	 * a sphere that never changes: `scripts` are running before a Rojo-served scene has finished adding its nodes, which is
+	 * the whole reason the probe waits at all.
+	 */
+	private modelFolderOrNil(): Folder | undefined {
+		const cached = this.modelFolder;
+		if (cached !== undefined && cached.Parent !== undefined) {
+			return cached;
+		}
+
+		if (this.modelProbeSettled) {
+			return undefined;
+		}
+
+		const found = ServerStorage.FindFirstChild(BALL_MODEL_FOLDER_NAME);
+
+		return found !== undefined && found.IsA("Folder") ? found : undefined;
+	}
+
+	/**
+	 * The boot-time probe: waits for the folder on its own thread, then says **which** of the ten templates it actually has.
+	 *
+	 * **The folder and its contents are two separate failures** and this reports them separately. A missing folder is a scene
+	 * that was never authored; a folder holding six of ten names is a scene that was authored and then half-renamed, and the
+	 * second is the one a reader would never otherwise see — every ball would draw, six of them correctly and four as
+	 * spheres, and only a screenshot would say so.
+	 *
+	 * `ServerStorage` is not in `default.project.json`'s tree, so on a place built from this project the folder can only come
+	 * from the scene. That is worth saying out loud in the log rather than leaving to the reader of a Rojo file.
+	 *
+	 * **On a thread, never inline.** Item 161 measured a blocking `WaitForChild` at 2.6 s and the panels that mounted after
+	 * it were late; here it would be five seconds in front of every spawner binding, the heartbeat connection and the two
+	 * remotes.
+	 */
+	private checkModelLayout(): void {
+		task.spawn(() => {
+			const found = ServerStorage.WaitForChild(BALL_MODEL_FOLDER_NAME, BALL_MODEL_FOLDER_WAIT_SECONDS);
+			this.modelProbeSettled = true;
+
+			if (found === undefined || !found.IsA("Folder")) {
+				warn(
+					`[Spawner] model: ServerStorage.${BALL_MODEL_FOLDER_NAME} is ${found === undefined ? `absent after ${BALL_MODEL_FOLDER_WAIT_SECONDS}s` : `a ${found.ClassName}`} — every ball draws its sphere this session. Expected a Folder holding ${BALL_MODELS.size()} templates: ${this.expectedModelNames()}`,
+				);
+				return;
+			}
+
+			this.modelFolder = found;
+
+			const missing = new Array<string>();
+			for (const entry of BALL_MODELS) {
+				const name = entry.model === undefined ? undefined : entry.model.templateName;
+				if (name === undefined) {
+					continue;
+				}
+
+				if (found.FindFirstChild(name) === undefined) {
+					missing.push(name);
+				}
+			}
+
+			if (missing.size() > 0) {
+				warn(
+					`[Spawner] model: ServerStorage.${BALL_MODEL_FOLDER_NAME} is missing ${missing.size()} of ${BALL_MODELS.size()} templates: ${missing.join(", ")} — those balls draw their sphere. Folder has: ${this.describeModelFolder(found)}`,
+				);
+				return;
+			}
+
+			print(
+				`[Spawner] model: ${BALL_MODELS.size()} templates in ServerStorage.${BALL_MODEL_FOLDER_NAME} (${this.describeModelFolder(found)})`,
+			);
+		});
+	}
+
+	/** The names the table expects, comma-joined, for a warning that has to name them to be actionable. */
+	private expectedModelNames(): string {
+		const names = new Array<string>();
+		for (const entry of BALL_MODELS) {
+			const name = entry.model === undefined ? undefined : entry.model.templateName;
+			if (name !== undefined) {
+				names.push(name);
+			}
+		}
+
+		return names.join(", ");
+	}
+
+	/** What a folder actually holds, as `name(ClassName)` pairs — the half of a mismatch warning that says what to rename. */
+	private describeModelFolder(folder: Folder): string {
+		const parts = new Array<string>();
+		for (const child of folder.GetChildren()) {
+			parts.push(`${child.Name}(${child.ClassName})`);
+		}
+
+		return parts.size() === 0 ? "nothing" : parts.join(", ");
+	}
+
+	/**
+	 * One warning per distinct problem, capped per session.
+	 *
+	 * **`reportedModelProblems` is keyed by the *subject*, not by the message**, so the same absent template asked for by
+	 * fifty spawns prints once, while a second, differently-missing template still prints. A single shared counter would let
+	 * the first mistake spend the whole budget.
+	 */
+	private reportModelProblem(subject: string, message: string): void {
+		if (this.reportedModelProblems.has(subject)) {
+			return;
+		}
+
+		if (this.reportedModelProblems.size() >= BALL_MODEL_WARN_LIMIT) {
+			return;
+		}
+
+		this.reportedModelProblems.add(subject);
+		warn(`[Spawner] model: ${message}`);
+	}
+
+	/**
 	 * Six `Texture` instances, one per `NormalId`, so the whole surface is painted.
 	 *
 	 * A `Texture` covers exactly one `Face`, so "all sides" on a primitive part is six instances and
@@ -2704,6 +3109,13 @@ export class BallSpawnerService implements OnStart {
 	 * leave four fifths of every body bare, which reads as a rendering bug. Six instances per body
 	 * against a live cap of 50 is 300 extra instances, all created once and never touched again; that
 	 * is cheap relative to what a custom mesh (the only single-object alternative) would cost.
+	 *
+	 * **This is now the fallback rather than the rule (item 242).** A ball whose id has a template in
+	 * `ServerStorage.BallModels` is drawn by `attachBallModel`'s welded mesh and never reaches this
+	 * function at all, which is the whole point of the mesh swap: one instance instead of six, and art
+	 * the designer can author instead of a tiled image on a curved primitive. What is left here is the
+	 * honest degradation for a body with no model — every ball in a scene where the folder was never
+	 * authored, and every ball whose template name is missing.
 	 *
 	 * Applied to every shape in the pool, not just spheres. The faces of a cylinder, block or corner
 	 * wedge are the same six `NormalId` faces, so the same loop covers them; a texture on the "wrong"

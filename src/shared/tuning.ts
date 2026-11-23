@@ -1600,6 +1600,21 @@ export const MOTION_BLUR_FOLDER_NAME = "SpawnedMotionBlur";
 export const BALL_PHANTOM_NAME = "BallPhantom";
 
 /**
+ * The name of the **welded mesh** a modelled ball carries, created by `BallSpawnerService.attachBallModel` as a child of
+ * the body it draws.
+ *
+ * **Cross-side, which is why it is here rather than in the spawner.** The server creates it and welds it; the client's
+ * `BallRenderController` finds it with one `FindFirstChild` and clones the *mesh* into its phantom instead of building a
+ * sphere and copying face textures. Two sides agreeing on a name is exactly what `BALL_PHANTOM_NAME` above is doing, so the
+ * pair live together.
+ *
+ * **It is a child of the body** — not a sibling in a folder — for the reason the markers are: `Destroy()` on the body takes
+ * it with it, so the cap, the kill plane and round teardown cannot leak a mesh that outlives its ball. It is welded rather
+ * than anchored because a mesh that stayed at the spawn pose would be left behind on the first frame the body moved.
+ */
+export const BALL_MODEL_NAME = "BallModel";
+
+/**
  * The name of the client-only avatar overlay, created by `BallAvatarController` as a child of the ball it belongs to.
  *
  * Same reason as `BALL_PHANTOM_NAME`: as a child of the body it is destroyed with it, and "does this body have exactly one

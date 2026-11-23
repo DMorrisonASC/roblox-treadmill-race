@@ -8744,3 +8744,53 @@ Whether `GothamBlack` covers U+25C0/U+25B6 at 96 px (and whether the fallback fa
 ### Validation
 
 `npm run build` exit 0; **`npm test` = 581 passed in 45 files** (was 566/44 - the new spec is the 15); `npm run lint` 0 errors with the same **55** pre-existing `viewport.ts` warnings; `prettier --check "src/**/*.ts"` clean apart from that same pre-existing file; `grep "\uXXXX" src` = 0 (the glyphs are literal UTF-8 in `tuning.ts`); `flamework.build` carries exactly one `steering-hint-controller` entry.
+## 242 - Ten welded meshes: the body is still the body, and the phantom clones the mesh instead of the faces
+
+The table in `models.config.ts` had been a declaration for several rounds - every `model` `undefined`, nothing reading it, a spec asserting the shape of the omission. This round fills it, wires it, and answers the one thing the prompt could not: **what happens to the phantom**, because the phantom is what the mesh swap breaks.
+
+### Parts 1 and 4 first: the layout, and the regression that was not one
+
+**The layout the table assumes is `ServerStorage.BallModels`**, with ten `camelCase`-named children (`bullyBall` … `sprinterBall`). `default.project.json` has **no `ServerStorage` node at all** - verified by grep over both the project file and `build/game.rbxlx` (`class="ServerStorage"` returns zero) - so on a place built from this repo the folder can only come from the scene. That is why the probe is loud: `checkModelLayout` waits 5 s on its own thread, then prints either `[Spawner] model: 10 templates in ServerStorage.BallModels (...)`, or a `warn` naming the path, the count it expected and **the ten names**, or - the case nobody would otherwise see - a `warn` naming **which of the ten are missing** and listing what the folder actually holds as `name(ClassName)` pairs.
+
+**The phantom was kept, and it clones the mesh.** The prompt offered "keep the phantom and the textures" (two visuals, a clash) or "drop the phantom, lose the roll". The third option is better than either and costs one function: `BallRenderController.track` looks for the welded child named `BALL_MODEL_NAME` and, when it finds one, builds the phantom from a **clone of that mesh** instead of a sphere with six cloned `Texture`s. Everything item 98 bought survives - the anchored/anchored-nothing roll, the ghost fade, the markers posed inside the phantom's frame - and the *visual* changes from a tiled image to authored art. **What is lost: nothing visible.** What is gained in cost: a phantom is now a mesh instance rather than a part, so a full belt is ~100 mesh instances rather than 50 meshes + 300 textures.
+
+Two traps came out of that clone, and both are written where they bite:
+1. **The server parents the `WeldConstraint` to the mesh** (the prompt's Part 2 requirement), so the weld is *inside* the subtree `Clone()` copies, and its `Part0` still points at the body. Left in, the phantom would be welded to the physics body, the solver would own its `CFrame`, and the roll would silently stop on modelled balls only. `buildModelPhantom` destroys every `WeldConstraint` in the clone.
+2. **`LocalTransparencyModifier = 1` on the body does not hide a child.** The welded mesh is a child, so it draws through the hidden body - the item-99 fact, one level up. The **source mesh** is hidden locally and the clone keeps its own value at `0`.
+
+### Verified against source, quoted
+
+- **`spawnBall` sizing**: `ball.Size = entry.size;` (`:1224`) - there is **no `BALL_SIZE` constant anywhere**; `entry.size` is `SHAPE_POOL[0].size = new Vector3(20, 20, 20)` (`shape-pool.ts:97`), reached through `pickPoolEntry()`.
+- **The texture attach**: `this.attachBallTexture(ball, entry);` (`:1300`) - now behind `if (!this.attachBallModel(ball, chosenBallId ?? ""))`, so a modelled body never creates the six `Texture` instances at all instead of creating and destroying them.
+- **`copyTextures` with no `Texture` children**: the loop simply finds none, the clone gets no skin, and the phantom would have been a plain coloured sphere drawn over the mesh. That is the clash the prompt predicted, and it is why the mesh branch exists rather than "remove the textures and hope".
+- **`spawnDecoy` does not go through `spawnBall`.** It builds `new Instance("Part")` itself and copies `Shape`/`Size`/`Material`/`Color` by hand (`:1500-1515`), so a twin would have been a plain sphere beside a mesh. It now calls the same `attachBallModel(decoy, chosenBallIdOf(parent))` - the id read off the **parent**, which is the only body that has one, exactly as `AvatarUserId` is copied.
+- **The markers read neither `ball.Size` nor a weld.** `attachBallMarkers` takes its radius from **`entry.size`** (`math.max(entry.size.X, entry.size.Y, entry.size.Z)`), and since item 29 there is **no `WeldConstraint`** in `createMarker` at all - the markers are `Anchored`, non-colliding and posed client-side from three `Vector3` attributes. So the prompt's Part 5 premise is wrong twice over, and the conclusion it reaches is right for a third reason: nothing to change. `marker-spin-controller` does read `body.Size.Y / 2`, but only as the radius in the *rate* fallback, and the body's `Size` is untouched.
+
+### How the mesh is scaled, and why the prompt's two options are not alternatives
+
+**`MeshPart.Size` is in studs; `SpecialMesh.Scale` is a multiplier** - `@rbxts/types` on `DataModelMesh.Scale`: *"determines the size of the mesh relative to its original dimensions"*. So only a `MeshPart` can be sized from a target, and the baseline is `MeshPart.MeshSize` (*"the original size of the part's source mesh geometry, before any scaling applied through `BasePart.Size`"*). The scale is **uniform**: `factor = max(ball.Size) / max(MeshSize)`, so the mesh spans 20 studs where it is widest and keeps its proportions - a per-axis `Size = (20,20,20)` would squash any art that was not authored as a cube. A `SpecialMesh` template is drawn at the `Scale` authored in Studio and **warns once**, naming the reason, because its original dimensions live inside the asset and no API reports them.
+
+### Decisions
+
+1. **Layout:** `ServerStorage.BallModels`, ten `camelCase` children. Not verifiable from this repo (no `ServerStorage` in the Rojo tree, no place file), so the probe fails loudly and the fallback is the sphere.
+2. **Scaling:** uniform from `MeshSize` to `max(ball.Size)` = 20 studs; `Size` written, `Scale` never touched.
+3. **Phantom:** kept, rebuilt from a clone of the mesh. Nothing visual is lost; the client pays one mesh per ball instead of six textures.
+4. **The decoy gets the mesh itself**, from the parent's `ChosenBallId` - it does not inherit it by spawning.
+5. **No template ⇒ the old sphere**, plus one warning per distinct problem (subject-keyed, capped at 12). A spawn never throws for art.
+
+### Where this prompt was wrong
+
+1. **"Three welded `Part`s are scaled from the body's `Size` (item 15)"** - they are not welded (item 29 removed the weld and anchored them), and they are sized from the **pool entry**, not the body. Part 5's answer is "no change" for a different reason than the prompt gave.
+2. **"`BALL_SIZE`"** - there is no such constant. The body's size is `ShapePoolEntry.size`, `20³`.
+3. **"Report whether the decoy goes through `spawnBall`"** - it does not, and it also copies `Color`/`Material` by hand, so "inherits for free" was never going to happen.
+4. **"`MeshPart.Size` in studs, or a `SpecialMesh.Scale`"** - treated as interchangeable alternatives; `Scale` is relative and cannot be computed, so a `SpecialMesh` template cannot be sized from code at all.
+5. **"Weld the mesh ... parented to the mesh, the shape item 15 used for the markers"** - item 15's shape was a weld *between two unanchored simulated parts*, which is exactly what broke the client-drawn markers in item 29. Using it here is right for a different reason (the mesh must travel with the body and the client de-welds its clone), not because the markers still do it.
+6. **"No change to any other VFX"** vs. the `decoy` outline: `DecoyOutlineController` adornees a `Highlight` to the **body**, and that body is now at `Transparency = 1` on the server. If a `Highlight` draws nothing for an invisible part the owner's cue disappears. Item 79 has been shipping that outline on a client-hidden body since it was written, which is the evidence that it does not - so nothing was changed, and the one-line fix (adornee the phantom) is written at the `Transparency` write rather than left to be rediscovered.
+
+### Studio-only
+
+That a meshed ball renders at 20 studs and does not z-fight (the body is `Transparency = 1` and the phantom is a separate clone, so any flicker is the *source* mesh not being hidden); that the phantom's clone is not dragged by the body (the weld-destroy path); that a decoy twin is indistinguishable - including the owner's red outline still drawing; that the markers land on the mesh's surface (they sit at the **sphere's** radius, so a template whose authored proportions are not cubic would show a pole floating off its narrow axis); and that fifty meshed bodies plus fifty mesh phantoms hold frame rate.
+
+### Validation
+
+`npm run build` exit 0; **`npm test` = 582 passed in 45 files** (581 + 1); `npm run lint` 0 errors with the same **55** pre-existing `viewport.ts` warnings; `prettier --check "src/**/*.ts"` clean apart from that same pre-existing file; `grep "\uXXXX" src` = 0; no controller or service was added, so `flamework.build` is unchanged (41 identifiers, all pre-existing). Tests whose assertions changed: `ball-tables.spec.ts`'s model-shape line (`assetId` → `templateName`, now asserted against a spec-local `camelCaseOf` derivation) and one new case for the naming convention plus `undefined`-not-a-default.

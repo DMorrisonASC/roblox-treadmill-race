@@ -334,8 +334,11 @@ Every body that carries a power also carries a `PowerBadge` `BillboardGui` namin
 server, parented to the body (so `Destroy()` on the ball removes it), fixed-size, `AlwaysOnTop`, and floats
 `POWER_BADGE_OFFSET_STUDS` above the ball's radius.
 
-**A `decoy` twin carries all four of these too** — the `Power` attribute, the badge, the six face textures and the three
-markers — because a decoy that looked different would be identifiable at a glance and the power would deceive nobody. It
+**A `decoy` twin carries all four of these too** — the `Power` attribute, the badge, the same visual (its welded mesh, or the
+six face textures when it has no template) and the three markers — because a decoy that looked different would be
+identifiable at a glance and the power would deceive nobody. The twin does **not** go through `spawnBall`, so it builds its
+own body and asks `attachBallModel` for the mesh itself, reading the ball id off its **parent**, which is the only body that
+has one. It
 still has **no owner attributes**, and that absence is what makes it an orphan rather than a competitor. The attribute and
 the badge are applied through `presentPower`, never `setPower`: `setPower` also fills the aura registries and connects a
 `Touched` handler, so a decoy made with it would project a real `magnet` or `eclipse` aura from a body the winner rule
@@ -431,9 +434,11 @@ place with your own parts:
 **This list is the short version; [`docs/powers-and-vfx.md`](docs/powers-and-vfx.md) §8 is the one read from source.** Each line
 below was rejected or deferred on purpose, not forgotten — do not offer to add it.
 
-No mesh or model support — every `model` in [`src/shared/models.config.ts`](src/shared/models.config.ts)
-is `undefined`, and a test fails if a ball id has no entry, so the swap fails the suite rather than
-drawing the same sphere. No client prediction of **state**: the server owns the velocity and every client sees the
+**No mesh as the physics body** — every ball's body is still a `Part` sphere. The per-ball meshes are *visual*: templates in
+`ServerStorage.BallModels`, welded to the body with `WeldConstraint` and made inert (`CanCollide = false`, `Massless = true`),
+then cloned into the client's phantom so they roll. The body's `Size`, collision group, tag, attributes and `Position` are
+untouched, and a ball whose template is missing draws its textured sphere and says so once in the log.
+No client prediction of **state**: the server owns the velocity and every client sees the
 result a round trip later. The one exception is cosmetic - `ball-render-controller` draws the local player's own ball up
 to `PREDICTION_LAG_SECONDS` of steering ahead of the server and eases it back, so thumb-to-ball is not a round trip. Audio is **six one-shot UI sounds, one round song and two lobby songs** and nothing else — a button press, a
 granted purchase, a coin earn, a ball leaving the belt, a ball-ball hit, and a pickup that actually raised a ball's speed
@@ -459,7 +464,8 @@ play. A song's row is also the level its fade ramps _to_, which is why a missing
 **The VFX are five families, and none of them is a world aura:** the power badge, the decoy owner's outline, a ball-ball hit
 burst — one clone of the Studio asset `ReplicatedStorage.assets.vfx.hitEffect`, resolved by recursive name, built on each client
 at the contact midpoint and destroyed by `Debris` — two per-ball trails (`windBoost` while a ball is at or above belt speed,
-`tailWind` while it is in regular motion), the ball phantom that draws each body's spinning texture (with a pickup sprite and ring
+`tailWind` while it is in regular motion), the ball phantom that draws each body's spinning skin — its six face textures on an
+unmodelled ball, a clone of its welded mesh on a modelled one — (with a pickup sprite and ring
 per pad, both built per client), and one arena-wide `motionBlur` overlay: a single clone of
 `ReplicatedStorage.assets.vfx.motionBlur` placed at the `EliminationZone`, alive only during `Playing`, with every emitter's `Rate`
 ramped from 0 to its authored value over half a second and back down again when the phase leaves. **Two of those families are not

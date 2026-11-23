@@ -68,6 +68,14 @@ re-derive a power's worth from its row.
 `powerForBallId(ballId)` returns `undefined` for an unknown id **on purpose** — a profile from an older build must produce a body
 with **no** `Power` attribute rather than a guessed power.
 
+**Appearance is a second table, keyed by the same ids.** [`src/shared/models.config.ts`](../src/shared/models.config.ts) →
+`BALL_MODELS` names, for each ball, a template in **`ServerStorage.BallModels`** — `bully_ball` → `bullyBall`, and the same
+`camelCase` rule for all ten. The ball id stays `snake_case` because it is persisted in profiles; the template name is an
+authored Instance name. `BallSpawnerService.attachBallModel` clones the template, welds it to the body with `WeldConstraint`,
+scales it uniformly to `BALL_SIZE` and hides the sphere underneath it. **The mesh is never the physics body**: the body keeps its
+`Size`, its collision group, its `Ball` tag, its attributes and its `Position`, and the mesh is `CanCollide = false` /
+`Massless = true`. A ball whose template is missing draws its ordinary textured sphere and says so once in the log.
+
 ---
 
 ## 3. The per-power rules — read this before you change X
@@ -292,7 +300,7 @@ proven rather than assumed.
 | tail wind (`tailWind`) | `TailWind` attribute change | `tail-wind-controller` | `assets.vfx.tailWind` | clone parented to the ball | same |
 | *(both trails and the burst)* | orientation and scale | — | — | — | face the belt's **start** (`vfxForward`), size from the ball (`effectScaleFor(ball, ownMultiplier)` / `effectScaleForRadius(radius, ownMultiplier)`), each tuner in `shared/config/` |
 | arena motion blur | phase `Playing` | `motion-blur-controller` | `assets.vfx.motionBlur` | `Workspace` folder, placed at the `EliminationZone` | one clone for the phase; emitter `Rate` ramped 0 → authored → 0 |
-| ball phantom (texture spin) | every frame per ball | `ball-render-controller` | none — a `Part` + copies of the ball's six face textures | parented to the ball, named `BALL_PHANTOM_NAME` | follows the ball; normalises its basis every 300 frames |
+| ball phantom (skin spin) | every frame per ball | `ball-render-controller` | none — a `Part` + copies of the ball's six face textures, **or a clone of the ball's welded mesh** when it has one | parented to the ball, named `BALL_PHANTOM_NAME` | follows the ball; normalises its basis every 300 frames |
 | pickup sprite + ring | phase / pickup spawn | `pickup-sprite-controller` | `pickupSprite` instance **or** `PICKUP_SPRITE_ASSET_ID` | a `BillboardGui` per pad, built per client | destroyed with the pad |
 | elimination splash | `Remotes.EliminationSound` | `elimination-splash-controller` | none — `TextLabel` in code | `splash` layer (35) | pops, holds, fades, `Destroy()` after ~0.95 s |
 | decoy owner's outline | `Remotes.DecoyOutline` | `decoy-outline-controller` | none — a `Highlight` | on the named body, for its owner only | one per client, moved to the named body |
@@ -344,6 +352,12 @@ agent looking for its controller will not find one.
 - **ball phantom** — the ball's own part is invisible and the phantom draws; the six face textures have to be copied and hidden
   separately, because a `Decal`/`Texture` renders on an invisible part. Spin comes from
   [`shared/apparent-spin.ts`](../src/shared/apparent-spin.ts) so the phantom and `marker-spin-controller` cannot disagree.
+  **On a modelled ball the phantom is a clone of the welded mesh instead** (item 242): same architecture, same spin maths, same
+  hide-the-source rule one level up (the source *mesh* is hidden with `LocalTransparencyModifier`, not just the body, for the
+  same reason the textures are). Two differences worth knowing: a clone of the mesh carries a clone of its `WeldConstraint`, so
+  `buildModelPhantom` destroys every constraint in the clone or the solver owns the phantom's `CFrame` and the roll silently
+  stops; and a `MeshPart`'s own texture does **not** render through `Transparency = 1` the way a `Texture` child does, so the
+  ghost fade is a single property write there.
   **The rate is `SPIN_BASE_RAD_PER_SEC (10) + APPARENT_SPIN_GAIN (0.5) x BALL_SPEED / BASE_BALL_RADIUS`, which is simply
   `10 + BALL_SPEED`** — so a ball sliding at `BALL_SPEED = 0` still rolls (item 196; the old form returned `0` there, which is
   the sliding case, not the parked one). **Both controllers gate the accumulation on the phase**: outside `Playing` nothing

@@ -4,7 +4,7 @@ import { BALL_SPEED_ATTRIBUTE, GHOST_ACTIVE_ATTRIBUTE, OWNER_USER_ID_ATTRIBUTE }
 import { GHOST_TRANSPARENCY_WHILE_ACTIVE } from "shared/config/ghost.config";
 import { ROUND_STATE_VALUE_NAME } from "shared/remotes";
 import { TAGS } from "shared/tags";
-import { BALL_PHANTOM_NAME, STEER_SPEED } from "shared/tuning";
+import { BALL_MODEL_NAME, BALL_PHANTOM_NAME, STEER_SPEED } from "shared/tuning";
 import { apparentSpinAxis, apparentSpinRate } from "shared/apparent-spin";
 import { currentSteerAxis } from "client/controllers/steer-controller";
 
@@ -225,6 +225,79 @@ export class BallRenderController implements OnStart {
 			return;
 		}
 
+		// **The mesh wins when the body has one** (item 242). A modelled ball carries a welded `MeshPart` (or a `Part` with a
+		// `SpecialMesh`) named `BALL_MODEL_NAME`; its phantom is a clone of *that* instead of a sphere carrying clones of six
+		// face textures. Same architecture as item 98 - one client-side, anchored, non-colliding part that is posed per frame
+		// while the server's body is hidden - so the roll, the ghost fade and the marker poses all keep working, and the only
+		// thing that changed is what the phantom is a copy of.
+		const model = ball.FindFirstChild(BALL_MODEL_NAME);
+		const phantom =
+			model !== undefined && model.IsA("BasePart")
+				? this.buildModelPhantom(ball, model)
+				: this.buildSpherePhantom(ball);
+
+		phantom.Parent = ball;
+		this.phantoms.set(ball, {
+			phantom,
+			spin: new CFrame(),
+			framesSinceNormalize: 0,
+			dimmed: false,
+			local: ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE) === Players.LocalPlayer.UserId,
+		});
+
+		// Hidden only once the skin exists, so there is no frame in which the ball has vanished and nothing has replaced it.
+		ball.LocalTransparencyModifier = 1;
+	}
+
+	/**
+	 * The phantom for a **modelled** ball: a clone of the welded mesh, made inert and re-parented to stand in for the body.
+	 *
+	 * ## What is copied, and what must not be
+	 *
+	 * `Clone()` carries every visual property exactly — size, colour, material, `TextureId`, a `SpecialMesh` child, a
+	 * `SurfaceAppearance` — which is the same argument `copyTextures` makes about cloning the `Texture`s: re-creating the
+	 * appearance here would be a second implementation of a thing the server already decided.
+	 *
+	 * **Every `WeldConstraint` in the clone is destroyed, and that is not defensive tidying.** The server parents the weld to
+	 * the mesh, so it is *inside* the subtree this clone copies, and its `Part0` is the body — a live `Instance` reference
+	 * that survives the clone. Left in place, the phantom would be welded to the physics body: the solver would own its
+	 * `CFrame`, every per-frame write below would be overwritten, and the roll would silently stop. That is a whole class of
+	 * bug that only appears on a modelled ball, so the loop is the guard.
+	 *
+	 * ## Why the *source* is hidden rather than the clone
+	 *
+	 * The same trap item 99 records for the face textures, one level up: `LocalTransparencyModifier = 1` on the **body**
+	 * hides the body's surfaces, not its children, and the welded mesh is a child. So the source mesh is hidden on this
+	 * client (`LocalTransparencyModifier`, local-only, so the server's copy and every other client are untouched) and the
+	 * clone — which is this client's own object — draws normally.
+	 */
+	private buildModelPhantom(ball: BasePart, model: BasePart): BasePart {
+		const phantom = model.Clone();
+		phantom.Name = BALL_PHANTOM_NAME;
+		phantom.Anchored = true;
+		phantom.CanCollide = false;
+		phantom.CanQuery = false;
+		phantom.CanTouch = false;
+		phantom.CastShadow = false;
+		// The body's position, exactly as the sphere path poses its own first frame: the mesh was welded at the body's own
+		// `CFrame`, so it has no local offset to carry and `step` overwrites this with `position * spin` on the next frame
+		// anyway. Composing an offset here would only make the first frame disagree with every later one.
+		phantom.CFrame = new CFrame(ball.Position);
+
+		for (const child of phantom.GetChildren()) {
+			if (child.IsA("WeldConstraint")) {
+				child.Destroy();
+			}
+		}
+
+		// Hidden after the clone exists, so there is no frame in which the welded mesh has gone and nothing has replaced it.
+		model.LocalTransparencyModifier = 1;
+
+		return phantom;
+	}
+
+	/** The phantom for an unmodelled ball: a sphere carrying clones of the body's six face textures (item 98). */
+	private buildSpherePhantom(ball: BasePart): BasePart {
 		const phantom = new Instance("Part");
 		phantom.Name = BALL_PHANTOM_NAME;
 		// **`Ball` explicitly, not copied from the ball.** `Shape` is declared on `Part`, not `BasePart`, and this tree's pool is
@@ -253,17 +326,7 @@ export class BallRenderController implements OnStart {
 
 		this.copyTextures(ball, phantom);
 
-		phantom.Parent = ball;
-		this.phantoms.set(ball, {
-			phantom,
-			spin: new CFrame(),
-			framesSinceNormalize: 0,
-			dimmed: false,
-			local: ball.GetAttribute(OWNER_USER_ID_ATTRIBUTE) === Players.LocalPlayer.UserId,
-		});
-
-		// Hidden only once the skin exists, so there is no frame in which the ball has vanished and nothing has replaced it.
-		ball.LocalTransparencyModifier = 1;
+		return phantom;
 	}
 
 	/**
